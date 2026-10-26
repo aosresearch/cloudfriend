@@ -1,0 +1,105 @@
+re3-ob-emailservice_f1-3                 events=69240 pos=268 cascade: flags=2 to_jev=0.11% detected=true ttd=24.622s pre=0 | jev $0.141 calls=50 cached=0
+re3-ob-emailservice_f1-1                 events=70214 pos=292 cascade: flags=3 to_jev=0.11% detected=true ttd=19.241s pre=0 | jev $0.163 calls=56 cached=0
+re3-ob-adservice_f5-2                    events=72445 pos=4267 cascade: flags=2 to_jev=0.13% detected=true ttd=22.59s pre=0 | jev $0.190 calls=65 cached=0
+re3-ob-emailservice_f1-2                 events=70378 pos=270 cascade: flags=3 to_jev=0.10% detected=true ttd=26.598s pre=0 | jev $0.220 calls=75 cached=0
+re3-ob-adservice_f5-3                    events=72238 pos=4364 cascade: flags=3 to_jev=0.09% detected=true ttd=19.078s pre=0 | jev $0.231 calls=81 cached=0
+re3-ob-adservice_f5-1                    events=71263 pos=4254 cascade: flags=4 to_jev=0.11% detected=true ttd=22.215s pre=1 | jev $0.534 calls=179 cached=0
+re3-ss-front-end_f3-1                    events=46800 pos=14 cascade: flags=9 to_jev=0.69% detected=true ttd=35.063s pre=7 | jev $0.716 calls=240 cached=0
+re3-ss-carts_f4-2                        events=84555 pos=455 cascade: flags=13 to_jev=0.23% detected=true ttd=3.508s pre=6 | jev $0.742 calls=256 cached=0
+re3-ss-carts_f4-4                        events=84925 pos=350 cascade: flags=9 to_jev=0.19% detected=true ttd=16.07s pre=5 | jev $0.761 calls=262 cached=0
+re3-ss-front-end_f3-2                    events=47848 pos=14 cascade: flags=3 to_jev=0.42% detected=true ttd=33.724s pre=2 | jev $0.824 calls=279 cached=0
+re3-ss-carts_f4-1                        events=84024 pos=4 cascade: flags=10 to_jev=0.20% detected=true ttd=21.89s pre=7 | jev $0.848 calls=290 cached=0
+re3-tt-ts-auth-service_f3-2              events=44846 pos=2480 cascade: flags=5 to_jev=0.45% detected=true ttd=58.39s pre=0 | jev $1.110 calls=376 cached=0
+re3-tt-ts-auth-service_f3-3              events=44318 pos=2587 cascade: flags=4 to_jev=0.37% detected=true ttd=47.293s pre=0 | jev $1.138 calls=388 cached=0
+re3-ss-carts_f4-3                        events=83802 pos=5 cascade: flags=9 to_jev=0.21% detected=true ttd=10.931s pre=3 | jev $1.151 calls=394 cached=0
+re3-tt-ts-auth-service_f3-1              events=43517 pos=2518 cascade: flags=8 to_jev=0.42% detected=true ttd=40.705s pre=0 | jev $1.371 calls=447 cached=0
+re3-tt-ts-auth-service_f3-4              events=20086 pos=2589 cascade: flags=4 to_jev=0.84% detected=true ttd=58.712s pre=0 | jev $1.435 calls=470 cached=0
+re3-ss-front-end_f3-3                    events=48110 pos=7 cascade: flags=5 to_jev=0.37% detected=true ttd=34.254s pre=4 | jev $1.485 calls=494 cached=0
+re3-tt-ts-route-service_f2-2             events=68219 pos=147 cascade: flags=3 to_jev=0.29% detected=true ttd=17.851s pre=0 | jev $1.544 calls=528 cached=0
+re3-tt-ts-route-service_f2-1             events=74449 pos=134 cascade: flags=4 to_jev=0.27% detected=true ttd=18.786s pre=0 | jev $1.549 calls=530 cached=0
+re3-tt-ts-route-service_f2-3             events=71323 pos=140 cascade: flags=4 to_jev=0.28% detected=true ttd=12.401s pre=0 | jev $1.549 calls=531 cached=0
+{
+ "aggregate": {
+  "cascade": {
+   "events": 1272600,
+   "asked_jev": 3173,
+   "jev_calls": 531,
+   "share_to_jev": 0.002493320760647493,
+   "flags": 107,
+   "re3_cases": 20,
+   "re3_detectable_cases": 20,
+   "re3_detected": 20,
+   "re3_detected_precise": 20,
+   "re3_median_ttd_s": 22.59,
+   "re3_false_flags_before_fault": 35,
+   "re3_cases_with_false_flag": 8
+  },
+  "classifier": {
+   "events": 1272600,
+   "asked_jev": 0,
+   "jev_calls": 0,
+   "share_to_jev": 0,
+   "flags": 161,
+   "re3_cases": 20,
+   "re3_detectable_cases": 20,
+   "re3_detected": 20,
+   "re3_detected_precise": 20,
+   "re3_median_ttd_s": 22.639,
+   "re3_false_flags_before_fault": 1,
+   "re3_cases_with_false_flag": 1
+  },
+  "keyword": {
+   "events": 1272600,
+   "asked_jev": 0,
+   "jev_calls": 0,
+   "share_to_jev": 0,
+   "flags": 1145,
+   "re3_cases": 20,
+   "re3_detectable_cases": 20,
+   "re3_detected": 20,
+   "re3_detected_precise": 20,
+   "re3_median_ttd_s": 22.334,
+   "re3_false_flags_before_fault": 606,
+   "re3_cases_with_false_flag": 20
+  },
+  "jev-all": {
+   "events": 1272600,
+   "asked_jev": 7854,
+   "jev_calls": 750,
+   "share_to_jev": 0.006171617161716172,
+   "flags": 0,
+   "re3_cases": 20,
+   "re3_detectable_cases": 20,
+   "re3_detected": 0,
+   "re3_detected_precise": 0,
+   "re3_median_ttd_s": null,
+   "re3_false_flags_before_fault": 0,
+   "re3_cases_with_false_flag": 0
+  }
+ },
+ "jev": {
+  "live": true,
+  "model": "typesafe/jev-router",
+  "calls": 531,
+  "cached_calls": 0,
+  "skipped_calls": 0,
+  "spent_usd": 1.5485970660000008,
+  "prompt_tokens": 855368,
+  "completion_tokens": 162144,
+  "median_latency_ms": 2127,
+  "routed_to": {
+   "z-ai/glm-5.3": 29,
+   "anthropic/claude-opus-5.5": 11,
+   "anthropic/claude-sonnet-5.5": 27,
+   "meta/muse-spark-1.2": 86,
+   "google/gemini-3.8-flash": 179,
+   "openai/gpt-6-luna": 50,
+   "z-ai/glm-5.3-flash": 40,
+   "openai/gpt-6.1-sol": 34,
+   "anthropic/claude-fable-5.1": 7,
+   "x-ai/grok-4.7": 24,
+   "openai/gpt-6-astra": 8,
+   "deepseek/deepseek-v4.1-flash-1017": 36
+  }
+ }
+}

@@ -1,0 +1,18 @@
+gaia-2021-08-11                          events=3423625 pos=1307 cascade: flags=2 to_jev=0.15% false=0 inc=2/26 | jev $0.000 calls=0 cached=0
+file:///home/user/cloudfriend/ml/evaluate.ts:170
+          source: e.source,
+                    ^
+
+TypeError: Cannot read properties of undefined (reading 'source')
+    at file:///home/user/cloudfriend/ml/evaluate.ts:170:21
+    at Array.map (<anonymous>)
+    at Sim.flush (file:///home/user/cloudfriend/ml/evaluate.ts:166:51)
+    at Sim.push (file:///home/user/cloudfriend/ml/evaluate.ts:146:151)
+    at runChain (file:///home/user/cloudfriend/ml/evaluate.ts:314:37)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async file:///home/user/cloudfriend/ml/evaluate.ts:389:18
+    at async Promise.all (index 0)
+    at async pool (file:///home/user/cloudfriend/ml/evaluate.ts:385:3)
+    at async file:///home/user/cloudfriend/ml/evaluate.ts:405:15
+
+Node.js v22.22.0
