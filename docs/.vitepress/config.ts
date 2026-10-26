@@ -3,13 +3,11 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "cloudfriend",
   description: "Live event triage in one container: events in, a model flags what matters, actions fire on the flags.",
-  // Served from cloudfriend.dev/docs/. Set DOCS_BASE=/ to host at a domain root.
-  base: process.env.DOCS_BASE ?? "/docs/",
-  // Pages are emitted as `page.html` and linked that way, so a plain S3/CloudFront origin serves
-  // them without rewrite rules.
-  cleanUrls: false,
+  // Served at the root of docs.cloudfriend.dev. Links drop `.html`; the CDN maps `/page` to `page.html`.
+  cleanUrls: true,
   themeConfig: {
     nav: [{ text: "cloudfriend.dev", link: "https://cloudfriend.dev" }],
+    socialLinks: [{ icon: "github", link: "https://github.com/aosresearch/cloudfriend" }],
     sidebar: [
       { text: "Setup", link: "/" },
       {
