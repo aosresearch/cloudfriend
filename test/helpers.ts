@@ -25,6 +25,8 @@ export function testConfig(over: Partial<Config> = {}): Config {
     batchWaitMs: 60_000,
     pollMs: 10,
     cleanupIntervalMs: 3_600_000,
+    // The v0 tests check the pipeline without the classifier; test/triage.test.ts turns it on.
+    triage: false,
     ...over,
   };
 }

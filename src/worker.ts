@@ -4,7 +4,10 @@ import { tx, type DB } from "./db.ts";
 import type { Intake } from "./intake.ts";
 import { errMsg, log } from "./log.ts";
 import { EVENT_COLUMNS, eventsByIds, getFlagRow, toEvent, toFlag, type EventRow } from "./store.ts";
-import type { ActionAdapter, DeciderAdapter, FlagDraft, ParsedEvent, SourceAdapter } from "./types.ts";
+import { applyVerdicts, planBatch, type Outcome, type Pending } from "./triage/cascade.ts";
+import type { Triage } from "./triage/runtime.ts";
+import { FEATURIZER_VERSION } from "./triage/features.ts";
+import type { ActionAdapter, CloudfriendEvent, DeciderAdapter, FlagDraft, ParsedEvent, SourceAdapter } from "./types.ts";
 
 export interface WorkerOptions {
   db: DB;
@@ -13,6 +16,8 @@ export interface WorkerOptions {
   /** null: events are stored but nothing decides on them until a decider is configured. */
   decider: { name: string; adapter: DeciderAdapter } | null;
   actions: Map<string, ActionAdapter>;
+  /** null: every event goes to the decider as in v0, with no classifier, grouping or labels. */
+  triage?: Triage | null;
   env: NodeJS.ProcessEnv;
   batchSize: number;
   batchWaitMs: number;
@@ -51,6 +56,8 @@ export class Worker {
   #inflight = new Set<number>();
   #decides = new Set<Promise<void>>();
   #delivering: Promise<number> | null = null;
+  /** Since start: decider calls, examples asked, events settled by a cached verdict. */
+  readonly counters = { deciderCalls: 0, asked: 0, cached: 0, direct: 0 };
   #deciderFailures = 0;
   #deciderRetryAt = 0;
   #stmts;
@@ -62,11 +69,19 @@ export class Worker {
       newRows: db.prepare("SELECT id, source, received_at, body FROM queue WHERE status = 'new' ORDER BY id LIMIT ?"),
       setStatus: db.prepare("UPDATE queue SET status = ? WHERE id = ?"),
       insertEvent: db.prepare(
-        "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key, score, route, template, features, user_key, decided) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ),
       pending: db.prepare("SELECT id, received_at FROM events WHERE decided = 0 ORDER BY id LIMIT ?"),
       insertFlag: db.prepare(
-        "INSERT INTO flags (id, created_at, reason, severity, event_ids, decider) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO flags (id, created_at, reason, severity, event_ids, decider, status, updated_at, event_count, users) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+      ),
+      attachToFlag: db.prepare(
+        "UPDATE flags SET event_ids = ?, event_count = coalesce(event_count, 0) + ?, updated_at = ? WHERE id = ?",
+      ),
+      insertLabel: db.prepare(
+        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at)
+         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ? FROM events WHERE id = ? AND features IS NOT NULL
+         ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, created_at = excluded.created_at WHERE labels.source <> 'human'`,
       ),
       insertDelivery: db.prepare(
         "INSERT INTO deliveries (flag_id, action, next_attempt_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -94,6 +109,7 @@ export class Worker {
     this.#schedule(0);
     this.#cleanupTimer = setInterval(() => {
       this.cleanup().catch((err) => log.error("cleanup failed", { error: errMsg(err) }));
+      this.saveTriageState();
     }, this.#o.cleanupIntervalMs);
     this.#cleanupTimer.unref();
   }
@@ -119,6 +135,16 @@ export class Worker {
       });
     }
     this.#abort.abort(new Error("shutting down"));
+    this.saveTriageState();
+  }
+
+  /** Persist the featurizer's history so a restart doesn't make every template look new. */
+  saveTriageState(): void {
+    try {
+      this.#o.triage?.saveState();
+    } catch (err) {
+      log.warn("saving triage state failed", { error: errMsg(err) });
+    }
   }
 
   /** Resolves once the decide() calls and delivery pass running right now have finished. */
@@ -176,10 +202,22 @@ export class Worker {
         return { row, events: null };
       }
     });
+    const triage = this.#o.triage;
+    // Without a classifier or a decider there is nothing to route to: events wait, as in v0.
+    const routing = triage && (triage.classifier || this.#o.decider);
     tx(this.#o.db, () => {
       for (const { row, events } of results) {
         for (const e of events ?? []) {
-          this.#stmts.insertEvent.run(row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key);
+          if (!triage) {
+            this.#stmts.insertEvent.run(row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key, null, null, null, null, null, 0);
+            continue;
+          }
+          const t = triage.score(row.source, row.received_at, e.parsed);
+          const route = routing ? t.route : null;
+          this.#stmts.insertEvent.run(
+            row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key,
+            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0,
+          );
         }
         this.#stmts.setStatus.run(events ? "done" : "failed", row.id);
       }
@@ -192,7 +230,7 @@ export class Worker {
 
   /** Start decide() calls for every batch that is full or has waited long enough. */
   startDueBatches(now = Date.now()): void {
-    if (!this.#o.decider || now < this.#deciderRetryAt) return;
+    if (!(this.#o.decider || this.#o.triage?.classifier) || now < this.#deciderRetryAt) return;
     while (this.#decides.size < this.#o.deciderConcurrency) {
       const rows = this.#stmts.pending.all(this.#o.batchSize + this.#inflight.size) as unknown as {
         id: number;
@@ -216,6 +254,7 @@ export class Worker {
   }
 
   async #decideBatch(ids: number[]): Promise<void> {
+    if (this.#o.triage) return this.#triageBatch(ids, this.#o.triage);
     const { name, adapter } = this.#o.decider!;
     const rows = this.#o.db
       .prepare(`SELECT ${EVENT_COLUMNS} FROM events WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`)
@@ -246,6 +285,104 @@ export class Worker {
     if (flags.length && !this.#delivering) this.#schedule(0);
   }
 
+  /**
+   * The cascade: events routed past the classifier are grouped by template, cached verdicts
+   * are reused, and only the remaining examples go to the decider (Jev). Its verdicts become
+   * flags, cache entries and training labels, all stored in one transaction.
+   */
+  async #triageBatch(ids: number[], triage: Triage): Promise<void> {
+    const db = this.#o.db;
+    const rows = db
+      .prepare(`SELECT ${EVENT_COLUMNS}, template FROM events WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`)
+      .all(...ids) as unknown as (EventRow & { score: number | null; route: string | null; template: string | null })[];
+    const decider = this.#o.decider;
+    const threshold = triage.classifier?.file.threshold ?? 0.5;
+    const now = Date.now();
+    const items: Pending[] = rows.map((r) => {
+      let route = (r.route ?? "jev") as Pending["route"];
+      // Routed to Jev while one was configured, but there is none now: the classifier decides.
+      if (!decider && (route === "jev" || route === "audit" || route === "novel" || route === "auto")) route = (r.score ?? 0) >= threshold ? "classifier" : "drop";
+      return { id: String(r.id), template: r.template ?? `${r.source}|`, score: r.score, route };
+    });
+    // A cached "escalate" verdict only holds while its flag is still in the queue.
+    for (const it of items) {
+      const v = triage.cache.get(it.template, now);
+      if (v?.flagId && !this.#flagOpen(v.flagId)) triage.cache.delete(it.template);
+    }
+    const plan = planBatch(items, triage.cache, now, triage.opts.perTemplate);
+    let drafts: FlagDraft[] = [];
+    const started = Date.now();
+    if (plan.ask.length && decider) {
+      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      const events: CloudfriendEvent[] = plan.ask.map(({ item, similar }) => ({
+        ...toEvent(byId.get(item.id)!),
+        triage: { score: item.score ?? 0, similar },
+      }));
+      try {
+        drafts = await decider.adapter.decide(events, { env: this.#o.env, signal: this.#abort.signal });
+        if (!Array.isArray(drafts)) throw new Error("decide() must return an array");
+        if (this.#abort.signal.aborted) return;
+      } catch (err) {
+        if (this.#stopped) return;
+        this.#deciderFailures++;
+        const wait = deciderBackoff(this.#deciderFailures);
+        this.#deciderRetryAt = Date.now() + wait;
+        log.error("decider failed; events stay queued", { decider: decider.name, events: events.length, retry_in_ms: wait, error: errMsg(err) });
+        return;
+      }
+      this.#deciderFailures = 0;
+      this.counters.deciderCalls++;
+      this.counters.asked += plan.ask.length;
+    }
+    this.counters.cached += plan.cached.length;
+    for (const g of plan.direct.values()) this.counters.direct += g.length;
+    const out = applyVerdicts(plan, drafts);
+    const flagIds = this.#storeOutcome(decider?.name ?? "classifier", ids, out, rows.map((r) => [String(r.id), r.user_key ?? null]));
+    out.verdicts.forEach((i, template) => triage.cache.set(template, i >= 0, now, i >= 0 ? flagIds[i] : undefined));
+    log.info("batch decided", {
+      events: ids.length,
+      asked: plan.ask.length,
+      cached: plan.cached.length,
+      flags: flagIds.length,
+      ms: Date.now() - started,
+    });
+    if (flagIds.length && !this.#delivering) this.#schedule(0);
+  }
+
+  #flagOpen(id: string): boolean {
+    const row = this.#o.db.prepare("SELECT status FROM flags WHERE id = ?").get(id) as { status: string } | undefined;
+    return row?.status === "open" || row?.status === "acknowledged";
+  }
+
+  #storeOutcome(decider: string, ids: number[], out: Outcome, users: [string, string | null][]): string[] {
+    const now = Date.now();
+    const actions = [...this.#o.actions.keys()];
+    const userOf = new Map(users);
+    const flagIds: string[] = [];
+    tx(this.#o.db, () => {
+      for (const f of out.flags) {
+        const id = "flg_" + randomBytes(10).toString("hex");
+        const linked = [...new Set(f.event_ids.map((e) => userOf.get(e)).filter(Boolean))].slice(0, 20);
+        this.#stmts.insertFlag.run(
+          id, now, f.reason.trim(), f.severity ?? "medium", JSON.stringify(f.event_ids.slice(0, 1000)),
+          f.via === "classifier" ? "classifier" : decider, now, f.event_ids.length, linked.length ? JSON.stringify(linked) : null,
+        );
+        for (const action of actions) this.#stmts.insertDelivery.run(id, action, now, now);
+        flagIds.push(id);
+      }
+      for (const [flagId, evs] of out.attach) {
+        const row = getFlagRow(this.#o.db, flagId);
+        if (!row) continue;
+        const merged = [...new Set([...(JSON.parse(row.event_ids) as string[]), ...evs])].slice(0, 1000);
+        this.#stmts.attachToFlag.run(JSON.stringify(merged), evs.length, now, flagId);
+      }
+      for (const l of out.labels) this.#stmts.insertLabel.run(l.y, now, Number(l.id));
+      for (const id of ids) this.#stmts.markDecided.run(id);
+    });
+    for (const id of flagIds) log.info("flag raised", { flag: id });
+    return flagIds;
+  }
+
   #storeDecision(decider: string, ids: number[], drafts: FlagDraft[]): string[] {
     const inBatch = new Set(ids.map(String));
     const now = Date.now();
@@ -256,7 +393,7 @@ export class Worker {
         const eventIds = [...new Set((d.event_ids ?? []).map(String))].filter((id) => inBatch.has(id));
         if (!eventIds.length || typeof d.reason !== "string" || !d.reason.trim()) continue;
         const id = "flg_" + randomBytes(10).toString("hex");
-        this.#stmts.insertFlag.run(id, now, d.reason.trim(), d.severity ?? "medium", JSON.stringify(eventIds), decider);
+        this.#stmts.insertFlag.run(id, now, d.reason.trim(), d.severity ?? "medium", JSON.stringify(eventIds), decider, now, eventIds.length, null);
         for (const action of actions) this.#stmts.insertDelivery.run(id, action, now, now);
         flagIds.push(id);
       }
@@ -344,6 +481,7 @@ function serialize(e: ParsedEvent) {
   if (!e || typeof e !== "object" || !("data" in e)) throw new Error("each parsed event needs a `data` field");
   const hint = (v: unknown) => (typeof v === "string" && v ? v.slice(0, 256) : typeof v === "number" ? String(v) : null);
   return {
+    parsed: e.data ?? null,
     data: JSON.stringify(e.data ?? null),
     id: hint(e.id),
     type: hint(e.type),

@@ -54,6 +54,42 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(next_attempt_at) WHERE status = 'pending';
 
+-- Training labels for the classifier: what Jev or a person decided about an event, with the
+-- feature vector the classifier saw. Copied out of events so labels outlive retention.
+-- source: jev | human. A human label always replaces a Jev label, never the other way round.
+CREATE TABLE IF NOT EXISTS labels (
+  event_id           INTEGER PRIMARY KEY,
+  y                  INTEGER NOT NULL,
+  source             TEXT    NOT NULL,
+  route              TEXT,
+  score              REAL,
+  features           BLOB    NOT NULL,
+  featurizer_version INTEGER NOT NULL,
+  event_source       TEXT    NOT NULL,
+  received_at        INTEGER NOT NULL,
+  data               TEXT    NOT NULL,
+  note               TEXT,
+  created_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS labels_created ON labels(created_at);
+
+-- Every classifier cloudfriend trained or loaded. status: active | candidate | rejected | retired
+CREATE TABLE IF NOT EXISTS models (
+  id         TEXT    PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  path       TEXT    NOT NULL,
+  status     TEXT    NOT NULL,
+  labels     INTEGER NOT NULL DEFAULT 0,
+  report     TEXT    NOT NULL
+);
+
+-- Small state that should survive restarts, e.g. the featurizer's template history.
+CREATE TABLE IF NOT EXISTS kv (
+  key        TEXT    PRIMARY KEY,
+  value      TEXT    NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS secrets (
   id           TEXT    PRIMARY KEY,
   name         TEXT    NOT NULL,
@@ -81,7 +117,34 @@ export function openDb(file: string, opts: OpenOptions = {}): DB {
     PRAGMA foreign_keys = ON;
   `);
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Columns added after v0. Each is added once, to databases that don't have it yet. */
+const COLUMNS: [table: string, column: string, decl: string][] = [
+  // Triage: the classifier's score, where the event went, its template and feature vector.
+  // route: drop | jev | audit | auto | classifier, or NULL when no triage ran.
+  ["events", "score", "REAL"],
+  ["events", "route", "TEXT"],
+  ["events", "template", "TEXT"],
+  ["events", "features", "BLOB"],
+  ["events", "user_key", "TEXT"],
+  // The escalation queue: open -> acknowledged -> resolved, or confirmed / false_positive by feedback.
+  ["flags", "status", "TEXT NOT NULL DEFAULT 'open'"],
+  ["flags", "updated_at", "INTEGER"],
+  ["flags", "event_count", "INTEGER"],
+  ["flags", "users", "TEXT"],
+  ["flags", "note", "TEXT"],
+];
+
+function migrate(db: DB): void {
+  for (const [table, column, decl] of COLUMNS) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
+    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS events_user ON events(user_key) WHERE user_key IS NOT NULL");
+  db.exec("CREATE INDEX IF NOT EXISTS flags_status ON flags(status, created_at)");
 }
 
 export function dbPath(dataDir: string): string {

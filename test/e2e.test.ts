@@ -75,7 +75,7 @@ describe("end to end: Sentry -> decider -> Slack", () => {
     assert.deepEqual(detail.deliveries.map((d: any) => [d.action, d.status]), [["slack", "ok"]]);
   });
 
-  it("does not flag routine events", async () => {
+  it("drops routine events with the classifier, without asking the model", async () => {
     const secret = /cloudfriend_[A-Za-z0-9_-]{43}/.exec(logs)![0];
     const before = openrouter.requests.length;
     const res = await fetch(`${base}/in/myapp`, {
@@ -84,8 +84,16 @@ describe("end to end: Sentry -> decider -> Slack", () => {
       body: JSON.stringify({ level: "info", msg: "user logged in" }),
     });
     assert.equal(res.status, 202);
-    await waitFor(() => openrouter.requests.length > before, 5_000);
-    await new Promise((r) => setTimeout(r, 100));
+    let event: any;
+    for (let i = 0; i < 100 && !event; i++) {
+      const list = (await (await fetch(`${base}/events?source=myapp`, { headers: { authorization: "Bearer admin" } })).json()) as any;
+      event = list.events[0];
+      if (!event) await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(event.route, "drop");
+    assert.ok(event.score < 0.1);
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(openrouter.requests.length, before);
     assert.equal(slack.requests.length, 1);
   });
 

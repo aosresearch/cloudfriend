@@ -26,6 +26,20 @@ export interface Config {
   adapterDir: string | null;
   /** How often the worker looks for new work when idle. */
   pollMs: number;
+  /** Classifier, grouping, verdict cache and labels in front of the decider. */
+  triage: boolean;
+  /** Model file to load instead of the active (or built-in) one. */
+  modelPath: string | null;
+  auditRate: number;
+  verdictTtlMs: number;
+  perTemplate: number;
+  novelGuard: boolean;
+  /** 0 turns scheduled retraining off. */
+  retrainIntervalMs: number;
+  retrainMinLabels: number;
+  humanLabelWeight: number;
+  recallTarget: number;
+  python: string;
 }
 
 const UNITS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
@@ -54,6 +68,22 @@ function duration(env: NodeJS.ProcessEnv, name: string, fallback: string): numbe
   }
 }
 
+function num(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${name} must be a number from ${min} to ${max}, got ${JSON.stringify(raw)}`);
+  return n;
+}
+
+function bool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "on", "yes"].includes(raw)) return true;
+  if (["0", "false", "off", "no"].includes(raw)) return false;
+  throw new Error(`${name} must be on or off, got ${JSON.stringify(env[name])}`);
+}
+
 function list(raw: string | undefined): string[] | null {
   if (raw === undefined || raw.trim() === "") return null;
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
@@ -76,9 +106,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deciderConcurrency: int(env, "CLOUDFRIEND_DECIDER_CONCURRENCY", 2),
     retentionMs: duration(env, "CLOUDFRIEND_RETENTION", "7d"),
     cleanupIntervalMs: duration(env, "CLOUDFRIEND_CLEANUP_INTERVAL", "1m"),
-    decider: env.CLOUDFRIEND_DECIDER || "openrouter",
+    decider: env.CLOUDFRIEND_DECIDER || "jev",
     actions: list(env.CLOUDFRIEND_ACTIONS),
     adapterDir: env.CLOUDFRIEND_ADAPTER_DIR ? path.resolve(env.CLOUDFRIEND_ADAPTER_DIR) : null,
     pollMs: duration(env, "CLOUDFRIEND_POLL_INTERVAL", "200ms"),
+    triage: bool(env, "CLOUDFRIEND_TRIAGE", true),
+    modelPath: env.CLOUDFRIEND_MODEL ? path.resolve(env.CLOUDFRIEND_MODEL) : null,
+    auditRate: num(env, "CLOUDFRIEND_AUDIT_RATE", 0.01, 0, 1),
+    verdictTtlMs: duration(env, "CLOUDFRIEND_VERDICT_TTL", "15m"),
+    perTemplate: int(env, "CLOUDFRIEND_EXAMPLES_PER_TEMPLATE", 3),
+    novelGuard: bool(env, "CLOUDFRIEND_NOVEL_ERRORS", true),
+    retrainIntervalMs: /^(off|0)$/i.test(env.CLOUDFRIEND_RETRAIN_INTERVAL ?? "") ? 0 : duration(env, "CLOUDFRIEND_RETRAIN_INTERVAL", "24h"),
+    retrainMinLabels: int(env, "CLOUDFRIEND_RETRAIN_MIN_LABELS", 200),
+    humanLabelWeight: num(env, "CLOUDFRIEND_HUMAN_LABEL_WEIGHT", 5, 0, 1000),
+    recallTarget: num(env, "CLOUDFRIEND_RECALL_TARGET", 0.98, 0.5, 1),
+    python: env.CLOUDFRIEND_PYTHON || "python3",
   };
 }

@@ -1,6 +1,13 @@
 # cloudfriend: one container, one SQLite file. Node runs the TypeScript sources directly
 # (type stripping) and uses the built-in node:sqlite, so there is no build step.
+# Python with LightGBM is included only for retraining the classifier (ml/train.py);
+# scoring events happens in Node.
 FROM node:22.22.0-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip libgomp1 \
+ && pip3 install --no-cache-dir --break-system-packages lightgbm==4.7.0 "numpy<3" \
+ && apt-get purge -y python3-pip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -12,6 +19,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
 COPY bin ./bin
+COPY models ./models
+COPY ml/train.py ./ml/train.py
 RUN ln -s /app/bin/cloudfriend /usr/local/bin/cloudfriend \
  && mkdir -p /data && chown node:node /data
 

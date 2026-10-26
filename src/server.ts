@@ -4,7 +4,10 @@ import type { DB } from "./db.ts";
 import { QueueFullError, type Intake } from "./intake.ts";
 import { errMsg, log } from "./log.ts";
 import { safeEqual, SOURCE_NAME, type Secrets } from "./secrets.ts";
-import { deliveriesFor, eventsByIds, getFlagRow, listEvents, listFlags, toFlag } from "./store.ts";
+import { eventFeedback, flagFeedback, importLabels, type ImportedLabel } from "./feedback.ts";
+import { deliveriesFor, eventsByIds, getFlagRow, listEvents, listFlags, queue, toFlag } from "./store.ts";
+import type { Trainer } from "./training.ts";
+import type { Triage } from "./triage/runtime.ts";
 import { SEVERITIES, type SourceAdapter } from "./types.ts";
 
 export interface AppDeps {
@@ -14,6 +17,21 @@ export interface AppDeps {
   sources: Map<string, SourceAdapter>;
   adminKey: string;
   maxBodyBytes: number;
+  triage?: Triage | null;
+  trainer?: Trainer | null;
+  /** Decider calls and examples asked since start, for /stats. */
+  counters?: () => Record<string, number>;
+}
+
+const QUEUE_STATUSES = ["open", "acknowledged"];
+const FLAG_STATUSES = ["open", "acknowledged", "resolved", "confirmed", "false_positive"];
+
+async function jsonBody<T>(c: Context, hint: string): Promise<T> {
+  try {
+    return (await c.req.json()) as T;
+  } catch {
+    throw new BadRequest(`body must be JSON: ${hint}`);
+  }
 }
 
 class BadRequest extends Error {}
@@ -46,7 +64,7 @@ function parseLimit(value: string | undefined): number {
 }
 
 export function createApp(deps: AppDeps): Hono {
-  const { db, intake, secrets, sources, adminKey, maxBodyBytes } = deps;
+  const { db, intake, secrets, sources, adminKey, maxBodyBytes, triage = null, trainer = null } = deps;
   const app = new Hono();
 
   app.onError((err, c) => {
@@ -97,7 +115,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!token || !safeEqual(token, adminKey)) return c.json({ error: "unauthorized" }, 401);
     await next();
   };
-  for (const prefix of ["/secrets", "/flags", "/events"]) {
+  for (const prefix of ["/secrets", "/flags", "/events", "/queue", "/stats", "/model", "/labels"]) {
     app.use(prefix, requireAdmin);
     app.use(`${prefix}/*`, requireAdmin);
   }
@@ -139,7 +157,8 @@ export function createApp(deps: AppDeps): Hono {
       before = { created_at: row.created_at, id: row.id };
     }
     const limit = parseLimit(q.limit);
-    const flags = listFlags(db, { since: parseTime(q.since), until: parseTime(q.until), severity, before, limit });
+    const status = q.status ? q.status.split(",") : undefined;
+    const flags = listFlags(db, { since: parseTime(q.since), until: parseTime(q.until), severity, status, before, limit });
     return c.json({ flags, next: flags.length === limit ? flags.at(-1)!.id : null });
   });
 
@@ -148,6 +167,101 @@ export function createApp(deps: AppDeps): Hono {
     if (!row) return c.json({ error: "not found" }, 404);
     const flag = toFlag(row);
     return c.json({ flag, events: eventsByIds(db, flag.event_ids, MAX_LIMIT), deliveries: deliveriesFor(db, flag.id) });
+  });
+
+  // --- the escalation queue and feedback -----------------------------------------
+
+  app.get("/queue", (c) => {
+    const q = c.req.query();
+    const statuses = q.status ? q.status.split(",") : QUEUE_STATUSES;
+    for (const s of statuses) if (!FLAG_STATUSES.includes(s)) throw new BadRequest(`status must be among ${FLAG_STATUSES.join(", ")}`);
+    return c.json({ flags: queue(db, statuses, parseLimit(q.limit)) });
+  });
+
+  app.patch("/flags/:id", async (c) => {
+    const body = await jsonBody<{ status?: unknown; note?: unknown }>(c, '{"status": "acknowledged"}');
+    if (typeof body.status !== "string" || !["open", "acknowledged", "resolved"].includes(body.status)) {
+      throw new BadRequest("status must be open, acknowledged or resolved (use /feedback for confirmed or false_positive)");
+    }
+    const note = typeof body.note === "string" ? body.note : null;
+    const res = db.prepare("UPDATE flags SET status = ?, note = coalesce(?, note), updated_at = ? WHERE id = ?").run(body.status, note, Date.now(), c.req.param("id"));
+    if (!res.changes) return c.json({ error: "not found" }, 404);
+    return c.json(toFlag(getFlagRow(db, c.req.param("id"))!));
+  });
+
+  app.post("/flags/:id/feedback", async (c) => {
+    const body = await jsonBody<{ verdict?: unknown; note?: unknown }>(c, '{"verdict": "confirmed" | "false_positive"}');
+    if (body.verdict !== "confirmed" && body.verdict !== "false_positive") throw new BadRequest("verdict must be confirmed or false_positive");
+    const res = flagFeedback(db, triage, c.req.param("id"), body.verdict, typeof body.note === "string" ? body.note : null);
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  });
+
+  app.post("/events/:id/feedback", async (c) => {
+    const body = await jsonBody<{ escalate?: unknown; note?: unknown }>(c, '{"escalate": true}');
+    if (typeof body.escalate !== "boolean") throw new BadRequest("escalate must be true or false");
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id)) throw new BadRequest("unknown event id");
+    const res = eventFeedback(db, id, body.escalate, typeof body.note === "string" ? body.note : null);
+    return res ? c.json(res) : c.json({ error: "not found (events are kept for CLOUDFRIEND_RETENTION)" }, 404);
+  });
+
+  app.post("/labels", async (c) => {
+    const body = await jsonBody<{ labels?: unknown } | unknown[]>(c, '{"labels": [{"source": "...", "data": {...}, "escalate": true}]}');
+    const items = (Array.isArray(body) ? body : (body as { labels?: unknown }).labels) as ImportedLabel[] | undefined;
+    if (!Array.isArray(items) || !items.length) throw new BadRequest("labels must be a non-empty array");
+    for (const it of items) {
+      if (!it || typeof it.source !== "string" || typeof it.escalate !== "boolean" || !("data" in it)) {
+        throw new BadRequest("each label needs source (string), data and escalate (boolean)");
+      }
+    }
+    return c.json({ imported: importLabels(db, items) }, 201);
+  });
+
+  app.get("/labels", (c) => {
+    const rows = db.prepare("SELECT source, y, count(*) AS n FROM labels GROUP BY source, y").all() as { source: string; y: number; n: number }[];
+    const out: Record<string, { escalate: number; ignore: number }> = {};
+    for (const r of rows) {
+      out[r.source] ??= { escalate: 0, ignore: 0 };
+      out[r.source]![r.y ? "escalate" : "ignore"] += r.n;
+    }
+    return c.json({ labels: out, new_since_last_training: trainer?.newLabels() ?? null });
+  });
+
+  // --- stats and the model ---------------------------------------------------------
+
+  app.get("/stats", (c) => {
+    const since = parseTime(c.req.query("since") || "24h")!;
+    const routes = db.prepare("SELECT coalesce(route, 'none') AS route, count(*) AS n FROM events WHERE received_at >= ? GROUP BY 1").all(since) as { route: string; n: number }[];
+    const flags = db.prepare("SELECT coalesce(status, 'open') AS status, decider, count(*) AS n FROM flags WHERE created_at >= ? GROUP BY 1, 2").all(since) as { status: string; decider: string; n: number }[];
+    const byRoute = Object.fromEntries(routes.map((r) => [r.route, r.n]));
+    const events = routes.reduce((a, r) => a + r.n, 0);
+    const pastClassifier = (byRoute.jev ?? 0) + (byRoute.audit ?? 0) + (byRoute.auto ?? 0) + (byRoute.none ?? 0);
+    return c.json({
+      since: new Date(since).toISOString(),
+      events,
+      routes: byRoute,
+      share_past_classifier: events ? pastClassifier / events : 0,
+      flags,
+      since_start: deps.counters?.() ?? {},
+      model: triage?.classifier ? modelInfo(triage) : null,
+    });
+  });
+
+  app.get("/model", (c) => {
+    const history = db.prepare("SELECT id, created_at, status, labels, report FROM models ORDER BY created_at DESC LIMIT 20").all() as {
+      id: string; created_at: number; status: string; labels: number; report: string;
+    }[];
+    return c.json({
+      active: triage?.classifier ? modelInfo(triage) : null,
+      training: trainer?.running ?? false,
+      history: history.map((h) => ({ ...JSON.parse(h.report), status: h.status, created_at: new Date(h.created_at).toISOString() })),
+    });
+  });
+
+  app.post("/model/train", async (c) => {
+    if (!trainer) return c.json({ error: "triage is off (CLOUDFRIEND_TRIAGE=off)" }, 503);
+    const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    return c.json(await trainer.train({ dryRun }));
   });
 
   app.delete("/flags/:id", (c) => {
@@ -165,6 +279,8 @@ export function createApp(deps: AppDeps): Hono {
     const limit = parseLimit(q.limit);
     const events = listEvents(db, {
       source: q.source || undefined,
+      user: q.user || undefined,
+      route: q.route || undefined,
       type: q.type || undefined,
       group_key: q.group_key || undefined,
       since: parseTime(q.since),
@@ -181,4 +297,18 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   return app;
+}
+
+function modelInfo(triage: Triage) {
+  const f = triage.classifier!.file;
+  return {
+    path: triage.modelPath,
+    trained_at: f.trained_at,
+    note: f.note ?? null,
+    trees: triage.classifier!.gbdt.numTrees,
+    drop_below: f.drop_below,
+    escalate_above: f.escalate_above,
+    threshold: f.threshold,
+    metrics: f.metrics ?? null,
+  };
 }

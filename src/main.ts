@@ -24,16 +24,22 @@ export async function main(): Promise<void> {
   }
   if (!config.adminKey) log.warn("CLOUDFRIEND_ADMIN_KEY is not set; the admin API (/secrets, /flags, /events) is disabled");
   if (!cloudfriend.decider) {
-    log.warn(`decider '${config.decider}' is not configured (OPENROUTER_API_KEY missing?); events are stored but not triaged`);
+    log.warn(
+      cloudfriend.triage?.classifier
+        ? `decider '${config.decider}' is not configured (JEV_API_KEY or OPENROUTER_API_KEY missing?); the classifier decides alone`
+        : `decider '${config.decider}' is not configured (JEV_API_KEY or OPENROUTER_API_KEY missing?); events are stored but not triaged`,
+    );
   }
   if (!cloudfriend.actions.size) log.warn("no actions configured; flags are stored but nothing is notified (set SLACK_WEBHOOK_URL or WEBHOOK_URL)");
 
   cloudfriend.worker.start();
+  cloudfriend.startRetraining();
   const server = serve({ fetch: cloudfriend.app.fetch, port: config.port, hostname: config.host }, (info) => {
     log.info("cloudfriend listening", {
       port: info.port,
       data: config.dataDir,
       decider: cloudfriend.decider?.name ?? "none",
+      classifier: cloudfriend.triage?.classifier ? "on" : "off",
       actions: [...cloudfriend.actions.keys()].join(",") || "none",
       batch: `${config.batchSize} events or ${config.batchWaitMs}ms`,
     });

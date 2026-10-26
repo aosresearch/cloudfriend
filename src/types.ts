@@ -14,6 +14,15 @@ export interface CloudfriendEvent {
   external_id?: string;
   type?: string;
   group_key?: string;
+  /** Triage results, when the classifier ran: user id found in the event, score and route. */
+  user?: string;
+  score?: number;
+  route?: string;
+  /**
+   * Set when the classifier passed this event on to the decider: its score, and how many
+   * near-identical events in the batch were held back and will share this event's verdict.
+   */
+  triage?: { score: number; similar: number };
 }
 
 export type Severity = "low" | "medium" | "high" | "critical";
@@ -30,7 +39,16 @@ export interface FlagDraft {
 export interface Flag extends FlagDraft {
   id: string;
   created_at: string;
+  /** The decider that raised it, or `classifier` when the classifier escalated on its own. */
   decider: string;
+  /** Where it is in the queue: open, acknowledged, resolved, confirmed or false_positive. */
+  status?: string;
+  /** Events behind the flag, including ones added later by a cached verdict. */
+  event_count?: number;
+  /** User ids found in the flag's events, for linking to other sources. */
+  users?: string[];
+  updated_at?: string;
+  note?: string | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,10 @@ export function buildPrompt(events: CloudfriendEvent[], env: NodeJS.ProcessEnv):
     const meta = [`source=${e.source}`, `received_at=${e.received_at}`];
     if (e.type) meta.push(`type=${e.type}`);
     if (e.group_key) meta.push(`group=${e.group_key}`);
+    if (e.triage) {
+      meta.push(`classifier_score=${e.triage.score.toFixed(2)}`);
+      if (e.triage.similar) meta.push(`similar_events_not_shown=${e.triage.similar}`);
+    }
     lines.push(`[${i}] ${meta.join(" ")}`, compactJson(e.data, { maxChars }), "");
   });
   return lines.join("\n");
@@ -59,38 +63,70 @@ export function parseReply(content: string, events: CloudfriendEvent[]): FlagDra
   return out;
 }
 
+export interface ChatDefaults {
+  /** Env var holding the API key, checked before OPENROUTER_API_KEY. */
+  keyVar?: string;
+  /** Env var naming the model, checked before OPENROUTER_MODEL. */
+  modelVar?: string;
+  model: string;
+  title: string;
+}
+
+export interface Completion {
+  flags: FlagDraft[];
+  /** What OpenRouter reports for the call: tokens and, when it knows, cost in USD. */
+  usage: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
+  model: string;
+}
+
+export const apiKey = (env: NodeJS.ProcessEnv, d: Pick<ChatDefaults, "keyVar">) =>
+  (d.keyVar && env[d.keyVar]) || env.OPENROUTER_API_KEY || "";
+
+/** One chat completion over a batch of events. Throws on any failure so the batch is retried. */
+export async function complete(
+  events: CloudfriendEvent[],
+  env: NodeJS.ProcessEnv,
+  signal: AbortSignal,
+  d: ChatDefaults,
+): Promise<Completion> {
+  const base = (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+  const instructions = env.CLOUDFRIEND_DECIDER_INSTRUCTIONS?.trim();
+  const system = instructions ? `${SYSTEM_PROMPT}\n\nContext from the operator:\n${instructions}` : SYSTEM_PROMPT;
+  const model = (d.modelVar && env[d.modelVar]) || env.OPENROUTER_MODEL || d.model;
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(180_000)]),
+    headers: {
+      authorization: `Bearer ${apiKey(env, d)}`,
+      "content-type": "application/json",
+      "x-title": d.title,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 4000,
+      response_format: { type: "json_object" },
+      usage: { include: true },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: buildPrompt(events, env) },
+      ],
+    }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${text.slice(0, 300)}`);
+  const body = JSON.parse(text);
+  if (body.error) throw new Error(`OpenRouter error: ${JSON.stringify(body.error).slice(0, 300)}`);
+  const content = body.choices?.[0]?.message?.content;
+  if (typeof content !== "string") throw new Error("OpenRouter reply has no message content");
+  return { flags: parseReply(content, events), usage: body.usage ?? {}, model: body.model ?? model };
+}
+
+const DEFAULTS: ChatDefaults = { model: "anthropic/claude-haiku-5.5", title: "cloudfriend" };
+
 export default defineDecider({
   enabled: (env) => Boolean(env.OPENROUTER_API_KEY),
-
   async decide(events, { env, signal }) {
-    const base = (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-    const instructions = env.CLOUDFRIEND_DECIDER_INSTRUCTIONS?.trim();
-    const system = instructions ? `${SYSTEM_PROMPT}\n\nContext from the operator:\n${instructions}` : SYSTEM_PROMPT;
-    const res = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
-      headers: {
-        authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-        "content-type": "application/json",
-        "x-title": "cloudfriend",
-      },
-      body: JSON.stringify({
-        model: env.OPENROUTER_MODEL || "anthropic/claude-haiku-5.5",
-        temperature: 0,
-        max_tokens: 2000,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: buildPrompt(events, env) },
-        ],
-      }),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${text.slice(0, 300)}`);
-    const body = JSON.parse(text);
-    if (body.error) throw new Error(`OpenRouter error: ${JSON.stringify(body.error).slice(0, 300)}`);
-    const content = body.choices?.[0]?.message?.content;
-    if (typeof content !== "string") throw new Error("OpenRouter reply has no message content");
-    return parseReply(content, events);
+    return (await complete(events, env, signal, DEFAULTS)).flags;
   },
 });

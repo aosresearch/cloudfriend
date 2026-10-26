@@ -314,7 +314,7 @@ describe("cleanup", () => {
     ev.run(old, 1);
     ev.run(old, 0); // undecided events wait for the decider
     ev.run(Date.now(), 1);
-    cloudfriend.db.prepare("INSERT INTO flags VALUES ('flg_1', ?, 'r', 'low', '[\"1\"]', 'test')").run(old);
+    cloudfriend.db.prepare("INSERT INTO flags (id, created_at, reason, severity, event_ids, decider) VALUES ('flg_1', ?, 'r', 'low', '[\"1\"]', 'test')").run(old);
 
     assert.deepEqual(await cloudfriend.worker.cleanup(), { queue: 2, events: 1 });
     assert.equal(count(cloudfriend, "queue"), 2);

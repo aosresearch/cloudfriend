@@ -29,7 +29,7 @@ describe("adapter loading", () => {
   it("finds the built-in adapters by file name", async () => {
     const a = await loadAdapters();
     assert.deepEqual([...a.sources.keys()].sort(), ["json", "posthog", "sentry"]);
-    assert.deepEqual([...a.deciders.keys()], ["openrouter"]);
+    assert.deepEqual([...a.deciders.keys()].sort(), ["jev", "openrouter"]);
     assert.deepEqual([...a.actions.keys()].sort(), ["slack", "webhook"]);
   });
 });
