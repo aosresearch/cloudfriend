@@ -95,6 +95,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     env,
     batchSize: config.batchSize,
     batchWaitMs: config.batchWaitMs,
+    auditWaitMs: config.auditWaitMs,
     deciderConcurrency: config.deciderConcurrency,
     retentionMs: config.retentionMs,
     cleanupIntervalMs: config.cleanupIntervalMs,

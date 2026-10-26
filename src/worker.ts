@@ -21,6 +21,8 @@ export interface WorkerOptions {
   env: NodeJS.ProcessEnv;
   batchSize: number;
   batchWaitMs: number;
+  /** How long a batch of only audit samples may wait for company. */
+  auditWaitMs?: number;
   deciderConcurrency: number;
   retentionMs: number;
   cleanupIntervalMs: number;
@@ -71,7 +73,7 @@ export class Worker {
       insertEvent: db.prepare(
         "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key, score, route, template, features, user_key, decided) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ),
-      pending: db.prepare("SELECT id, received_at FROM events WHERE decided = 0 ORDER BY id LIMIT ?"),
+      pending: db.prepare("SELECT id, received_at, route FROM events WHERE decided = 0 ORDER BY id LIMIT ?"),
       insertFlag: db.prepare(
         "INSERT INTO flags (id, created_at, reason, severity, event_ids, decider, status, updated_at, event_count, users) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
       ),
@@ -235,11 +237,16 @@ export class Worker {
       const rows = this.#stmts.pending.all(this.#o.batchSize + this.#inflight.size) as unknown as {
         id: number;
         received_at: number;
+        route: string | null;
       }[];
       const batch = rows.filter((r) => !this.#inflight.has(r.id)).slice(0, this.#o.batchSize);
       if (!batch.length) return;
       const full = batch.length >= this.#o.batchSize;
-      const waited = now - batch[0]!.received_at >= this.#o.batchWaitMs;
+      // Audit samples aren't urgent: they wait for other events, or for auditWaitMs.
+      const urgent = batch.find((r) => r.route !== "audit");
+      const waited = urgent
+        ? now - urgent.received_at >= this.#o.batchWaitMs
+        : now - batch[0]!.received_at >= (this.#o.auditWaitMs ?? this.#o.batchWaitMs);
       if (!full && !waited) return;
       const ids = batch.map((r) => r.id);
       for (const id of ids) this.#inflight.add(id);

@@ -292,6 +292,22 @@ describe("triage in the pipeline", () => {
     assert.equal((await patch("confirmed")).status, 400);
   });
 
+  it("holds audit samples until a real batch goes out", async () => {
+    const d = fakeDecider();
+    cf = await makeCloudfriend({
+      decider: d.adapter,
+      config: { triage: true, modelPath: writeModel(tinyModel()), auditRate: 1, auditWaitMs: 60_000, batchSize: 50, batchWaitMs: 0 },
+    });
+    await cf.post("app", [{ level: "info", message: "page served" }, { level: "info", message: "cache warm" }]);
+    await run();
+    assert.equal(count(cf, "events WHERE route = 'audit' AND decided = 0"), 2);
+    assert.equal(d.calls.length, 0, "audits alone wait");
+    await cf.post("app", { level: "error", message: "queue consumer crashed" });
+    await run();
+    assert.equal(d.calls.length, 1);
+    assert.equal(d.calls[0]!.length, 3, "the audits ride along with the error");
+  });
+
   it("escalates on the classifier alone when there is no Jev", async () => {
     cf = await makeCloudfriend({ decider: null, config: { triage: true, modelPath: writeModel(tinyModel()), batchWaitMs: 0 } });
     await cf.post("app", [{ level: "error", message: "out of memory" }, { level: "info", message: "ok" }]);

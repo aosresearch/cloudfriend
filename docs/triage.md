@@ -59,7 +59,7 @@ The model gives each event a probability that it should be escalated, and the ev
 | `drop` | score below the model's `drop_below` | Done. Not escalated, never sent anywhere. |
 | `jev` | score at or above `drop_below` | Goes to Jev in the next batch. |
 | `novel` | error-like (error level, error words or a 5xx) and its template has never been seen, whatever its score | Goes to Jev once. Later events of the template are scored normally. Turn off with `CLOUDFRIEND_NOVEL_ERRORS=off`. |
-| `audit` | a random `CLOUDFRIEND_AUDIT_RATE` (1%) of what would be dropped | Goes to Jev, so its answers measure what the classifier misses. |
+| `audit` | a random `CLOUDFRIEND_AUDIT_RATE` (1%) of what would be dropped | Goes to Jev, so its answers measure what the classifier misses. Audits aren't urgent: they ride along with the next batch, or go on their own after `CLOUDFRIEND_AUDIT_WAIT` (5 minutes). |
 | `auto` | score at or above `escalate_above` | Escalated without asking Jev. Off in the shipped model (`escalate_above` is above 1). |
 | `classifier` | no Jev configured, score at or above the model's `threshold` | Escalated on the classifier alone. |
 
@@ -113,6 +113,7 @@ Flags are the queue. Each has a `status`:
 | `CLOUDFRIEND_TRIAGE` | `on` | `off` sends every event to the decider, as cloudfriend v0 did. No classifier, grouping or labels. |
 | `CLOUDFRIEND_MODEL` | | Model file to load. By default the last promoted model (`/data/models/active.json`), else the built-in `models/base.json`. |
 | `CLOUDFRIEND_AUDIT_RATE` | `0.01` | Share of dropped events sent to Jev anyway. |
+| `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send never-seen error templates to Jev once. |
 | `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |

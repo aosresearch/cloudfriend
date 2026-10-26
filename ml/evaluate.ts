@@ -40,6 +40,7 @@ const { values: args } = parseArgs({
     cases: { type: "string" },
     "batch-size": { type: "string", default: "100" },
     "batch-wait": { type: "string", default: "10000" },
+    "audit-wait": { type: "string", default: "300000" },
     "verdict-ttl": { type: "string", default: "900000" },
     "audit-rate": { type: "string", default: "0.002" },
     "novel-guard": { type: "string", default: "on" },
@@ -57,6 +58,7 @@ if (!args.data?.length || !args.model) {
 const classifier = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as ClassifierFile);
 const BATCH = Number(args["batch-size"]);
 const WAIT = Number(args["batch-wait"]);
+const AUDIT_WAIT = Number(args["audit-wait"]);
 const TTL = Number(args["verdict-ttl"]);
 const AUDIT = Number(args["audit-rate"]);
 const NOVEL = args["novel-guard"] !== "off";
@@ -102,6 +104,8 @@ class Sim {
   labels = { pos: 0, neg: 0 };
   #pending: Pending[] = [];
   #oldest = 0;
+  /** Audit samples aren't urgent: a batch of only audits waits AUDIT_WAIT, as in the server. */
+  #oldestUrgent: number | null = null;
   #cache = new VerdictCache(TTL);
   #flagById = new Map<string, SimFlag>();
   #n = 0;
@@ -139,17 +143,19 @@ class Sim {
   }
 
   async push(id: string, now: number, score: number, errorish: boolean, novel: boolean, template: string) {
-    if (this.#pending.length && (now - this.#oldest >= WAIT || this.#pending.length >= BATCH)) await this.flush(now);
+    if (this.#pending.length && (this.#pending.length >= BATCH || now - (this.#oldestUrgent ?? this.#oldest + AUDIT_WAIT - WAIT) >= WAIT)) await this.flush(now);
     const route = this.route(score, errorish, novel);
     this.routed[route] = (this.routed[route] ?? 0) + 1;
     if (route === "drop") return;
     if (!this.#pending.length) this.#oldest = now;
+    if (route !== "audit" && this.#oldestUrgent === null) this.#oldestUrgent = now;
     this.#pending.push({ id, template, score, route });
   }
 
   async flush(now: number) {
     const batch = this.#pending;
     this.#pending = [];
+    this.#oldestUrgent = null;
     if (!batch.length) return;
     const plan = planBatch(batch, this.#cache, now);
     let drafts: FlagDraft[] = [];
@@ -274,6 +280,13 @@ function summarize(c: Case, sim: Sim, events: number) {
 
 async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
   const featurizer = new Featurizer();
+  // A chain (GAIA's days) is a system that was already running: warm the featurizer's
+  // history on the day before the first evaluated one, without scoring it.
+  if (chain[0]?.chain) {
+    const all = loadCases(dir).filter((c) => c.chain === chain[0]!.chain);
+    const prev = all.filter((c) => c.start_ms < chain[0]!.start_ms).at(-1);
+    if (prev) for await (const e of readStream(dir, prev.id)) featurizer.featurize({ source: e.source, received_at: e.t, data: e.data });
+  }
   const results: CaseResult[] = [];
   for (const c of chain) {
     const info = new Map<string, EventInfo>();
@@ -422,7 +435,7 @@ for (const s of STRATEGIES) {
 const summary = {
   model: { path: args.model, trained_at: classifier.file.trained_at, drop_below: classifier.file.drop_below, threshold: classifier.file.threshold, trees: classifier.gbdt.numTrees },
   split: args.split,
-  settings: { batch_size: BATCH, batch_wait_ms: WAIT, verdict_ttl_ms: TTL, audit_rate: AUDIT, novel_guard: NOVEL },
+  settings: { batch_size: BATCH, batch_wait_ms: WAIT, audit_wait_ms: AUDIT_WAIT, verdict_ttl_ms: TTL, audit_rate: AUDIT, novel_guard: NOVEL },
   jev: {
     live: args.jev,
     model: process.env.JEV_MODEL || JEV.model,

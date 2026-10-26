@@ -150,6 +150,7 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_TRIAGE` | `on` | `off` sends every event to the decider, as v0 did. |
 | `CLOUDFRIEND_MODEL` | | Model file to load. By default the last promoted model (`/data/models/active.json`), else the built-in `models/base.json`. |
 | `CLOUDFRIEND_AUDIT_RATE` | `0.01` | Share of dropped events sent to Jev anyway, to find missed escalations. |
+| `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send error-like events of a never-seen template to Jev once. |
 | `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |

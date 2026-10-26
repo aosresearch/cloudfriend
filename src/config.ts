@@ -31,6 +31,7 @@ export interface Config {
   /** Model file to load instead of the active (or built-in) one. */
   modelPath: string | null;
   auditRate: number;
+  auditWaitMs: number;
   verdictTtlMs: number;
   perTemplate: number;
   novelGuard: boolean;
@@ -113,6 +114,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     triage: bool(env, "CLOUDFRIEND_TRIAGE", true),
     modelPath: env.CLOUDFRIEND_MODEL ? path.resolve(env.CLOUDFRIEND_MODEL) : null,
     auditRate: num(env, "CLOUDFRIEND_AUDIT_RATE", 0.01, 0, 1),
+    auditWaitMs: duration(env, "CLOUDFRIEND_AUDIT_WAIT", "5m"),
     verdictTtlMs: duration(env, "CLOUDFRIEND_VERDICT_TTL", "15m"),
     perTemplate: int(env, "CLOUDFRIEND_EXAMPLES_PER_TEMPLATE", 3),
     novelGuard: bool(env, "CLOUDFRIEND_NOVEL_ERRORS", true),

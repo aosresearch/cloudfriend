@@ -39,6 +39,7 @@ const model = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as 
 const jev = new Jev(Boolean(process.env.JEV_API_KEY || process.env.OPENROUTER_API_KEY), Number(args.budget), args.cache!);
 const BATCH = 100;
 const WAIT = 10_000;
+const AUDIT_WAIT = 300_000;
 const TTL = 15 * 60_000;
 
 interface Shown {
@@ -61,8 +62,8 @@ async function exportScenario(spec: string) {
   const [caseId, range] = rest.split("@") as [string, string | undefined];
   const c = loadCases(dir).find((x) => x.id === caseId);
   if (!c) throw new Error(`no case ${caseId} in ${dir}`);
-  // A GAIA day continues the previous ones; replay from the first day of the chain for warm history.
-  const chain: Case[] = c.chain ? loadCases(dir).filter((x) => x.chain === c.chain && x.start_ms <= c.start_ms) : [c];
+  // A GAIA day continues the previous one; replay it first so the history is warm.
+  const chain: Case[] = c.chain ? loadCases(dir).filter((x) => x.chain === c.chain && x.start_ms <= c.start_ms).slice(-2) : [c];
   let from: number;
   let to: number;
   if (range) {
@@ -86,12 +87,14 @@ async function exportScenario(spec: string) {
   const seconds = new Map<number, { events: number; dropped: number; routed: number }>();
   let pending: Pending[] = [];
   let oldest = 0;
+  let oldestUrgent: number | null = null;
   let n = 0;
   const totals = { events: 0, dropped: 0, routed: 0, asked: 0, calls: 0, cost: 0, cached_verdicts: 0 };
 
   const flush = async (now: number) => {
     const batch = pending;
     pending = [];
+    oldestUrgent = null;
     if (!batch.length) return;
     const plan = planBatch(batch, cache, now);
     const inWindow = now >= from && now <= to + WAIT;
@@ -150,7 +153,7 @@ async function exportScenario(spec: string) {
         rand,
       }, f.novel);
       const id = String(n++);
-      if (pending.length && (e.t - oldest >= WAIT || pending.length >= BATCH)) await flush(e.t);
+      if (pending.length && (pending.length >= BATCH || e.t - (oldestUrgent ?? oldest + AUDIT_WAIT - WAIT) >= WAIT)) await flush(e.t);
       const inWindow = e.t >= from && e.t <= to;
       const rec: Shown & { data: unknown } = {
         id,
@@ -168,6 +171,7 @@ async function exportScenario(spec: string) {
       if (route !== "drop") {
         byId.set(id, rec);
         if (!pending.length) oldest = e.t;
+        if (route !== "audit" && oldestUrgent === null) oldestUrgent = e.t;
         pending.push({ id, template: f.template, score, route });
       }
       if (!inWindow) {
