@@ -10,6 +10,9 @@ export default defineConfig({
     socialLinks: [{ icon: "github", link: "https://github.com/aosresearch/cloudfriend" }],
     sidebar: [
       { text: "Setup", link: "/" },
+      { text: "Triage", link: "/triage" },
+      { text: "Training", link: "/training" },
+      { text: "Benchmarks", link: "/benchmarks" },
       {
         text: "Architecture",
         link: "/architecture",

@@ -7,7 +7,7 @@ title: Architecture
 cloudfriend is one Node.js process and one SQLite file. Events move through three steps, and each step writes its result to the database before the next one starts:
 
 1. **[Intake](./architecture/intake.md)** stores each request's raw bytes and replies `202`.
-2. **[Process](./architecture/process.md)** parses stored requests into events, then sends batches of events to a decider, which returns flags.
+2. **[Process](./architecture/process.md)** parses stored requests into events and scores each one with the classifier. It then sends batches of the events that pass to a decider (Jev), which returns flags. See [Triage](./triage.md).
 3. **[Delivery](./architecture/delivery.md)** runs every enabled action (Slack, webhook, your own) for each flag, retrying until it works.
 
 Intake runs in the HTTP request. Process and delivery run in a background worker loop in the same process.
@@ -43,6 +43,9 @@ All state lives in `cloudfriend.db` under `/data`, in WAL mode.
 | `events` | event, as parsed JSON plus hints | parse | decide, the API |
 | `flags` | thing the decider flagged | decide | delivery, the API |
 | `deliveries` | (flag, action) pair | decide | delivery |
+| `labels` | training example: Jev's or a person's verdict, with the event's features | decide, feedback API | training |
+| `models` | classifier training run and its report | training | the API |
+| `kv` | small state, such as the featurizer's template history | worker | worker on start |
 | `secrets` | ingest secret, SHA-256 hash only | API, CLI | intake |
 
 A row's status column is what moves it from step to step:
@@ -62,7 +65,7 @@ A cleanup job runs every minute. It deletes processed `queue` rows and decided `
 | Kind | Interface | Built in |
 | --- | --- | --- |
 | Source | `verify?(req)` and `parse(body) → events[]` | `json` (the fallback), `sentry`, `posthog` |
-| Decider | `decide(events[]) → flags[]` | `openrouter` |
+| Decider | `decide(events[]) → flags[]` | `jev`, `openrouter` |
 | Action | `enabled?(env)` and `run(flag, { events })` | `slack`, `webhook` |
 
 Built-in adapters live in `src/adapters/{sources,deciders,actions}/`, and the interfaces are in `src/types.ts`. A file in `CLOUDFRIEND_ADAPTER_DIR` with the same name replaces a built-in one. Each step's page shows how its adapter is called.

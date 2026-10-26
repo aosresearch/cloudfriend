@@ -4,14 +4,14 @@ title: Setup
 
 # Setup
 
-cloudfriend is a live event triage pipeline in one Docker container. Your systems send it events (Sentry issues, PostHog events, logs, anything JSON). A model reads them in batches and flags the ones a person should look at. Each flag goes to Slack, a webhook, or your own action.
+cloudfriend is a live event triage pipeline in one Docker container. Your systems send it events: Sentry issues, PostHog events, logs, anything JSON. A fast classifier scores every event, and a stronger model, Jev, judges the few that might matter. Jev flags the ones a person should look at, and each flag goes to the escalation queue, to Slack, to a webhook, or to your own action. Jev's verdicts and your feedback retrain the classifier, so less of the stream needs Jev over time. See [Triage](./triage.md) and [Training](./training.md).
 
 This page gets you from nothing to a flag in Slack, and explains what each step does. For how it works inside, see [Architecture](./architecture.md).
 
 ## What you need
 
 - **Docker**, on any machine that can receive HTTP from the services that will send events.
-- **An OpenRouter API key** ([openrouter.ai/keys](https://openrouter.ai/keys)). cloudfriend uses it to ask a model which events matter. Without it, events are stored but nothing gets flagged.
+- **An OpenRouter API key** ([openrouter.ai/keys](https://openrouter.ai/keys)) for Jev. cloudfriend uses it to ask Jev about the events the classifier passes on. Without it, the classifier escalates on its own, with less judgment.
 - **A Slack incoming webhook URL** ([api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks)), or any HTTP endpoint that should receive flags.
 
 There is no database to set up. Everything lives in one SQLite file inside the container's `/data` volume.
@@ -33,7 +33,7 @@ docker run -d --name cloudfriend \
   -p 8080:8080 \
   -v cloudfriend-data:/data \
   -e CLOUDFRIEND_ADMIN_KEY=change-me \
-  -e OPENROUTER_API_KEY=sk-or-... \
+  -e JEV_API_KEY=sk-or-... \
   -e SLACK_WEBHOOK_URL=https://hooks.slack.com/services/... \
   cloudfriend
 ```
@@ -45,7 +45,7 @@ What each line does:
 | `-p 8080:8080` | cloudfriend listens on port 8080 for events and API calls. |
 | `-v cloudfriend-data:/data` | Keeps the database on a named volume, so events, flags and secrets survive a replaced container. Without it, data lives only as long as the container. |
 | `CLOUDFRIEND_ADMIN_KEY` | Turns on the admin API (`/secrets`, `/flags`, `/events`). Pick a long random value. It can never be used to send events. |
-| `OPENROUTER_API_KEY` | Turns on the default decider, which sends batches of events to a model. |
+| `JEV_API_KEY` | Turns on Jev, the default decider, for the events the classifier passes on. `OPENROUTER_API_KEY` works too. |
 | `SLACK_WEBHOOK_URL` | Turns on the Slack action. Every flag is posted to this channel. |
 
 Check that it is up:
@@ -89,7 +89,7 @@ curl -X POST localhost:8080/in/myapp \
 
 The `202 accepted` reply means the event is on disk. The `myapp` part of the URL becomes the event's `source`, and it can be any name.
 
-Within about 10 seconds the batch goes to the model. A checkout error like this one is usually flagged, so a message should appear in Slack. Routine events, such as an info log, are not.
+The classifier scores the event at once. A checkout error like this one has a template it has never seen, so it goes to Jev within about 10 seconds, and Jev usually flags it. A message then appears in Slack, and the flag appears in `GET /queue`. Routine events, such as an info log, are dropped by the classifier and never reach Jev. `GET /events/:id` shows each event's `score` and `route`.
 
 To see what happened without Slack:
 
@@ -176,11 +176,15 @@ Everything is set through environment variables. Durations accept `ms`, `s`, `m`
 | `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | How long intake collects requests before one commit. |
 | `CLOUDFRIEND_ADAPTER_DIR` | *(unset)* | Directory of extra adapters to load without rebuilding the image. |
 | `CLOUDFRIEND_LOG` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
-| `OPENROUTER_API_KEY` | *(unset)* | Required for the default decider. |
-| `OPENROUTER_MODEL` | `anthropic/claude-haiku-5.5` | Any OpenRouter model id. |
+| `CLOUDFRIEND_DECIDER` | `jev` | `jev`, `openrouter`, or your own adapter. |
+| `JEV_API_KEY` | `OPENROUTER_API_KEY` | Key for Jev. Without any key the classifier decides alone. |
+| `JEV_MODEL` | `typesafe/jev-router` | Any OpenRouter model id. |
+| `OPENROUTER_API_KEY` | *(unset)* | Key for the `openrouter` decider, and Jev's fallback key. |
+| `OPENROUTER_MODEL` | `anthropic/claude-haiku-5.5` | Model of the `openrouter` decider. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. |
 | `CLOUDFRIEND_DECIDER_INSTRUCTIONS` | *(unset)* | Extra context for the model, e.g. "Checkout and billing matter most; ignore staging." |
 | `CLOUDFRIEND_EVENT_CHARS` | `1500` | Most characters of each event shown to the model. |
+| Triage and training | | See [Triage](./triage.md#configuration) and [Training](./training.md#configuration). |
 | `SLACK_WEBHOOK_URL` | *(unset)* | Turns on the Slack action. |
 | `SLACK_MIN_SEVERITY` | `low` | Only post flags at or above this severity. |
 | `WEBHOOK_URL` | *(unset)* | Turns on the webhook action, which receives `POST {"flag": ..., "events": [...]}`. |

@@ -23,7 +23,7 @@ import { JEV } from "../src/adapters/deciders/jev.ts";
 import { Jev } from "./jev.ts";
 import { applyVerdicts, planBatch, routeEvent, VerdictCache, type FullRoute, type Pending } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
-import { extractEntities, Featurizer } from "../src/triage/features.ts";
+import { extractEntities, FEATURE_NAMES, Featurizer } from "../src/triage/features.ts";
 import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
@@ -45,6 +45,8 @@ const { values: args } = parseArgs({
     "novel-guard": { type: "string", default: "on" },
     concurrency: { type: "string", default: "6" },
     strategies: { type: "string", default: "cascade,classifier,keyword,jev-all" },
+    // Write the cascade's Jev labels as a training CSV (the server's training loop, offline).
+    "labels-out": { type: "string" },
   },
 });
 if (!args.data?.length || !args.model) {
@@ -84,7 +86,12 @@ interface EventInfo {
   data: unknown;
   score: number;
   template: string;
+  values?: number[];
 }
+
+const labelsOut = args["labels-out"] ? fs.openSync(args["labels-out"], "w") : null;
+if (labelsOut) fs.writeSync(labelsOut, ["case", "t", "y", "w", ...FEATURE_NAMES].join(",") + "\n");
+const fmt = (v: number) => (Number.isNaN(v) ? "" : Number.isInteger(v) ? String(v) : v.toPrecision(6));
 
 class Sim {
   flags: SimFlag[] = [];
@@ -146,6 +153,7 @@ class Sim {
     if (!batch.length) return;
     const plan = planBatch(batch, this.#cache, now);
     let drafts: FlagDraft[] = [];
+    let answered = true;
     if (plan.ask.length) {
       this.asked += plan.ask.length;
       this.calls += Math.ceil(plan.ask.length / BATCH);
@@ -167,6 +175,7 @@ class Sim {
           else {
             // Jev unavailable: fall back to the classifier's own threshold for these events.
             this.unavailable += part.length;
+            answered = false;
             const hot = part.filter((e) => (e.triage?.score ?? 0) >= classifier.file.threshold);
             if (hot.length) drafts.push({ reason: "classifier fallback", severity: "medium", event_ids: hot.map((e) => e.id) });
           }
@@ -178,6 +187,14 @@ class Sim {
     }
     const out = applyVerdicts(plan, drafts);
     for (const l of out.labels) l.y ? this.labels.pos++ : this.labels.neg++;
+    if (labelsOut && this.name === "cascade" && answered) {
+      let rows = "";
+      for (const l of out.labels) {
+        const e = this.info.get(l.id);
+        if (e?.values) rows += `${this.caseId},${e.t},${l.y},1,${e.values.map(fmt).join(",")}\n`;
+      }
+      if (rows) fs.writeSync(labelsOut, rows);
+    }
     const ids: string[] = [];
     for (const f of out.flags) {
       const flag: SimFlag = {
@@ -272,7 +289,7 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
       const id = String(n++);
       now = e.t;
       positives += e.y;
-      info.set(id, { t: e.t, y: e.y, source: e.source, data: e.data, score, template: f.template });
+      info.set(id, { t: e.t, y: e.y, source: e.source, data: e.data, score, template: f.template, values: labelsOut ? f.values : undefined });
       if (c.incidents) {
         const u = extractEntities(e.data, f.text).user;
         if (u) (users.get(u) ?? users.set(u, new Set()).get(u)!).add(`${e.source}:${f.service}`);

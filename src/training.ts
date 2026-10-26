@@ -5,7 +5,10 @@
 //   2. train    ml/train.py boosts new trees on top of the built-in base model (so a few
 //               hundred labels refine it rather than replace it) and picks thresholds
 //   3. gate     the candidate and the active model are scored on the held-out labels; the
-//               candidate is promoted only if it is at least as good (see `gate`)
+//               candidate is promoted only if it is at least as good (see `gate`). Labels only
+//               exist for events that got past the classifier, so the candidate's drop threshold
+//               is also checked on recent unlabelled traffic: one retrain may at most halve the
+//               share of events that reach Jev (`limitThreshold`)
 //   4. promote  the file becomes <data>/models/active.json and the worker swaps it in
 //
 // Runs on a schedule (CLOUDFRIEND_RETRAIN_INTERVAL) once enough new labels exist, or on
@@ -34,6 +37,9 @@ export interface TrainOptions {
   recall: number;
 }
 
+/** One retrain may cut the share of live events sent to Jev to no less than this fraction. */
+const MAX_JEV_SHARE_CUT = 0.5;
+
 export interface TrainReport {
   id: string;
   status: "promoted" | "rejected" | "skipped" | "failed";
@@ -42,6 +48,8 @@ export interface TrainReport {
   candidate?: Metrics;
   active?: Metrics | null;
   model?: Pick<ClassifierFile, "drop_below" | "threshold" | "trained_at"> & { path: string; trees: number };
+  /** Share of recent events each model would send to Jev, and whether the threshold was lowered. */
+  recent?: { events: number; active: number | null; candidate: number; adjusted: boolean };
   ms?: number;
 }
 
@@ -133,13 +141,31 @@ export class Trainer {
       if (fs.existsSync(base)) argv.push("--init-model", base);
       await run(this.#o.python, argv);
 
-      const candidate = new Classifier(JSON.parse(fs.readFileSync(out, "utf8")) as ClassifierFile);
-      const cMetrics = evaluate(candidate, holdout, this.#o.humanWeight);
+      const file = JSON.parse(fs.readFileSync(out, "utf8")) as ClassifierFile;
       const active = this.#triage.classifier;
+      const recent = this.#recentFeatures();
+      const limited = limitThreshold(new Classifier(file), active, recent);
+      if (limited.adjusted) {
+        file.drop_below = limited.dropBelow;
+        file.note = `${file.note ?? ""}; drop_below lowered to keep ${pct(limited.candidate)} of recent events going to Jev`.replace(/^; /, "");
+        fs.writeFileSync(out, JSON.stringify(file));
+      }
+      const candidate = new Classifier(file);
+      const cMetrics = evaluate(candidate, holdout, this.#o.humanWeight);
       const aMetrics = active ? evaluate(active, holdout, this.#o.humanWeight) : null;
       const verdict = gate(cMetrics, aMetrics, this.#o.recall);
       const model = { path: out, trees: candidate.gbdt.numTrees, drop_below: candidate.file.drop_below, threshold: candidate.file.threshold, trained_at: candidate.file.trained_at };
-      const report: TrainReport = { id, status: verdict.ok && !dryRun ? "promoted" : "rejected", reason: dryRun ? `dry run: ${verdict.reason}` : verdict.reason, labels, candidate: cMetrics, active: aMetrics, model, ms: Date.now() - started };
+      const report: TrainReport = {
+        id,
+        status: verdict.ok && !dryRun ? "promoted" : "rejected",
+        reason: dryRun ? `dry run: ${verdict.reason}` : verdict.reason,
+        labels,
+        candidate: cMetrics,
+        active: aMetrics,
+        model,
+        recent: { events: recent.length, active: limited.active, candidate: limited.candidate, adjusted: limited.adjusted },
+        ms: Date.now() - started,
+      };
       if (report.status === "promoted") {
         const activePath = path.join(modelsDir, "active.json");
         fs.copyFileSync(out, activePath + ".tmp");
@@ -152,6 +178,14 @@ export class Trainer {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+
+  /** Feature vectors of the most recent events still in retention, newest first. */
+  #recentFeatures(limit = 50_000): Float32Array[] {
+    const rows = this.#db
+      .prepare("SELECT features FROM events WHERE features IS NOT NULL ORDER BY id DESC LIMIT ?")
+      .all(limit) as unknown as { features: Uint8Array }[];
+    return rows.map((r) => decodeFeatures(r.features));
   }
 
   #record(report: TrainReport, file: string | null): TrainReport {
@@ -186,6 +220,27 @@ export function gate(candidate: Metrics, active: Metrics | null, recallTarget: n
 }
 
 const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+
+/**
+ * Labels only cover events Jev saw, so a threshold fitted on them can be far too bold for
+ * the traffic Jev never sees. Score recent events with both models: if the candidate would
+ * send less than half the share the active model sends, lower its threshold until it sends
+ * exactly half. Thresholds then move a step per retrain, each step checked by audits.
+ */
+export function limitThreshold(candidate: Classifier, active: Classifier | null, recent: ArrayLike<number>[]) {
+  const share = (m: Classifier, t: number, scores?: number[]) =>
+    (scores ?? recent.map((x) => m.score(x))).filter((s) => s >= t).length / Math.max(recent.length, 1);
+  const cScores = recent.map((x) => candidate.score(x));
+  const cShare = share(candidate, candidate.file.drop_below, cScores);
+  if (!active || recent.length < 100) return { dropBelow: candidate.file.drop_below, active: active ? share(active, active.file.drop_below) : null, candidate: cShare, adjusted: false };
+  const aShare = share(active, active.file.drop_below);
+  const floor = aShare * MAX_JEV_SHARE_CUT;
+  if (cShare >= floor) return { dropBelow: candidate.file.drop_below, active: aShare, candidate: cShare, adjusted: false };
+  const sorted = [...cScores].sort((a, b) => b - a);
+  const k = Math.max(1, Math.ceil(floor * sorted.length));
+  const dropBelow = Math.min(candidate.file.drop_below, sorted[k - 1]!);
+  return { dropBelow, active: aShare, candidate: share(candidate, dropBelow, cScores), adjusted: true };
+}
 
 /** Score held-out labels with a model, in the terms the gate uses. */
 export function evaluate(model: Classifier, rows: { y: number; source: string; features: Uint8Array }[], humanWeight: number): Metrics {

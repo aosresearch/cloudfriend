@@ -1,25 +1,31 @@
 # cloudfriend
 
-cloudfriend is a live event triage pipeline in one Docker container. Events stream in, a decision model flags the ones that matter, and actions fire on the flags.
+cloudfriend is a live event triage pipeline in one Docker container. Events from any number of sources stream in. A fast classifier scores every one, a stronger model (Jev) judges the few that might matter, and the escalations land in a queue and in Slack. Every Jev verdict and every human correction trains the classifier, so over time less of the stream needs Jev.
 
 ```
-Sources ──> [ In: source adapters ──> Decide: decider adapter ──> Out: action adapters ] ──> Slack / webhooks / agents
-                                   │
-                SQLite file: durable queue, events for 7 days, flags kept
+Sources ──> [ In ──> Classifier ──> Jev ──> Out ] ──> escalation queue, Slack, webhooks, agents
+                        │ LightGBM,   │ few examples      ▲
+                        │ every event │ per template      │ labels: Jev verdicts,
+                        └─────────────┴───────────────────┘ confirmed / false positive / missed
+                SQLite file: durable queue, events for 7 days, flags and labels kept
 ```
 
 - **In:** `POST /in/<source>` accepts any JSON. Adapters for Sentry and PostHog pull out ids and grouping hints.
-- **Decide:** batches of events (100 events or 10 seconds by default) go to a decider. The default decider asks a model through OpenRouter which events need attention.
-- **Out:** each flag goes to every enabled action: Slack, a webhook, or your own adapter.
+- **Classifier:** a LightGBM model scores each event as it is parsed, about 30,000 events a second on one core. Routine events stop here, at no cost.
+- **Jev:** events that pass the classifier are grouped by message template. Recent verdicts are reused, and a few examples per template go to Jev (TypeSafe's Jev router on OpenRouter) in batches. In the benchmarks, Jev read about 1 line in 2,000.
+- **Out:** each escalation becomes a flag in the queue (`GET /queue`) and goes to every enabled action: Slack, a webhook, or your own adapter.
+- **Learn:** Jev's verdicts, audit samples and people's feedback are stored as labels. The classifier is retrained on them and swapped in only if it beats the current one.
 
 There is no Postgres or Redis. Everything lives in one SQLite file under `/data`.
+
+Try it: [cloudfriend.dev/demo](https://cloudfriend.dev/demo) replays real incidents from public benchmarks through the pipeline.
 
 ## Quick start
 
 ```bash
 docker run -p 8080:8080 -v cloudfriend-data:/data \
   -e CLOUDFRIEND_ADMIN_KEY=change-me \
-  -e OPENROUTER_API_KEY=sk-or-... \
+  -e JEV_API_KEY=sk-or-... \
   -e SLACK_WEBHOOK_URL=https://hooks.slack.com/... \
   ghcr.io/aosresearch/cloudfriend
 ```
@@ -43,7 +49,7 @@ curl -X POST http://localhost:8080/in/myapp \
 # accepted (202)
 ```
 
-Within about 10 seconds the batch goes to the model. If the event matters, a flag is posted to Slack.
+The classifier scores the event at once. If it might matter, it goes to Jev within about 10 seconds. If Jev escalates it, a flag is posted to Slack and appears in `GET /queue`.
 
 To build the image yourself, run `docker build -t cloudfriend .`.
 
@@ -81,16 +87,42 @@ Three stages run in the background. Each one commits its own result, so a crash 
 
 | Stage | Reads | Writes (in one transaction) |
 | --- | --- | --- |
-| parse | queue rows with status `new` | events, and sets the queue row to `done` (or `failed` if the adapter threw) |
-| decide | undecided events, once 100 are waiting or the oldest has waited 10 s | flags, one pending delivery per action, and marks the events decided |
+| parse | queue rows with status `new` | events with their classifier score, route and feature vector. Dropped events are marked decided. Then the queue row is set to `done` (or `failed` if the adapter threw) |
+| decide | undecided events, once 100 are waiting or the oldest has waited 10 s | flags, one pending delivery per action, training labels, and marks the events decided |
 | deliver | pending deliveries that are due | `ok`, or a retry with backoff (5 s doubling up to 1 h, 15 attempts) |
 
 After a crash or restart, anything not yet done is picked up again. Delivery to actions is at-least-once. Each flag has a stable `id`, sent to webhooks as `x-cloudfriend-flag-id`, which receivers can use to ignore repeats. If the decider fails (model down, bad key), its events stay queued and the call is retried with backoff up to 5 minutes.
 
+### Triage
+
+Every parsed event goes through a featurizer: message template, rates, novelty, error signals, service context. A LightGBM model then gives it a score, and the score picks the route:
+
+| Route | When | |
+| --- | --- | --- |
+| `drop` | score below the model's `drop_below` | done, no cost |
+| `jev` | score at or above `drop_below` | Jev decides |
+| `novel` | an error-like event whose template was never seen before | Jev sees it once |
+| `audit` | 1% of what would be dropped | Jev checks it, to find what the classifier misses |
+| `classifier` | there is no Jev; score at or above the model's `threshold` | escalated by the classifier alone |
+
+Before a batch goes to Jev, events whose template Jev ruled on in the last 15 minutes reuse that verdict. A "yes" adds them to the open flag instead of raising a new one. At most 3 examples per template are sent, each with a count of the similar events it stands for. [docs/triage.md](docs/triage.md) has the details.
+
+### Training
+
+Each event Jev reads becomes a label with the feature vector the classifier saw. People add labels by confirming flags, marking false positives, flagging missed events, or importing history. `cloudfriend train`, `POST /model/train`, or the daily schedule then:
+
+1. trains new LightGBM trees on top of the built-in model (`ml/train.py`),
+2. compares the candidate with the active model on the newest 20% of labels,
+3. checks on recent live traffic that the candidate won't cut Jev's share by more than half in one step,
+4. swaps it in without a restart.
+
+[docs/training.md](docs/training.md) has the details.
+
 ### Storage
 
 - **Events** are kept for `CLOUDFRIEND_RETENTION` (7 days by default), then deleted by a cleanup job that works in chunks of 1000 rows. Events the decider hasn't seen yet are never deleted.
-- **Flags** are kept until you delete them. Each flag lists its `event_ids`.
+- **Flags** are kept until you delete them. Each flag lists its `event_ids`, its queue `status` and the `users` found in its events.
+- **Labels** and **models** are kept until you delete them. Labels carry their own copy of the event and its features, so they outlive event retention.
 - Mounting a volume at `/data` is optional, but without one the data does not survive a replaced container. Production setups should mount a volume. The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
 
 ## Configuration
@@ -104,7 +136,7 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_DATA_DIR` | `/data` in the image, `./data` otherwise | Where `cloudfriend.db` lives. |
 | `CLOUDFRIEND_BATCH_SIZE` | `100` | Events per decider call. |
 | `CLOUDFRIEND_BATCH_WAIT` | `10s` | Longest an event waits for its batch to fill. |
-| `CLOUDFRIEND_DECIDER` | `openrouter` | Which decider adapter to use. |
+| `CLOUDFRIEND_DECIDER` | `jev` | Which decider adapter to use. |
 | `CLOUDFRIEND_DECIDER_CONCURRENCY` | `2` | Decider calls in flight at once. |
 | `CLOUDFRIEND_ACTIONS` | *(every configured action)* | Comma-separated list, e.g. `slack,webhook`. |
 | `CLOUDFRIEND_RETENTION` | `7d` | How long events are kept. |
@@ -114,10 +146,26 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | Group-commit window. |
 | `CLOUDFRIEND_ADAPTER_DIR` | *(unset)* | Extra adapters to load without rebuilding the image (see below). |
 | `CLOUDFRIEND_LOG` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
-| **OpenRouter decider** | | |
-| `OPENROUTER_API_KEY` | *(required)* | Without it, events are stored but not triaged. |
+| **Triage** | | |
+| `CLOUDFRIEND_TRIAGE` | `on` | `off` sends every event to the decider, as v0 did. |
+| `CLOUDFRIEND_MODEL` | | Model file to load. By default the last promoted model (`/data/models/active.json`), else the built-in `models/base.json`. |
+| `CLOUDFRIEND_AUDIT_RATE` | `0.01` | Share of dropped events sent to Jev anyway, to find missed escalations. |
+| `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send error-like events of a never-seen template to Jev once. |
+| `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
+| `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |
+| **Training** | | |
+| `CLOUDFRIEND_RETRAIN_INTERVAL` | `24h` | How often to retrain if enough labels arrived. `off` disables. |
+| `CLOUDFRIEND_RETRAIN_MIN_LABELS` | `200` | New labels needed before a scheduled run. |
+| `CLOUDFRIEND_HUMAN_LABEL_WEIGHT` | `5` | Weight of a person's label relative to Jev's. |
+| `CLOUDFRIEND_RECALL_TARGET` | `0.98` | Share of escalations that must still reach Jev. |
+| `CLOUDFRIEND_PYTHON` | `python3` | Interpreter with LightGBM, for training. |
+| **Jev decider** | | |
+| `JEV_API_KEY` | `OPENROUTER_API_KEY` | OpenRouter key for Jev. Without any key, the classifier decides alone. |
+| `JEV_MODEL` | `typesafe/jev-router` | Any OpenRouter model id. |
+| **OpenRouter decider** (`CLOUDFRIEND_DECIDER=openrouter`) | | |
+| `OPENROUTER_API_KEY` | | |
 | `OPENROUTER_MODEL` | `anthropic/claude-haiku-5.5` | Any OpenRouter model id. |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. Used by both deciders. |
 | `CLOUDFRIEND_DECIDER_INSTRUCTIONS` | | Extra context for the model, e.g. "Checkout and billing matter most; ignore staging." |
 | `CLOUDFRIEND_EVENT_CHARS` | `1500` | Most characters of each event shown to the model. |
 | **Slack action** | | |
@@ -158,19 +206,36 @@ The same operations work from the CLI inside the container, which needs no admin
 docker exec <container> cloudfriend secrets create sentry-prod --source sentry
 docker exec <container> cloudfriend secrets list
 docker exec <container> cloudfriend secrets revoke sec_1a2b3c4d5e6f7a8b
+docker exec <container> cloudfriend train [--dry-run]
+docker exec <container> cloudfriend model
+docker exec <container> cloudfriend labels import history.ndjson
 ```
 
 To rotate a secret, create a new one, update the sender, then revoke the old one.
 
-### Flags and events
+### Flags, the queue and events
 
 | | |
 | --- | --- |
-| `GET /flags?since=&until=&severity=&limit=&before=` | Newest first. To get the next page, pass the response's `next` as `before`. |
+| `GET /queue?status=&limit=` | Flags waiting on a person (`open` and `acknowledged`), most severe first, then newest. |
+| `GET /flags?since=&until=&severity=&status=&limit=&before=` | Newest first. To get the next page, pass the response's `next` as `before`. |
 | `GET /flags/:id` | `{ flag, events, deliveries }`. The events are the ones still within retention. |
+| `PATCH /flags/:id` | `{"status": "acknowledged" \| "resolved" \| "open", "note": "..."}` |
+| `POST /flags/:id/feedback` | `{"verdict": "confirmed" \| "false_positive"}`. Labels the flag's events for training. |
 | `DELETE /flags/:id` | |
-| `GET /events?source=&since=&until=&type=&group_key=&limit=&before=` | Newest first, paged the same way. |
-| `GET /events/:id` | |
+| `GET /events?source=&user=&route=&since=&until=&type=&group_key=&limit=&before=` | Newest first, paged the same way. `user` links events from every source that mention the same user. |
+| `GET /events/:id` | Includes the classifier's `score` and `route`. |
+| `POST /events/:id/feedback` | `{"escalate": true}` for a missed escalation (or `false`). Returns the kind of mistake. |
+
+### Labels, the model and stats
+
+| | |
+| --- | --- |
+| `GET /labels` | Label counts by source (`jev`, `human`) and verdict. |
+| `POST /labels` | `[{"source", "data", "received_at", "escalate"}]`: import labelled history. |
+| `GET /model` | The active classifier and the last training runs with their reports. |
+| `POST /model/train?dry_run=1` | Train now. Returns the run's report. |
+| `GET /stats?since=24h` | Events per route, share past the classifier, flags by status, Jev calls since start, the model. |
 
 `since` and `until` take ISO 8601, epoch milliseconds, or a relative duration such as `since=1h`. `limit` defaults to 100 and caps at 1000.
 
@@ -187,7 +252,12 @@ A flag looks like this:
   "severity": "high",
   "event_ids": ["1041", "1042", "1057"],
   "created_at": "2026-10-25T17:30:12.000Z",
-  "decider": "openrouter"
+  "decider": "jev",
+  "status": "open",
+  "event_count": 14,
+  "users": ["u_4417"],
+  "updated_at": "2026-10-25T17:31:40.000Z",
+  "note": null
 }
 ```
 
@@ -299,6 +369,7 @@ npm test             # unit tests, plus an end-to-end run with mock OpenRouter a
 npm run test:docker  # builds the image and tests it in Docker (needs a running Docker daemon)
 npm run typecheck
 npm run cloudfriend -- secrets list
+python3 -m pip install lightgbm numpy  # only for training; see ml/README.md
 ```
 
 `npm run test:docker` runs the image the way the Quick start does, against a mock OpenRouter and Slack on the host. It checks that:
@@ -313,10 +384,15 @@ npm run cloudfriend -- secrets list
 
 To test an existing image instead of building one, set `CLOUDFRIEND_IMAGE=ghcr.io/aosresearch/cloudfriend:tag`.
 
+## Benchmarks
+
+The built-in classifier is trained and evaluated on two public datasets with real logs. The data, the labels and the splits are described in [docs/benchmarks.md](docs/benchmarks.md), and [ml/README.md](ml/README.md) has the commands to reproduce everything.
+
+- **RCAEval RE3** (90 cases, MIT): code-level faults injected into Online Boutique, Sock Shop and Train Ticket. It measures whether the fault was escalated, how fast, and how much of the stream reached Jev.
+- **GAIA MicroSS** (two weeks, about 50M log lines): normal operation with occasional injected faults. It measures false escalations per day, and whether events can be linked across sources by user.
+
+BENCHMARK_SUMMARY
+
 ## Left out on purpose
 
-These are left out of v0 on purpose: a UI, a rules engine, dedup, budgets, and users and roles. They can be added when people ask for them.
-
-## Open questions
-
-- The Jev setup for the default decider. `OPENROUTER_BASE_URL` points the decider at any OpenAI-compatible endpoint, but there is no Jev-specific integration yet.
+These are left out on purpose: a UI (the API serves the queue), a rules engine, budgets, and users and roles. They can be added when people ask for them.

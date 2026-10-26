@@ -8,6 +8,7 @@ import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, FEATURE_NAMES, Featurizer, FEATURIZER_VERSION, levelOf, maskMessage } from "../src/triage/features.ts";
 import { Gbdt } from "../src/triage/gbdt.ts";
 import { BUILTIN_MODEL } from "../src/triage/runtime.ts";
+import { limitThreshold } from "../src/training.ts";
 import { count, fakeDecider, makeCloudfriend, tempDir, type TestCloudfriend } from "./helpers.ts";
 
 const ERRORISH = FEATURE_NAMES.indexOf("errorish");
@@ -312,6 +313,23 @@ describe("triage in the pipeline", () => {
     assert.equal(count(cf, "labels WHERE event_id < 0 AND source = 'human'"), 2);
     const labels = await json(cf.get("/labels"));
     assert.deepEqual(labels.labels.human, { escalate: 1, ignore: 1 });
+  });
+});
+
+describe("threshold limit", () => {
+  it("lowers a candidate's threshold so it keeps at least half the active model's Jev share", () => {
+    const active = new Classifier(tinyModel({ drop_below: 0.5 }));
+    const bold = new Classifier(tinyModel({ drop_below: 0.99 }));
+    const recent = Array.from({ length: 1000 }, (_, i) => {
+      const v = new Array(FEATURE_NAMES.length).fill(0);
+      v[ERRORISH] = i < 100 ? 1 : 0; // 10% of recent events look like errors
+      return v;
+    });
+    const r = limitThreshold(bold, active, recent);
+    assert.equal(r.active, 0.1);
+    assert.equal(r.adjusted, true);
+    assert.ok(r.candidate >= 0.05, `keeps ${r.candidate}`);
+    assert.equal(limitThreshold(new Classifier(tinyModel({ drop_below: 0.5 })), active, recent).adjusted, false);
   });
 });
 

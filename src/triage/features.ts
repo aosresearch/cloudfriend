@@ -163,8 +163,8 @@ const LEADING_TIMESTAMP = /^\s*[\[(]?\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+
  * and last lines (a traceback's last line names the error).
  */
 export function maskMessage(text: string, maxLen = 160): string {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  let s = lines.length > 1 ? `${lines[0]} … ${lines[lines.length - 1]}` : (lines[0] ?? "");
+  const lines = (text.length > 8000 ? text.slice(0, 8000) : text).split("\n").map((l) => l.trim()).filter(Boolean);
+  let s = lines.length > 1 ? `${lines[0]!.slice(0, 600)} … ${lines[lines.length - 1]!.slice(0, 400)}` : (lines[0] ?? "").slice(0, 1000);
   s = s.replace(LEADING_TIMESTAMP, "");
   s = s
     .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "<IP>")
@@ -348,9 +348,15 @@ export class Featurizer {
     const tr = tpl?.rate ?? newRate(t);
     const sv = svc ?? { count: 0, first: t, all: newRate(t), errors: newRate(t), newTemplates: newRate(t), templates: 0 };
 
-    const digits = (text.match(/\d/g) ?? []).length;
-    const letters = (text.match(/[a-z]/gi) ?? []).length;
-    const uppers = (text.match(/[A-Z]/g) ?? []).length;
+    let digits = 0;
+    let letters = 0;
+    let uppers = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c >= 48 && c <= 57) digits++;
+      else if (c >= 65 && c <= 90) (letters++, uppers++);
+      else if (c >= 97 && c <= 122) letters++;
+    }
     const stackFrames = (text.match(/\n\s*at |File "[^"]+", line \d+|\.(java|go|py|js|ts|rb):\d+/g) ?? []).length;
 
     const buckets = new Array<number>(HASH_BUCKETS).fill(0);

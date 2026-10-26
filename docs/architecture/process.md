@@ -106,17 +106,21 @@ cloudfriend then, in one transaction:
 3. adds one `deliveries` row per enabled action for each flag,
 4. marks every event in the batch `decided = 1`, flagged or not.
 
-### The default decider: OpenRouter
+### Triage before the decider
 
-The `openrouter` decider makes one chat completion per batch:
+With triage on (the default), parse also scores each event with the classifier, and only events that pass it wait for a batch. Before the batch reaches the decider, events are grouped by template and recent verdicts are reused, so the decider sees a few examples per template. [Triage](../triage.md) describes the routes, the grouping and the verdict cache. The steps below still apply to the examples that are sent.
+
+### The Jev and OpenRouter deciders
+
+The `jev` decider (the default) and the `openrouter` decider share one implementation and make one chat completion per batch. Jev uses `JEV_API_KEY` and `JEV_MODEL` (`typesafe/jev-router`); openrouter uses `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`.
 
 - **System prompt.** Describes cloudfriend's job: flag new or unusual errors, spikes, regressions after deploys, outages, data loss, security problems, and failures in checkout, payments or signup. Ignore routine logs, isolated handled errors and normal analytics. Group events with the same cause into one flag. `CLOUDFRIEND_DECIDER_INSTRUCTIONS` is appended as operator context.
-- **User message.** The batch, oldest first. Each event is a numbered line with its source, time, type and group, then its data as compact JSON cut to `CLOUDFRIEND_EVENT_CHARS` (1500) characters. Plain fields come before nested ones, so the cut removes stack frames rather than the error title.
+- **User message.** The batch, oldest first. Each event is a numbered line with its source, time, type and group, plus its classifier score and how many similar events it stands for. Then comes its data as compact JSON, cut to `CLOUDFRIEND_EVENT_CHARS` (1500) characters. Plain fields come before nested ones, so the cut removes stack frames rather than the error title.
 - **Reply.** JSON only, `{"flags": [{"reason", "severity", "events": [0, 3]}]}`, with `temperature: 0`. The numbers are mapped back to event ids. Unknown numbers are ignored, and an unknown severity becomes `medium`.
 
-The model is `OPENROUTER_MODEL` (`anthropic/claude-haiku-5.5` by default), and each call times out after 90 seconds. `OPENROUTER_BASE_URL` points it at any OpenAI-compatible endpoint instead.
+Each call times out after 180 seconds. `OPENROUTER_BASE_URL` points either decider at any OpenAI-compatible endpoint instead.
 
-Without `OPENROUTER_API_KEY` the decider is off. Events are still parsed and stored, and they are decided once a key is set and cloudfriend restarts.
+Without a key the decider is off. With a classifier loaded, the classifier then escalates on its own at its `threshold`. Without a classifier (`CLOUDFRIEND_TRIAGE=off`), events are parsed and stored, and decided once a key is set and cloudfriend restarts.
 
 ### When the decider fails
 

@@ -1,12 +1,13 @@
 // Replay prepared streams through the featurizer and write training rows as CSV, so that
 // Python trains on exactly the numbers the server computes.
 //
-//   node ml/featurize.ts --data data/prepared/re3 --data data/prepared/gaia --out data/features
+//   node ml/featurize.ts --data data/prepared/re3 --data data/prepared/gaia:0.005:0.1 --out data/features
 //
 // Writes <out>/{train,valid,eval}.csv with columns: case, t, y, w, f0..fN. Every event goes
 // through the featurizer (its rate features need the full history), but only a sample of the
-// plain negatives is written: all positives, all error-like negatives, and `--keep` of the
-// rest, weighted up by 1/keep so the class balance stays honest.
+// negatives is written: all positives, a share of error-like negatives (default all), and a
+// share of the rest (`--keep`), each weighted up by 1/share so the class balance stays honest.
+// `--data dir:keep:keepErrors` overrides both shares for one dataset (GAIA is 50M lines).
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -46,7 +47,10 @@ const files = Object.fromEntries(
 const fmt = (v: number) => (Number.isNaN(v) ? "" : Number.isInteger(v) ? String(v) : v.toPrecision(6));
 const stats: Record<string, { events: number; rows: number; positives: number }> = {};
 
-for (const dir of args.data) {
+for (const spec of args.data) {
+  const [dir, keepArg, keepErrArg] = spec.split(":") as [string, string?, string?];
+  const keepPlain = keepArg ? Number(keepArg) : keep;
+  const keepErr = keepErrArg ? Number(keepErrArg) : 1;
   const cases = loadCases(dir);
   const chains = new Map<string, Featurizer>();
   for (const c of cases) {
@@ -61,9 +65,12 @@ for (const dir of args.data) {
       first ??= c.chain ? chainStart : e.t;
       if (e.t - first < warmup) continue;
       let w = 1;
-      if (!e.y && !out.errorish) {
-        if (rand() >= keep) continue;
-        w = 1 / keep;
+      if (!e.y) {
+        const share = out.errorish ? keepErr : keepPlain;
+        if (share < 1) {
+          if (rand() >= share) continue;
+          w = 1 / share;
+        }
       }
       st.rows++;
       st.positives += e.y;
