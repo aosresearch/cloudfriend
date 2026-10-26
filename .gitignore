@@ -1,0 +1,9 @@
+node_modules/
+data/
+*.db
+*.db-wal
+*.db-shm
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+.DS_Store

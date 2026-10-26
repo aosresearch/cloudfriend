@@ -1,0 +1,30 @@
+{
+  "name": "sieve",
+  "version": "0.1.0",
+  "description": "Live event triage pipeline: events in, a decider flags what matters, actions fire on the flags.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "sieve": "bin/sieve"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "dev": "SIEVE_DATA_DIR=./data node --disable-warning=ExperimentalWarning --watch src/main.ts",
+    "sieve": "node --disable-warning=ExperimentalWarning src/cli.ts",
+    "typecheck": "tsc",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec --test-concurrency=1 --test-timeout=30000 'test/**/*.test.ts'",
+    "test:docker": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec --test-timeout=600000 test/docker/docker.e2e.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "hono": "4.13.14"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2"
+  }
+}
