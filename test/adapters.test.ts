@@ -6,10 +6,10 @@ import webhook from "../src/adapters/actions/webhook.ts";
 import openrouter, { buildPrompt, parseReply } from "../src/adapters/deciders/openrouter.ts";
 import { loadAdapters } from "../src/adapters.ts";
 import { compactJson } from "../src/compact.ts";
-import type { Flag, SieveEvent } from "../src/types.ts";
+import type { Flag, CloudfriendEvent } from "../src/types.ts";
 import { mockServer } from "./helpers.ts";
 
-const events: SieveEvent[] = [
+const events: CloudfriendEvent[] = [
   { id: "10", source: "sentry", received_at: "2026-10-25T17:30:00.000Z", data: { title: "TypeError in checkout" }, type: "issue.created", group_key: "issue:1" },
   { id: "11", source: "myapp", received_at: "2026-10-25T17:30:01.000Z", data: { msg: "user logged in" } },
 ];
@@ -67,7 +67,7 @@ describe("openrouter decider", () => {
         OPENROUTER_API_KEY: "sk-or-test",
         OPENROUTER_BASE_URL: server.url + "/api/v1",
         OPENROUTER_MODEL: "test/model",
-        SIEVE_DECIDER_INSTRUCTIONS: "Checkout matters most.",
+        CLOUDFRIEND_DECIDER_INSTRUCTIONS: "Checkout matters most.",
       };
       const flags = await openrouter.decide(events, { env, signal });
       assert.deepEqual(flags, [{ reason: "Checkout errors", severity: "critical", event_ids: ["10"] }]);
@@ -102,10 +102,10 @@ describe("webhook action", () => {
       const env = { WEBHOOK_URL: server.url + "/hook", WEBHOOK_SECRET: "s3cret" };
       await webhook.run(flag, { events, env, signal });
       const req = server.requests[0]!;
-      assert.equal(req.headers["x-sieve-flag-id"], "flg_abc");
+      assert.equal(req.headers["x-cloudfriend-flag-id"], "flg_abc");
       assert.deepEqual(JSON.parse(req.body), { flag, events });
       const expected = "sha256=" + createHmac("sha256", "s3cret").update(req.body).digest("hex");
-      assert.equal(req.headers["x-sieve-signature"], expected);
+      assert.equal(req.headers["x-cloudfriend-signature"], expected);
     } finally {
       await server.close();
     }

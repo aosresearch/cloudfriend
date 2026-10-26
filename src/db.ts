@@ -70,7 +70,7 @@ export interface OpenOptions {
   synchronous?: "FULL" | "NORMAL";
 }
 
-/** Open (and create if needed) the Sieve database. Use ":memory:" in tests. */
+/** Open (and create if needed) the cloudfriend database. Use ":memory:" in tests. */
 export function openDb(file: string, opts: OpenOptions = {}): DB {
   if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
@@ -85,7 +85,7 @@ export function openDb(file: string, opts: OpenOptions = {}): DB {
 }
 
 export function dbPath(dataDir: string): string {
-  return path.join(dataDir, "sieve.db");
+  return path.join(dataDir, "cloudfriend.db");
 }
 
 /**

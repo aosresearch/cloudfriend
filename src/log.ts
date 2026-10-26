@@ -1,9 +1,9 @@
-// Minimal logger. SIEVE_LOG=silent turns it off (tests), SIEVE_LOG=debug adds detail.
+// Minimal logger. CLOUDFRIEND_LOG=silent turns it off (tests), CLOUDFRIEND_LOG=debug adds detail.
 type Level = "debug" | "info" | "warn" | "error";
 const ORDER: Record<Level | "silent", number> = { debug: 0, info: 1, warn: 2, error: 3, silent: 4 };
 
 function threshold(): number {
-  return ORDER[(process.env.SIEVE_LOG as Level) ?? "info"] ?? ORDER.info;
+  return ORDER[(process.env.CLOUDFRIEND_LOG as Level) ?? "info"] ?? ORDER.info;
 }
 
 function write(level: Level, msg: string, fields?: Record<string, unknown>): void {

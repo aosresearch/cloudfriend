@@ -60,25 +60,25 @@ function list(raw: string | undefined): string[] | null {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const sync = (env.SIEVE_SYNCHRONOUS ?? "FULL").toUpperCase();
-  if (sync !== "FULL" && sync !== "NORMAL") throw new Error("SIEVE_SYNCHRONOUS must be FULL or NORMAL");
+  const sync = (env.CLOUDFRIEND_SYNCHRONOUS ?? "FULL").toUpperCase();
+  if (sync !== "FULL" && sync !== "NORMAL") throw new Error("CLOUDFRIEND_SYNCHRONOUS must be FULL or NORMAL");
   return {
     port: int(env, "PORT", 8080, 0),
     host: env.HOST || "0.0.0.0",
-    dataDir: path.resolve(env.SIEVE_DATA_DIR || "./data"),
-    adminKey: env.SIEVE_ADMIN_KEY ?? "",
-    commitWindowMs: duration(env, "SIEVE_COMMIT_WINDOW", "2ms"),
+    dataDir: path.resolve(env.CLOUDFRIEND_DATA_DIR || "./data"),
+    adminKey: env.CLOUDFRIEND_ADMIN_KEY ?? "",
+    commitWindowMs: duration(env, "CLOUDFRIEND_COMMIT_WINDOW", "2ms"),
     synchronous: sync,
-    maxQueue: int(env, "SIEVE_MAX_QUEUE", 1_000_000),
-    maxBodyBytes: int(env, "SIEVE_MAX_BODY_BYTES", 1_048_576),
-    batchSize: int(env, "SIEVE_BATCH_SIZE", 100),
-    batchWaitMs: duration(env, "SIEVE_BATCH_WAIT", "10s"),
-    deciderConcurrency: int(env, "SIEVE_DECIDER_CONCURRENCY", 2),
-    retentionMs: duration(env, "SIEVE_RETENTION", "7d"),
-    cleanupIntervalMs: duration(env, "SIEVE_CLEANUP_INTERVAL", "1m"),
-    decider: env.SIEVE_DECIDER || "openrouter",
-    actions: list(env.SIEVE_ACTIONS),
-    adapterDir: env.SIEVE_ADAPTER_DIR ? path.resolve(env.SIEVE_ADAPTER_DIR) : null,
-    pollMs: duration(env, "SIEVE_POLL_INTERVAL", "200ms"),
+    maxQueue: int(env, "CLOUDFRIEND_MAX_QUEUE", 1_000_000),
+    maxBodyBytes: int(env, "CLOUDFRIEND_MAX_BODY_BYTES", 1_048_576),
+    batchSize: int(env, "CLOUDFRIEND_BATCH_SIZE", 100),
+    batchWaitMs: duration(env, "CLOUDFRIEND_BATCH_WAIT", "10s"),
+    deciderConcurrency: int(env, "CLOUDFRIEND_DECIDER_CONCURRENCY", 2),
+    retentionMs: duration(env, "CLOUDFRIEND_RETENTION", "7d"),
+    cleanupIntervalMs: duration(env, "CLOUDFRIEND_CLEANUP_INTERVAL", "1m"),
+    decider: env.CLOUDFRIEND_DECIDER || "openrouter",
+    actions: list(env.CLOUDFRIEND_ACTIONS),
+    adapterDir: env.CLOUDFRIEND_ADAPTER_DIR ? path.resolve(env.CLOUDFRIEND_ADAPTER_DIR) : null,
+    pollMs: duration(env, "CLOUDFRIEND_POLL_INTERVAL", "200ms"),
   };
 }

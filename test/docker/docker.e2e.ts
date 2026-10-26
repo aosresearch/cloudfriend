@@ -1,6 +1,6 @@
 // Tests the Docker image the way people run it: `docker run` with a volume, env config,
 // mock OpenRouter and Slack on the host. Run with `npm run test:docker` (needs a Docker daemon).
-// Set SIEVE_IMAGE to test an existing image instead of building one.
+// Set CLOUDFRIEND_IMAGE to test an existing image instead of building one.
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,9 +10,9 @@ import { after, before, describe, it } from "node:test";
 import { mockServer, waitFor } from "../helpers.ts";
 
 const ROOT = path.join(import.meta.dirname, "../..");
-const IMAGE = process.env.SIEVE_IMAGE ?? "sieve:test";
+const IMAGE = process.env.CLOUDFRIEND_IMAGE ?? "cloudfriend:test";
 const RUN = randomBytes(3).toString("hex");
-const VOLUME = `sieve-test-${RUN}`;
+const VOLUME = `cloudfriend-test-${RUN}`;
 const ADMIN = "docker-admin-key";
 // Docker Desktop forwards host.docker.internal to the host's loopback. On Linux it is the
 // bridge gateway, so the mocks have to listen on all interfaces there.
@@ -72,16 +72,16 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
   let secret = "";
 
   const env = () => ({
-    SIEVE_ADMIN_KEY: ADMIN,
+    CLOUDFRIEND_ADMIN_KEY: ADMIN,
     OPENROUTER_API_KEY: "sk-or-test",
     OPENROUTER_BASE_URL: `http://host.docker.internal:${openrouter.port}/api/v1`,
     SLACK_WEBHOOK_URL: `http://host.docker.internal:${slack.port}/services/T/B/X`,
-    SIEVE_BATCH_WAIT: "300ms",
+    CLOUDFRIEND_BATCH_WAIT: "300ms",
   });
 
   /** `docker run -d -p ... -v <volume>:/data -e ...`, the README's command plus test settings. */
   async function start(opts: { volume?: boolean; env?: Record<string, string> } = {}): Promise<void> {
-    name = `sieve-test-${RUN}-${containers.length}`;
+    name = `cloudfriend-test-${RUN}-${containers.length}`;
     const args = ["run", "-d", "--name", name, "-p", "127.0.0.1::8080", "--add-host=host.docker.internal:host-gateway"];
     if (opts.volume !== false) args.push("-v", `${VOLUME}:/data`);
     for (const [k, v] of Object.entries({ ...env(), ...opts.env })) args.push("-e", `${k}=${v}`);
@@ -118,7 +118,7 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
 
   before(async () => {
     await docker("version", "--format", "{{.Server.Version}}");
-    if (!process.env.SIEVE_IMAGE) {
+    if (!process.env.CLOUDFRIEND_IMAGE) {
       execFileSync("docker", ["build", "-t", IMAGE, ROOT], { stdio: ["ignore", "ignore", "inherit"] });
     }
     openrouter = await mockServer((req) => {
@@ -160,9 +160,9 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
 
   it("prints a first-boot ingest secret to the logs", async () => {
     const output = await logs(name);
-    secret = /sieve_[A-Za-z0-9_-]{43}/.exec(output)?.[0] ?? "";
+    secret = /cloudfriend_[A-Za-z0-9_-]{43}/.exec(output)?.[0] ?? "";
     assert.ok(secret, `no secret in logs:\n${output}`);
-    assert.match(output, /sieve listening .*decider=openrouter actions=slack /);
+    assert.match(output, /cloudfriend listening .*decider=openrouter actions=slack /);
   });
 
   it("turns a Sentry webhook into a flag in Slack", async () => {
@@ -194,14 +194,14 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
   });
 
   it("manages secrets with the CLI through docker exec", async () => {
-    const created = JSON.parse(await docker("exec", name, "sieve", "secrets", "create", "posthog-prod", "--source", "posthog", "--json"));
-    assert.match(created.secret, /^sieve_/);
-    assert.match(await docker("exec", name, "sieve", "secrets", "list"), /posthog-prod\s+posthog/);
+    const created = JSON.parse(await docker("exec", name, "cloudfriend", "secrets", "create", "posthog-prod", "--source", "posthog", "--json"));
+    assert.match(created.secret, /^cloudfriend_/);
+    assert.match(await docker("exec", name, "cloudfriend", "secrets", "list"), /posthog-prod\s+posthog/);
 
     // The running server sees a secret the CLI wrote, and its revocation, immediately.
     assert.equal((await ingest("posthog", { event: "signup" }, created.secret)).status, 202);
     assert.equal((await ingest("sentry", {}, created.secret)).status, 401, "scoped to posthog");
-    await docker("exec", name, "sieve", "secrets", "revoke", created.id);
+    await docker("exec", name, "cloudfriend", "secrets", "revoke", created.id);
     assert.equal((await ingest("posthog", { event: "signup" }, created.secret)).status, 401);
   });
 
@@ -230,7 +230,7 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
   it("loses no accepted event when the container is killed, and processes them on start", async () => {
     // A slow worker poll, so the kill lands while requests are still raw rows in the queue table.
     await docker("rm", "-f", name);
-    await start({ env: { SIEVE_POLL_INTERVAL: "2s" } });
+    await start({ env: { CLOUDFRIEND_POLL_INTERVAL: "2s" } });
     deciderMode = "fail"; // and nothing that did get parsed can be decided before the crash
     const N = 50;
     const results = await Promise.all(

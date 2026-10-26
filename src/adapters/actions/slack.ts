@@ -3,7 +3,7 @@
 //   SLACK_WEBHOOK_URL   https://hooks.slack.com/services/... (the action is off when unset)
 //   SLACK_MIN_SEVERITY  only post flags at or above this severity (default low)
 import { compactJson } from "../../compact.ts";
-import { defineAction, SEVERITIES, type Flag, type SieveEvent, type Severity } from "../../types.ts";
+import { defineAction, SEVERITIES, type Flag, type CloudfriendEvent, type Severity } from "../../types.ts";
 
 const ICON: Record<Severity, string> = {
   low: ":large_blue_circle:",
@@ -14,7 +14,7 @@ const ICON: Record<Severity, string> = {
 
 const escape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-export function slackMessage(flag: Flag, events: SieveEvent[]) {
+export function slackMessage(flag: Flag, events: CloudfriendEvent[]) {
   const sources = [...new Set(events.map((e) => e.source))].join(", ") || "unknown";
   const title = `${ICON[flag.severity]} *${flag.severity.toUpperCase()}*  ${escape(flag.reason)}`;
   const blocks: object[] = [

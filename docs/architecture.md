@@ -4,7 +4,7 @@ title: Architecture
 
 # Architecture
 
-Sieve is one Node.js process and one SQLite file. Events move through three steps, and each step writes its result to the database before the next one starts:
+cloudfriend is one Node.js process and one SQLite file. Events move through three steps, and each step writes its result to the database before the next one starts:
 
 1. **[Intake](./architecture/intake.md)** stores each request's raw bytes and replies `202`.
 2. **[Process](./architecture/process.md)** parses stored requests into events, then sends batches of events to a decider, which returns flags.
@@ -21,21 +21,21 @@ flowchart TB
   process <-.->|"batch of events"| model(["OpenRouter<br/>model"])
 ```
 
-Square boxes are Sieve's steps and rounded boxes are outside systems. Each arrow between steps is a table in the one SQLite file: a step hands work to the next by writing a row.
+Square boxes are cloudfriend's steps and rounded boxes are outside systems. Each arrow between steps is a table in the one SQLite file: a step hands work to the next by writing a row.
 
 ## Why it is built this way
 
-**An acknowledged event is never lost.** Sieve replies `202` only after the request is committed to disk. Every later step reads its input from a table and writes its output in one transaction, so a crash or restart at any moment leaves each event either before or after a step, never halfway. On startup the worker simply continues with whatever is pending.
+**An acknowledged event is never lost.** cloudfriend replies `202` only after the request is committed to disk. Every later step reads its input from a table and writes its output in one transaction, so a crash or restart at any moment leaves each event either before or after a step, never halfway. On startup the worker simply continues with whatever is pending.
 
 **The request path does almost nothing.** Intake does not parse JSON or call the model. It checks the secret, appends bytes, and waits for a commit that it shares with every other request in the same ~2 ms. Slow parts (parsing, the model, Slack) cannot slow down senders.
 
 **Batches, not single events.** The model sees up to 100 events at once. It can see that 40 errors share one cause and raise one flag for them, and one model call per batch keeps cost flat when traffic spikes.
 
-**Everything pluggable is a file.** Sources, deciders and actions are adapters: one TypeScript file each, named after the file. You can add or replace them without rebuilding the image by mounting a directory and setting `SIEVE_ADAPTER_DIR`.
+**Everything pluggable is a file.** Sources, deciders and actions are adapters: one TypeScript file each, named after the file. You can add or replace them without rebuilding the image by mounting a directory and setting `CLOUDFRIEND_ADAPTER_DIR`.
 
 ## The data model
 
-All state lives in `sieve.db` under `/data`, in WAL mode.
+All state lives in `cloudfriend.db` under `/data`, in WAL mode.
 
 | Table | One row per | Written by | Read by |
 | --- | --- | --- | --- |
@@ -55,7 +55,7 @@ A row's status column is what moves it from step to step:
 
 ## Retention
 
-A cleanup job runs every minute. It deletes processed `queue` rows and decided `events` older than `SIEVE_RETENTION` (7 days by default), 1000 rows at a time so it never holds the database for long. Events the decider has not seen yet are never deleted. Flags are kept until you delete them with `DELETE /flags/:id`.
+A cleanup job runs every minute. It deletes processed `queue` rows and decided `events` older than `CLOUDFRIEND_RETENTION` (7 days by default), 1000 rows at a time so it never holds the database for long. Events the decider has not seen yet are never deleted. Flags are kept until you delete them with `DELETE /flags/:id`.
 
 ## Adapters
 
@@ -65,11 +65,11 @@ A cleanup job runs every minute. It deletes processed `queue` rows and decided `
 | Decider | `decide(events[]) → flags[]` | `openrouter` |
 | Action | `enabled?(env)` and `run(flag, { events })` | `slack`, `webhook` |
 
-Built-in adapters live in `src/adapters/{sources,deciders,actions}/`, and the interfaces are in `src/types.ts`. A file in `SIEVE_ADAPTER_DIR` with the same name replaces a built-in one. Each step's page shows how its adapter is called.
+Built-in adapters live in `src/adapters/{sources,deciders,actions}/`, and the interfaces are in `src/types.ts`. A file in `CLOUDFRIEND_ADAPTER_DIR` with the same name replaces a built-in one. Each step's page shows how its adapter is called.
 
 ## Shutdown
 
-On `SIGTERM` (what `docker stop` sends), Sieve:
+On `SIGTERM` (what `docker stop` sends), cloudfriend:
 
 1. stops accepting HTTP requests,
 2. stops the worker from starting new work,

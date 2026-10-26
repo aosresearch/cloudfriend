@@ -25,7 +25,7 @@ flowchart TB
 
 ## The worker loop
 
-The worker wakes every `SIEVE_POLL_INTERVAL` (200 ms) and, in order:
+The worker wakes every `CLOUDFRIEND_POLL_INTERVAL` (200 ms) and, in order:
 
 1. parses new requests until none are left,
 2. starts a decide call for every batch that is ready,
@@ -76,12 +76,12 @@ Return an array. Only `data` is required. Return `[]` to drop a request, and thr
 
 Decide looks at events with `decided = 0`, oldest first. It starts a batch when either:
 
-- `SIEVE_BATCH_SIZE` events (100) are waiting, or
-- the oldest waiting event arrived `SIEVE_BATCH_WAIT` (10 s) ago or more.
+- `CLOUDFRIEND_BATCH_SIZE` events (100) are waiting, or
+- the oldest waiting event arrived `CLOUDFRIEND_BATCH_WAIT` (10 s) ago or more.
 
 So under heavy traffic the model gets full batches as fast as it can take them, and under light traffic no event waits more than about 10 seconds.
 
-Up to `SIEVE_DECIDER_CONCURRENCY` (2) batches are decided at once. Events already in a running batch are skipped when the next batch is built, so no event is in two batches at the same time.
+Up to `CLOUDFRIEND_DECIDER_CONCURRENCY` (2) batches are decided at once. Events already in a running batch are skipped when the next batch is built, so no event is in two batches at the same time.
 
 ### What the decider returns
 
@@ -99,7 +99,7 @@ A decider gets the batch and returns flag drafts:
 
 `severity` is one of `low`, `medium`, `high` or `critical`. An empty array means nothing in the batch needs attention, which is the usual answer.
 
-Sieve then, in one transaction:
+cloudfriend then, in one transaction:
 
 1. drops drafts with no reason, and event ids that are not in this batch,
 2. stores each remaining flag with a new id such as `flg_8c1d0e4f2a7b9c3d5e6f`,
@@ -110,13 +110,13 @@ Sieve then, in one transaction:
 
 The `openrouter` decider makes one chat completion per batch:
 
-- **System prompt.** Describes Sieve's job: flag new or unusual errors, spikes, regressions after deploys, outages, data loss, security problems, and failures in checkout, payments or signup. Ignore routine logs, isolated handled errors and normal analytics. Group events with the same cause into one flag. `SIEVE_DECIDER_INSTRUCTIONS` is appended as operator context.
-- **User message.** The batch, oldest first. Each event is a numbered line with its source, time, type and group, then its data as compact JSON cut to `SIEVE_EVENT_CHARS` (1500) characters. Plain fields come before nested ones, so the cut removes stack frames rather than the error title.
+- **System prompt.** Describes cloudfriend's job: flag new or unusual errors, spikes, regressions after deploys, outages, data loss, security problems, and failures in checkout, payments or signup. Ignore routine logs, isolated handled errors and normal analytics. Group events with the same cause into one flag. `CLOUDFRIEND_DECIDER_INSTRUCTIONS` is appended as operator context.
+- **User message.** The batch, oldest first. Each event is a numbered line with its source, time, type and group, then its data as compact JSON cut to `CLOUDFRIEND_EVENT_CHARS` (1500) characters. Plain fields come before nested ones, so the cut removes stack frames rather than the error title.
 - **Reply.** JSON only, `{"flags": [{"reason", "severity", "events": [0, 3]}]}`, with `temperature: 0`. The numbers are mapped back to event ids. Unknown numbers are ignored, and an unknown severity becomes `medium`.
 
 The model is `OPENROUTER_MODEL` (`anthropic/claude-haiku-5.5` by default), and each call times out after 90 seconds. `OPENROUTER_BASE_URL` points it at any OpenAI-compatible endpoint instead.
 
-Without `OPENROUTER_API_KEY` the decider is off. Events are still parsed and stored, and they are decided once a key is set and Sieve restarts.
+Without `OPENROUTER_API_KEY` the decider is off. Events are still parsed and stored, and they are decided once a key is set and cloudfriend restarts.
 
 ### When the decider fails
 
@@ -138,14 +138,14 @@ export default {
 } satisfies DeciderAdapter;
 ```
 
-Each event has `id`, `source`, `received_at`, `data` and the optional hints. Pass `signal` to any `fetch`, so the call is cancelled on shutdown. Select it with `SIEVE_DECIDER=rules`.
+Each event has `id`, `source`, `received_at`, `data` and the optional hints. Pass `signal` to any `fetch`, so the call is cancelled on shutdown. Select it with `CLOUDFRIEND_DECIDER=rules`.
 
 ## Tuning
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SIEVE_BATCH_SIZE` | `100` | Larger batches give the model more context and cost less per event, but each call is slower. |
-| `SIEVE_BATCH_WAIT` | `10s` | The longest an event waits before it is decided. |
-| `SIEVE_DECIDER_CONCURRENCY` | `2` | Raise it if flags arrive later and later under steady traffic, which means batches are waiting for a free decide slot. |
-| `SIEVE_EVENT_CHARS` | `1500` | How much of each event the model sees. |
-| `SIEVE_POLL_INTERVAL` | `200ms` | How often the idle worker checks for new work. |
+| `CLOUDFRIEND_BATCH_SIZE` | `100` | Larger batches give the model more context and cost less per event, but each call is slower. |
+| `CLOUDFRIEND_BATCH_WAIT` | `10s` | The longest an event waits before it is decided. |
+| `CLOUDFRIEND_DECIDER_CONCURRENCY` | `2` | Raise it if flags arrive later and later under steady traffic, which means batches are waiting for a free decide slot. |
+| `CLOUDFRIEND_EVENT_CHARS` | `1500` | How much of each event the model sees. |
+| `CLOUDFRIEND_POLL_INTERVAL` | `200ms` | How often the idle worker checks for new work. |
