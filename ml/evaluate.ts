@@ -241,7 +241,7 @@ interface CaseResult {
   events: number;
   positives: number;
   perStrategy: Record<string, ReturnType<typeof summarize>>;
-  users?: { flagsWithUser: number; flags: number; crossSourceLinks: number };
+  users?: { flagsWithUser: number; flags: number; crossSourceLinks: number; eventsWithUser: number; distinctUsers: number; usersInSeveralServices: number };
 }
 
 function summarize(c: Case, sim: Sim, events: number) {
@@ -296,6 +296,7 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
     let positives = 0;
     let now = c.start_ms;
     let pruneAt = 200_000;
+    let eventsWithUser = 0;
     for await (const e of readStream(dir, c.id)) {
       const f = featurizer.featurize({ source: e.source, received_at: e.t, data: e.data });
       const score = classifier.score(f.values);
@@ -305,7 +306,10 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
       info.set(id, { t: e.t, y: e.y, source: e.source, data: e.data, score, template: f.template, values: labelsOut ? f.values : undefined });
       if (c.incidents) {
         const u = extractEntities(e.data, f.text).user;
-        if (u) (users.get(u) ?? users.set(u, new Set()).get(u)!).add(`${e.source}:${f.service}`);
+        if (u) {
+          eventsWithUser++;
+          (users.get(u) ?? users.set(u, new Set()).get(u)!).add(`${e.source}:${f.service}`);
+        }
       }
       for (const s of sims) await s.push(id, e.t, score, f.errorish, f.novel, f.template);
       if (info.size > pruneAt) {
@@ -326,7 +330,14 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
           if (us.size) withUser++;
           for (const u of us) links += Math.max(0, (users.get(u!)?.size ?? 1) - 1);
         }
-        res.users = { flags: cascade.flags.length, flagsWithUser: withUser, crossSourceLinks: links };
+        res.users = {
+          flags: cascade.flags.length,
+          flagsWithUser: withUser,
+          crossSourceLinks: links,
+          eventsWithUser,
+          distinctUsers: users.size,
+          usersInSeveralServices: [...users.values()].filter((v) => v.size > 1).length,
+        };
       }
     }
     if (args.trace) writeTrace(c, sims, info);

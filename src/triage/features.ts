@@ -176,6 +176,8 @@ export function maskMessage(text: string, maxLen = 160): string {
     .replace(/[^\s<>=,;:()[\]{}|]{4,}/g, (t) =>
       /^\d+(\.\d+)?[a-zµ%]{0,3}$/i.test(t) ? t : (/\d/.test(t) && /[a-z]/i.test(t)) || /[^\w.\-/<>]/.test(t) ? "<V>" : t,
     )
+    // Random letter ids (user names, short tokens): mixed case that isn't camelCase words.
+    .replace(/\b[A-Za-z]{6,40}\b/g, (t) => (isRandomLetters(t) ? "<V>" : t))
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<U>")
     .replace(/\b0x[0-9a-f]+\b/gi, "<H>")
     .replace(/\b[0-9a-f]{12,}\b/gi, "<H>")
@@ -184,6 +186,29 @@ export function maskMessage(text: string, maxLen = 160): string {
     .replace(/\s+/g, " ")
     .trim();
   return s.slice(0, maxLen);
+}
+
+const NAMED = /(?:Error|Exception|Warning|Timeout|Failure|Failed|Denied|Refused)$/;
+
+/**
+ * `WHeAwPqY`, `JuoeTjfH`: more than one capital and not made of words. Words here are
+ * camelCase parts with at least two lowercase letters and a vowel, as in
+ * `getValueFromRedis`, `GetCartAsync` or `TypeError`.
+ */
+function isRandomLetters(t: string): boolean {
+  let upper = 0;
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    if (c >= 65 && c <= 90) upper++;
+  }
+  if (upper < 2 || upper === t.length || NAMED.test(t)) return false;
+  const parts = t.match(/[A-Z]?[a-z]+|[A-Z]+$/g) ?? [];
+  if (parts.join("") !== t) return true;
+  return !parts.every((p, i) => {
+    if (/^[A-Z]+$/.test(p)) return i === parts.length - 1;
+    const lower = /^[A-Z]/.test(p) ? p.length - 1 : p.length;
+    return (lower >= 2 || (i === 0 && p.length >= 2)) && (p.length < 3 || /[aeiouy]/i.test(p));
+  });
 }
 
 // --- keyword features -----------------------------------------------------------------

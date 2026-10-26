@@ -42,6 +42,15 @@ for (const file of process.argv.slice(2)) {
       console.log(`| ${names[s] ?? s} | ${ff} | ${inc} | ${reads} | ${calls} |`);
     }
   }
+  const linked = (r.cases as any[]).filter((c) => c.users);
+  if (linked.length) {
+    const sum = (k: string) => linked.reduce((n, c) => n + c.users[k], 0);
+    console.log(
+      `\nUser linking: ${pct(sum("eventsWithUser") / linked.reduce((n, c) => n + c.events, 0))} of events carry a user id; ` +
+        `${sum("distinctUsers").toLocaleString()} user-days, ${pct(sum("usersInSeveralServices") / Math.max(sum("distinctUsers"), 1))} of them seen in more than one service. ` +
+        `${sum("flagsWithUser")} of ${sum("flags")} escalations name a user.`,
+    );
+  }
   const j = r.jev;
   console.log(
     `\nJev: ${j.calls} live calls${j.cached_calls ? ` (+${j.cached_calls} replayed from cache)` : ""}, $${j.spent_usd.toFixed(2)}, ` +
