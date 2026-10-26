@@ -387,6 +387,51 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     }
   });
 
+  it("stops sending Jev what Jev keeps rejecting, once trained on its verdicts", async () => {
+    // Stage 1 passes every error-like event. Jev says the cache warnings are routine
+    // (stage-1 false positives) and the payment failures matter.
+    const jev = fakeDecider((events) => {
+      const pay = events.filter((e) => JSON.stringify(e.data).includes("payment"));
+      return pay.length ? [{ reason: "payments failing", severity: "high", event_ids: pay.map((e) => e.id) }] : [];
+    });
+    cf = await makeCloudfriend({
+      decider: jev.adapter,
+      config: { triage: true, modelPath: writeModel(tinyModel()), auditRate: 0, verdictTtlMs: 0, perTemplate: 50, batchSize: 100, batchWaitMs: 0 },
+    });
+    const round = (i: number) => [
+      ...Array.from({ length: 8 }, (_, k) => ({ level: "warn", service: "cache", message: `cache refresh slow, retrying shard ${k} after ${i}ms timeout` })),
+      ...Array.from({ length: 12 }, (_, k) => ({ level: "error", service: "billing", message: `payment failed for order ${i * 100 + k}: card declined by provider` })),
+      ...Array.from({ length: 5 }, (_, k) => ({ level: "info", service: "web", message: `GET /page/${k} 200` })),
+    ];
+    for (let i = 0; i < 12; i++) {
+      await cf.post("app", round(i));
+      cf.worker.parseNew();
+      cf.worker.startDueBatches();
+      await cf.worker.whenIdle();
+    }
+    const asked = jev.calls.flat().length;
+    assert.ok(count(cf, "labels WHERE y = 0") > 50, "Jev's rejections are stored as labels");
+    const before = cf.db.prepare("SELECT route FROM events WHERE data LIKE '%cache refresh%' ORDER BY id DESC LIMIT 1").get() as { route: string };
+    assert.equal(before.route, "jev", "before training, stage 1 passes the warnings on");
+
+    const report = await cf.trainer!.train();
+    assert.equal(report.status, "promoted", report.reason);
+
+    await cf.post("app", round(99));
+    cf.worker.parseNew();
+    cf.worker.startDueBatches();
+    await cf.worker.whenIdle();
+    const routes = cf.db
+      .prepare("SELECT data, route FROM events ORDER BY id DESC LIMIT 25")
+      .all() as { data: string; route: string }[];
+    const warnings = routes.filter((r) => r.data.includes("cache refresh"));
+    const payments = routes.filter((r) => r.data.includes("payment"));
+    assert.ok(warnings.every((r) => r.route === "drop"), "after training, the rejected kind is dropped by stage 1");
+    assert.ok(payments.every((r) => r.route === "jev"), "what Jev escalates still reaches Jev");
+    const newlyAsked = jev.calls.flat().slice(asked);
+    assert.ok(newlyAsked.length > 0 && newlyAsked.every((e) => JSON.stringify(e.data).includes("payment")), "Jev only sees the payments now");
+  });
+
   it("skips training without enough labels", async () => {
     cf = await makeCloudfriend({ decider: fakeDecider().adapter, config: { triage: true, modelPath: writeModel(tinyModel()) } });
     const report = await json(cf.app.request("/model/train", { method: "POST", headers: { authorization: "Bearer test-admin-key" } }));

@@ -12,7 +12,8 @@ Output:
 
 Thresholds are chosen on the validation set:
   drop_below      the highest score that still forwards `--recall` of the positives (by
-                  weight) to Jev. Events below it are not escalated and cost nothing.
+                  weight) to Jev, moved halfway into the gap below it. Events below it are
+                  not escalated and cost nothing.
   escalate_above  the lowest score at which `--auto-precision` of events are positive, so
                   they could skip Jev. 1.01 (never) unless --auto-escalate is set.
   threshold       the score with the best F1, used when no Jev is configured.
@@ -74,7 +75,13 @@ def choose_thresholds(y, w, p, recall, auto_precision, auto_escalate):
     # drop_below: the smallest set of top scores that reaches the recall target.
     i = int(np.searchsorted(rec, recall))
     i = min(i, len(s) - 1)
-    drop_below = float(s[i])
+    # Put the threshold halfway (in log-odds) into the gap below the last kept score, so a
+    # new event scoring a hair under the lowest kept escalation isn't dropped.
+    logit = lambda p: np.log(np.clip(p, 1e-12, 1 - 1e-12) / (1 - np.clip(p, 1e-12, 1 - 1e-12)))
+    if i + 1 < len(s):
+        drop_below = float(1 / (1 + np.exp(-(logit(s[i]) + logit(s[i + 1])) / 2)))
+    else:
+        drop_below = float(s[i]) / 2
     # threshold: best F1.
     f1 = 2 * prec * rec / np.maximum(prec + rec, 1e-9)
     threshold = float(s[int(np.argmax(f1))])

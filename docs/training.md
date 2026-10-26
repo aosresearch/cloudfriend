@@ -86,6 +86,27 @@ curl -H "Authorization: Bearer $CLOUDFRIEND_ADMIN_KEY" localhost:8080/model
 
 This report is from a real run. Two RCAEval cases were replayed into a server with live Jev, and its four flags were confirmed through the API. The new model sends 1.29% of recent traffic to Jev instead of 1.44%.
 
+## What retraining does to stage-1 false positives
+
+A **stage-1 false positive** is an event the classifier passes on to Jev, where Jev decides it isn't worth escalating. It is never flagged, because only Jev raises flags. But every one costs a Jev call. Jev's "no" is stored as a label, and the next training run teaches the classifier to drop that kind of event itself.
+
+`test/triage.test.ts` ("stops sending Jev what Jev keeps rejecting") checks this end to end through the server:
+
+1. The classifier passes slow-cache warnings and payment failures alike to Jev.
+2. Jev rejects the warnings and escalates the payments.
+3. After one `train`, new warnings are dropped by the classifier and only the payments still reach Jev.
+
+On benchmark data we measured the same effect. We started from a classifier trained only on GAIA, collected about 12,000 Jev verdicts while replaying RCAEval cases, and retrained on them. We then looked at three faults whose cases were left out of training:
+
+| On held-out faults | Before retraining | After |
+| --- | --- | --- |
+| Stage-1 false positives (passed on, Jev said no) | 547 sent to Jev | 91 sent to Jev (83% now dropped by the classifier) |
+| Jev's escalations | 74 sent to Jev | 68 sent to Jev (92% still reach Jev) |
+
+The events that still go to Jev after retraining look like real escalations to the classifier. Jev keeps answering "no" for them, and its cached verdict covers repeats for 15 minutes. Error templates the classifier has never seen also go to Jev once whatever their score, so a brand-new failure is not lost to a confident classifier.
+
+A flag that Jev raised and a person marks `false_positive` works the same way. Its events become "don't escalate" labels with five times the weight, and Jev's cached verdict for those templates is overturned at once, before any retraining.
+
 ## Schedule
 
 Retraining runs every `CLOUDFRIEND_RETRAIN_INTERVAL` (24 hours), but only once `CLOUDFRIEND_RETRAIN_MIN_LABELS` (200) new labels have arrived since the last run. Set the interval to `off` to retrain only by hand.
