@@ -1,12 +1,12 @@
 // Shared types. Adapter authors only need the types in the "Adapters" section.
 
-/** An event as Sieve stores it and hands it to deciders and the read API. */
-export interface SieveEvent {
-  /** Sieve's own id for the event, unique and never reused. */
+/** An event as cloudfriend stores it and hands it to deciders and the read API. */
+export interface CloudfriendEvent {
+  /** cloudfriend's own id for the event, unique and never reused. */
   id: string;
   /** The source name from the ingest URL, e.g. `sentry` for `POST /in/sentry`. */
   source: string;
-  /** When Sieve accepted the request, ISO 8601. */
+  /** When cloudfriend accepted the request, ISO 8601. */
   received_at: string;
   /** The raw payload, exactly as the source adapter parsed it. */
   data: unknown;
@@ -62,7 +62,7 @@ export interface SourceContext {
 /**
  * A source adapter. `verify` runs in the request path before the reply, so it must be
  * cheap (no network, no JSON parsing). `parse` runs later in the worker.
- * Sieve has already checked the ingest secret before `verify` is called.
+ * cloudfriend has already checked the ingest secret before `verify` is called.
  */
 export interface SourceAdapter {
   verify?(req: IncomingRequest): boolean;
@@ -74,7 +74,7 @@ export interface SourceAdapter {
 export interface DeciderAdapter {
   /** Return false to stay disabled, e.g. when a required env var is missing. */
   enabled?(env: NodeJS.ProcessEnv): boolean;
-  decide(events: SieveEvent[], ctx: DeciderContext): Promise<FlagDraft[]>;
+  decide(events: CloudfriendEvent[], ctx: DeciderContext): Promise<FlagDraft[]>;
 }
 
 export interface DeciderContext {
@@ -91,7 +91,7 @@ export interface ActionAdapter {
 
 export interface ActionContext {
   /** The events linked to the flag that are still within the retention window (at most 50). */
-  events: SieveEvent[];
+  events: CloudfriendEvent[];
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
 }

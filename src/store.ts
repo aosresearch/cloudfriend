@@ -1,5 +1,5 @@
 import type { DB } from "./db.ts";
-import type { Flag, SieveEvent, Severity } from "./types.ts";
+import type { Flag, CloudfriendEvent, Severity } from "./types.ts";
 
 export interface EventRow {
   id: number;
@@ -22,8 +22,8 @@ export interface FlagRow {
 
 export const EVENT_COLUMNS = "id, source, received_at, data, external_id, type, group_key";
 
-export function toEvent(r: EventRow): SieveEvent {
-  const e: SieveEvent = {
+export function toEvent(r: EventRow): CloudfriendEvent {
+  const e: CloudfriendEvent = {
     id: String(r.id),
     source: r.source,
     received_at: new Date(r.received_at).toISOString(),
@@ -47,7 +47,7 @@ export function toFlag(r: FlagRow): Flag {
 }
 
 /** Events by id, in id order. Ids that have aged out are silently missing. */
-export function eventsByIds(db: DB, ids: string[], limit = 50): SieveEvent[] {
+export function eventsByIds(db: DB, ids: string[], limit = 50): CloudfriendEvent[] {
   const nums = ids.map(Number).filter(Number.isInteger).slice(0, limit);
   if (!nums.length) return [];
   const rows = db
@@ -70,7 +70,7 @@ export interface EventQuery {
 }
 
 /** Newest first. Page with `before` = the last id of the previous page. */
-export function listEvents(db: DB, q: EventQuery): SieveEvent[] {
+export function listEvents(db: DB, q: EventQuery): CloudfriendEvent[] {
   const where: string[] = [];
   const args: (string | number)[] = [];
   const add = (sql: string, v: string | number | undefined) => {

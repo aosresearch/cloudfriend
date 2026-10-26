@@ -1,7 +1,7 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
-  title: "Sieve",
+  title: "cloudfriend",
   description: "Live event triage in one container: events in, a model flags what matters, actions fire on the flags.",
   // Served from cloudfriend.dev/docs/. Set DOCS_BASE=/ to host at a domain root.
   base: process.env.DOCS_BASE ?? "/docs/",

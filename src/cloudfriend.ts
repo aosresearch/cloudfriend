@@ -9,7 +9,7 @@ import { createApp } from "./server.ts";
 import type { ActionAdapter, DeciderAdapter } from "./types.ts";
 import { Worker } from "./worker.ts";
 
-export interface Sieve {
+export interface cloudfriend {
   app: Hono;
   db: DB;
   intake: Intake;
@@ -26,8 +26,8 @@ export interface Sieve {
   close(graceMs?: number, drainMs?: number): Promise<void>;
 }
 
-/** Build a Sieve instance without listening on a port. `main.ts` adds the HTTP server. */
-export async function createSieve(config: Config, env: NodeJS.ProcessEnv = process.env, adapters?: Adapters): Promise<Sieve> {
+/** Build a cloudfriend instance without listening on a port. `main.ts` adds the HTTP server. */
+export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv = process.env, adapters?: Adapters): Promise<cloudfriend> {
   adapters ??= await loadAdapters(config.adapterDir);
 
   const deciderAdapter = adapters.deciders.get(config.decider);
@@ -41,7 +41,7 @@ export async function createSieve(config: Config, env: NodeJS.ProcessEnv = proce
     const action = adapters.actions.get(name);
     if (!action) throw new Error(`unknown action '${name}' (available: ${[...adapters.actions.keys()].join(", ")})`);
     if (action.enabled?.(env) === false) {
-      if (config.actions) log.warn(`action '${name}' is listed in SIEVE_ACTIONS but not configured; skipping it`);
+      if (config.actions) log.warn(`action '${name}' is listed in CLOUDFRIEND_ACTIONS but not configured; skipping it`);
       continue;
     }
     actions.set(name, action);

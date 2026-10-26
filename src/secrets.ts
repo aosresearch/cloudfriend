@@ -56,6 +56,9 @@ export function safeEqual(a: string, b: string): boolean {
 
 export const SOURCE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
+/** Every ingest secret starts with this, so a leaked one is easy to recognize. */
+const PREFIX = "cloudfriend_";
+
 export class Secrets {
   #db: DB;
   #byHash;
@@ -71,12 +74,12 @@ export class Secrets {
     name = name.trim();
     if (!name || name.length > 128) throw new Error("name must be 1-128 characters");
     if (source !== null && !SOURCE_NAME.test(source)) throw new Error("source must match " + SOURCE_NAME);
-    const secret = "sieve_" + randomBytes(32).toString("base64url");
+    const secret = PREFIX + randomBytes(32).toString("base64url");
     const row: SecretRow = {
       id: "sec_" + randomBytes(8).toString("hex"),
       name,
       source,
-      prefix: secret.slice(0, 12),
+      prefix: secret.slice(0, PREFIX.length + 6),
       created_at: Date.now(),
       last_used_at: null,
       revoked_at: null,
@@ -108,7 +111,7 @@ export class Secrets {
 
   /** Check a presented secret against a source. Returns the secret id, or null. */
   check(secret: string, source: string): string | null {
-    if (!secret.startsWith("sieve_")) return null;
+    if (!secret.startsWith(PREFIX)) return null;
     const row = this.#byHash.get(hashSecret(secret)) as { id: string; source: string | null } | undefined;
     if (!row) return null;
     if (row.source !== null && row.source !== source) return null;

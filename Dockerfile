@@ -1,10 +1,10 @@
-# Sieve: one container, one SQLite file. Node runs the TypeScript sources directly
+# cloudfriend: one container, one SQLite file. Node runs the TypeScript sources directly
 # (type stripping) and uses the built-in node:sqlite, so there is no build step.
 FROM node:22.22.0-slim
 
 WORKDIR /app
 ENV NODE_ENV=production \
-    SIEVE_DATA_DIR=/data \
+    CLOUDFRIEND_DATA_DIR=/data \
     PORT=8080
 
 COPY package.json package-lock.json ./
@@ -12,7 +12,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
 COPY bin ./bin
-RUN ln -s /app/bin/sieve /usr/local/bin/sieve \
+RUN ln -s /app/bin/cloudfriend /usr/local/bin/cloudfriend \
  && mkdir -p /data && chown node:node /data
 
 USER node

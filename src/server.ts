@@ -92,7 +92,7 @@ export function createApp(deps: AppDeps): Hono {
   // --- admin API -------------------------------------------------------------
 
   const requireAdmin: MiddlewareHandler = async (c, next) => {
-    if (!adminKey) return c.json({ error: "admin API disabled: set SIEVE_ADMIN_KEY" }, 503);
+    if (!adminKey) return c.json({ error: "admin API disabled: set CLOUDFRIEND_ADMIN_KEY" }, 503);
     const token = bearer(c);
     if (!token || !safeEqual(token, adminKey)) return c.json({ error: "unauthorized" }, 401);
     await next();

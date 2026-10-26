@@ -1,8 +1,8 @@
-// `sieve` command line. Works on the database directly, so it needs no admin key:
-//   sieve serve
-//   sieve secrets create <name> [--source <source>]
-//   sieve secrets list
-//   sieve secrets revoke <id>
+// `cloudfriend` command line. Works on the database directly, so it needs no admin key:
+//   cloudfriend serve
+//   cloudfriend secrets create <name> [--source <source>]
+//   cloudfriend secrets list
+//   cloudfriend secrets revoke <id>
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.ts";
 import { dbPath, openDb } from "./db.ts";
@@ -10,12 +10,12 @@ import { errMsg } from "./log.ts";
 import { Secrets } from "./secrets.ts";
 
 const USAGE = `Usage:
-  sieve serve                                   start the server
-  sieve secrets create <name> [--source <src>]  create an ingest secret (shown once)
-  sieve secrets list                            list secrets
-  sieve secrets revoke <id>                     revoke a secret immediately
+  cloudfriend serve                                   start the server
+  cloudfriend secrets create <name> [--source <src>]  create an ingest secret (shown once)
+  cloudfriend secrets list                            list secrets
+  cloudfriend secrets revoke <id>                     revoke a secret immediately
 
-The database is $SIEVE_DATA_DIR/sieve.db (default ./data/sieve.db).`;
+The database is $CLOUDFRIEND_DATA_DIR/cloudfriend.db (default ./data/cloudfriend.db).`;
 
 export async function cli(argv: string[]): Promise<number> {
   const { positionals, values } = parseArgs({
@@ -45,7 +45,7 @@ export async function cli(argv: string[]): Promise<number> {
   try {
     switch (sub) {
       case "create": {
-        if (!arg) throw new Error("usage: sieve secrets create <name> [--source <source>]");
+        if (!arg) throw new Error("usage: cloudfriend secrets create <name> [--source <source>]");
         const s = secrets.create(arg, values.source ?? null);
         if (values.json) console.log(JSON.stringify(s));
         else {
@@ -73,7 +73,7 @@ export async function cli(argv: string[]): Promise<number> {
         return 0;
       }
       case "revoke": {
-        if (!arg) throw new Error("usage: sieve secrets revoke <id>");
+        if (!arg) throw new Error("usage: cloudfriend secrets revoke <id>");
         if (!secrets.revoke(arg)) throw new Error(`no active secret with id ${arg}`);
         console.log(`Revoked ${arg}.`);
         return 0;

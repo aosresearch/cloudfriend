@@ -1,4 +1,4 @@
 #!/bin/sh
-# Resolve symlinks (npm links, /usr/local/bin/sieve in the image) to find the app.
+# Resolve symlinks (npm links, /usr/local/bin/cloudfriend in the image) to find the app.
 here=$(dirname "$(readlink -f "$0")")
 exec node --disable-warning=ExperimentalWarning "$here/../src/cli.ts" "$@"

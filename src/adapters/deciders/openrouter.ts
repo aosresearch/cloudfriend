@@ -4,12 +4,12 @@
 //   OPENROUTER_API_KEY        required
 //   OPENROUTER_MODEL          default anthropic/claude-haiku-5.5
 //   OPENROUTER_BASE_URL       default https://openrouter.ai/api/v1
-//   SIEVE_DECIDER_INSTRUCTIONS extra context for the model, e.g. "Checkout is our most important flow."
-//   SIEVE_EVENT_CHARS         max characters of each event shown to the model (default 1500)
+//   CLOUDFRIEND_DECIDER_INSTRUCTIONS extra context for the model, e.g. "Checkout is our most important flow."
+//   CLOUDFRIEND_EVENT_CHARS         max characters of each event shown to the model (default 1500)
 import { compactJson } from "../../compact.ts";
-import { defineDecider, SEVERITIES, type FlagDraft, type SieveEvent, type Severity } from "../../types.ts";
+import { defineDecider, SEVERITIES, type FlagDraft, type CloudfriendEvent, type Severity } from "../../types.ts";
 
-export const SYSTEM_PROMPT = `You are Sieve, a triage filter on a live stream of events from production systems: errors, logs, analytics events and alerts. Flag only what a person or an automated agent should look at now. Most events are routine; when nothing matters, return no flags.
+export const SYSTEM_PROMPT = `You are cloudfriend, a triage filter on a live stream of events from production systems: errors, logs, analytics events and alerts. Flag only what a person or an automated agent should look at now. Most events are routine; when nothing matters, return no flags.
 
 Flag: new or unusual errors, error spikes or repeated failures, regressions after a deploy, crashes, outages, data loss or corruption, security problems (bursts of auth failures, suspicious access), and failures in money or growth paths such as checkout, payments and signup.
 Do not flag: routine info logs, isolated handled errors, single minor warnings, normal user analytics, or "resolved" notifications unless they suggest flapping.
@@ -22,8 +22,8 @@ Group events with the same likely cause into one flag. For each flag give:
 Reply with JSON only, no prose: {"flags":[{"reason":"...","severity":"high","events":[0,3]}]}
 If nothing needs attention reply {"flags":[]}.`;
 
-export function buildPrompt(events: SieveEvent[], env: NodeJS.ProcessEnv): string {
-  const maxChars = Number(env.SIEVE_EVENT_CHARS) || 1500;
+export function buildPrompt(events: CloudfriendEvent[], env: NodeJS.ProcessEnv): string {
+  const maxChars = Number(env.CLOUDFRIEND_EVENT_CHARS) || 1500;
   const lines = [`${events.length} events, oldest first:`, ""];
   events.forEach((e, i) => {
     const meta = [`source=${e.source}`, `received_at=${e.received_at}`];
@@ -35,7 +35,7 @@ export function buildPrompt(events: SieveEvent[], env: NodeJS.ProcessEnv): strin
 }
 
 /** Turn the model's reply into flag drafts, keeping only what is valid. */
-export function parseReply(content: string, events: SieveEvent[]): FlagDraft[] {
+export function parseReply(content: string, events: CloudfriendEvent[]): FlagDraft[] {
   const start = content.indexOf("{");
   const end = content.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error(`model reply has no JSON object: ${content.slice(0, 200)}`);
@@ -64,7 +64,7 @@ export default defineDecider({
 
   async decide(events, { env, signal }) {
     const base = (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-    const instructions = env.SIEVE_DECIDER_INSTRUCTIONS?.trim();
+    const instructions = env.CLOUDFRIEND_DECIDER_INSTRUCTIONS?.trim();
     const system = instructions ? `${SYSTEM_PROMPT}\n\nContext from the operator:\n${instructions}` : SYSTEM_PROMPT;
     const res = await fetch(`${base}/chat/completions`, {
       method: "POST",
@@ -72,7 +72,7 @@ export default defineDecider({
       headers: {
         authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
         "content-type": "application/json",
-        "x-title": "Sieve",
+        "x-title": "cloudfriend",
       },
       body: JSON.stringify({
         model: env.OPENROUTER_MODEL || "anthropic/claude-haiku-5.5",

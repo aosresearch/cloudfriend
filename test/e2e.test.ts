@@ -1,4 +1,4 @@
-// The v0 bar: run Sieve, point Sentry at it, and get a sensible flag in Slack.
+// The v0 bar: run cloudfriend, point Sentry at it, and get a sensible flag in Slack.
 // Runs the real server process with a mock OpenRouter and a mock Slack.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -25,10 +25,10 @@ describe("end to end: Sentry -> decider -> Slack", () => {
         PATH: process.env.PATH,
         PORT: String(port),
         HOST: "127.0.0.1",
-        SIEVE_DATA_DIR: tempDir(),
-        SIEVE_ADMIN_KEY: "admin",
-        SIEVE_BATCH_WAIT: "200ms",
-        SIEVE_POLL_INTERVAL: "20ms",
+        CLOUDFRIEND_DATA_DIR: tempDir(),
+        CLOUDFRIEND_ADMIN_KEY: "admin",
+        CLOUDFRIEND_BATCH_WAIT: "200ms",
+        CLOUDFRIEND_POLL_INTERVAL: "20ms",
         OPENROUTER_API_KEY: "sk-or-test",
         OPENROUTER_BASE_URL: openrouter.url,
         SLACK_WEBHOOK_URL: slack.url + "/services/T/B/X",
@@ -36,7 +36,7 @@ describe("end to end: Sentry -> decider -> Slack", () => {
     });
     proc.stdout!.on("data", (d) => (logs += d));
     proc.stderr!.on("data", (d) => (logs += d));
-    await waitFor(() => logs.includes("sieve listening"), 10_000);
+    await waitFor(() => logs.includes("cloudfriend listening"), 10_000);
   });
 
   after(async () => {
@@ -49,7 +49,7 @@ describe("end to end: Sentry -> decider -> Slack", () => {
   });
 
   it("prints a first-boot secret that works for ingest", async () => {
-    const secret = /sieve_[A-Za-z0-9_-]{43}/.exec(logs)?.[0];
+    const secret = /cloudfriend_[A-Za-z0-9_-]{43}/.exec(logs)?.[0];
     assert.ok(secret, "secret printed to logs");
 
     const issue = {
@@ -76,7 +76,7 @@ describe("end to end: Sentry -> decider -> Slack", () => {
   });
 
   it("does not flag routine events", async () => {
-    const secret = /sieve_[A-Za-z0-9_-]{43}/.exec(logs)![0];
+    const secret = /cloudfriend_[A-Za-z0-9_-]{43}/.exec(logs)![0];
     const before = openrouter.requests.length;
     const res = await fetch(`${base}/in/myapp`, {
       method: "POST",

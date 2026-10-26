@@ -1,20 +1,20 @@
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.ts";
 import { errMsg, log } from "./log.ts";
-import { createSieve } from "./sieve.ts";
+import { createCloudfriend } from "./cloudfriend.ts";
 
 export async function main(): Promise<void> {
   const config = loadConfig();
-  const sieve = await createSieve(config);
+  const cloudfriend = await createCloudfriend(config);
 
-  if (sieve.bootSecret) {
+  if (cloudfriend.bootSecret) {
     const bar = "=".repeat(72);
     console.log(
       [
         bar,
         "First boot: created an ingest secret named 'default'. It is shown only once:",
         "",
-        `  ${sieve.bootSecret}`,
+        `  ${cloudfriend.bootSecret}`,
         "",
         `Send events:  curl -X POST http://localhost:${config.port}/in/<source> \\`,
         `                -H 'Authorization: Bearer <secret>' -d '{"message":"hello"}'`,
@@ -22,19 +22,19 @@ export async function main(): Promise<void> {
       ].join("\n"),
     );
   }
-  if (!config.adminKey) log.warn("SIEVE_ADMIN_KEY is not set; the admin API (/secrets, /flags, /events) is disabled");
-  if (!sieve.decider) {
+  if (!config.adminKey) log.warn("CLOUDFRIEND_ADMIN_KEY is not set; the admin API (/secrets, /flags, /events) is disabled");
+  if (!cloudfriend.decider) {
     log.warn(`decider '${config.decider}' is not configured (OPENROUTER_API_KEY missing?); events are stored but not triaged`);
   }
-  if (!sieve.actions.size) log.warn("no actions configured; flags are stored but nothing is notified (set SLACK_WEBHOOK_URL or WEBHOOK_URL)");
+  if (!cloudfriend.actions.size) log.warn("no actions configured; flags are stored but nothing is notified (set SLACK_WEBHOOK_URL or WEBHOOK_URL)");
 
-  sieve.worker.start();
-  const server = serve({ fetch: sieve.app.fetch, port: config.port, hostname: config.host }, (info) => {
-    log.info("sieve listening", {
+  cloudfriend.worker.start();
+  const server = serve({ fetch: cloudfriend.app.fetch, port: config.port, hostname: config.host }, (info) => {
+    log.info("cloudfriend listening", {
       port: info.port,
       data: config.dataDir,
-      decider: sieve.decider?.name ?? "none",
-      actions: [...sieve.actions.keys()].join(",") || "none",
+      decider: cloudfriend.decider?.name ?? "none",
+      actions: [...cloudfriend.actions.keys()].join(",") || "none",
       batch: `${config.batchSize} events or ${config.batchWaitMs}ms`,
     });
   });
@@ -49,7 +49,7 @@ export async function main(): Promise<void> {
     void (async () => {
       let code = 0;
       try {
-        await sieve.close(4_000);
+        await cloudfriend.close(4_000);
         log.info("stopped");
       } catch (err) {
         log.error("shutdown failed", { error: errMsg(err) });

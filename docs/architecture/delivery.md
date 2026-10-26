@@ -42,7 +42,7 @@ flowchart TD
    - **failure** (it threw, returned `false`, or timed out): `attempts + 1`, the error is saved, and it is due again after the backoff.
    - **15th failure:** `status = 'failed'`. It is not tried again.
 
-If a flag is deleted while its deliveries are pending, they are deleted with it. If an action is no longer enabled (for example its env var was removed and Sieve restarted), its pending deliveries are marked `failed` on their next run.
+If a flag is deleted while its deliveries are pending, they are deleted with it. If an action is no longer enabled (for example its env var was removed and cloudfriend restarted), its pending deliveries are marked `failed` on their next run.
 
 ## Retries
 
@@ -56,10 +56,10 @@ All 15 attempts span about five and a half hours, so an endpoint that is down fo
 
 ## At-least-once delivery
 
-An action can run more than once for the same flag. That happens when the action did its work but Sieve did not record the success, for example because:
+An action can run more than once for the same flag. That happens when the action did its work but cloudfriend did not record the success, for example because:
 
 - the endpoint processed the request but replied slowly, after the 15-second timeout, or
-- Sieve was stopped or crashed after the call and before it saved the result.
+- cloudfriend was stopped or crashed after the call and before it saved the result.
 
 Every flag has a stable `id`, which is the same on every attempt. Receivers that must not act twice should ignore a flag id they have already seen.
 
@@ -82,19 +82,19 @@ Enabled when `WEBHOOK_URL` is set. Sends:
 ```http
 POST <WEBHOOK_URL>
 content-type: application/json
-x-sieve-flag-id: flg_8c1d0e4f2a7b9c3d5e6f
-x-sieve-signature: sha256=<hex HMAC-SHA256 of the body, with WEBHOOK_SECRET>
+x-cloudfriend-flag-id: flg_8c1d0e4f2a7b9c3d5e6f
+x-cloudfriend-signature: sha256=<hex HMAC-SHA256 of the body, with WEBHOOK_SECRET>
 
 { "flag": { "id": "...", "reason": "...", "severity": "high", "event_ids": [...], ... },
   "events": [ ... up to 50 events ... ] }
 ```
 
-`x-sieve-signature` is only sent when `WEBHOOK_SECRET` is set. To check it on the receiving side:
+`x-cloudfriend-signature` is only sent when `WEBHOOK_SECRET` is set. To check it on the receiving side:
 
 ```ts
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-function isFromSieve(rawBody: string, header: string | undefined, secret: string): boolean {
+function isFromCloudfriend(rawBody: string, header: string | undefined, secret: string): boolean {
   const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
   return !!header && header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected));
 }
@@ -104,7 +104,7 @@ Any `2xx` reply counts as delivered. Anything else is retried.
 
 ## Choosing actions
 
-By default every action whose `enabled()` says yes is used. To pick explicitly, set `SIEVE_ACTIONS=slack,webhook`. The list applies to flags created after Sieve starts with it. Deliveries already in the table keep the actions they were created with.
+By default every action whose `enabled()` says yes is used. To pick explicitly, set `CLOUDFRIEND_ACTIONS=slack,webhook`. The list applies to flags created after cloudfriend starts with it. Deliveries already in the table keep the actions they were created with.
 
 ## Action adapter: `run`
 
@@ -124,7 +124,7 @@ export default {
         routing_key: env.PAGERDUTY_ROUTING_KEY,
         event_action: "trigger",
         dedup_key: flag.id, // at-least-once: let PagerDuty drop repeats
-        payload: { summary: flag.reason, severity: "critical", source: events[0]?.source ?? "sieve" },
+        payload: { summary: flag.reason, severity: "critical", source: events[0]?.source ?? "cloudfriend" },
       }),
     });
     if (!res.ok) throw new Error(`pagerduty ${res.status}`); // retried with backoff

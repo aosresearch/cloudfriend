@@ -5,15 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { loadAdapters, type Adapters } from "../src/adapters.ts";
 import { loadConfig, type Config } from "../src/config.ts";
-import { createSieve, type Sieve } from "../src/sieve.ts";
-import type { ActionAdapter, DeciderAdapter, FlagDraft, SieveEvent } from "../src/types.ts";
+import { createCloudfriend, type cloudfriend } from "../src/cloudfriend.ts";
+import type { ActionAdapter, DeciderAdapter, FlagDraft, CloudfriendEvent } from "../src/types.ts";
 
-process.env.SIEVE_LOG ??= "silent";
+process.env.CLOUDFRIEND_LOG ??= "silent";
 
 export const ADMIN = "test-admin-key";
 
 export function tempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "sieve-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "cloudfriend-test-"));
 }
 
 export function testConfig(over: Partial<Config> = {}): Config {
@@ -30,8 +30,8 @@ export function testConfig(over: Partial<Config> = {}): Config {
 }
 
 /** A decider that records what it saw and returns whatever `respond` says. */
-export function fakeDecider(respond: (events: SieveEvent[]) => FlagDraft[] | Promise<FlagDraft[]> = () => []) {
-  const calls: SieveEvent[][] = [];
+export function fakeDecider(respond: (events: CloudfriendEvent[]) => FlagDraft[] | Promise<FlagDraft[]> = () => []) {
+  const calls: CloudfriendEvent[][] = [];
   const adapter: DeciderAdapter = {
     async decide(events) {
       calls.push(events);
@@ -67,32 +67,32 @@ export async function testAdapters(
   };
 }
 
-export interface TestSieve extends Sieve {
+export interface TestCloudfriend extends cloudfriend {
   config: Config;
   secret: string;
   post(source: string, body: string | object, headers?: Record<string, string>): Promise<Response>;
   get(path: string): Promise<Response>;
 }
 
-export async function makeSieve(
+export async function makeCloudfriend(
   opts: { config?: Partial<Config>; decider?: DeciderAdapter | null; actions?: Record<string, ActionAdapter> } = {},
-): Promise<TestSieve> {
+): Promise<TestCloudfriend> {
   const config = testConfig({ decider: "test", ...opts.config });
   const adapters = await testAdapters(opts.decider === undefined ? fakeDecider().adapter : opts.decider, opts.actions);
-  const sieve = await createSieve(config, {}, adapters);
-  const secret = sieve.bootSecret ?? sieve.secrets.create("test").secret;
-  return Object.assign(sieve, {
+  const cloudfriend = await createCloudfriend(config, {}, adapters);
+  const secret = cloudfriend.bootSecret ?? cloudfriend.secrets.create("test").secret;
+  return Object.assign(cloudfriend, {
     config,
     secret,
     async post(source: string, body: string | object, headers: Record<string, string> = {}) {
-      return sieve.app.request(`/in/${source}`, {
+      return cloudfriend.app.request(`/in/${source}`, {
         method: "POST",
         headers: { authorization: `Bearer ${secret}`, ...headers },
         body: typeof body === "string" ? body : JSON.stringify(body),
       });
     },
     async get(p: string) {
-      return sieve.app.request(p, { headers: { authorization: `Bearer ${ADMIN}` } });
+      return cloudfriend.app.request(p, { headers: { authorization: `Bearer ${ADMIN}` } });
     },
   });
 }
@@ -107,8 +107,8 @@ export async function waitFor<T>(fn: () => T | undefined | null | false, timeout
   }
 }
 
-export function count(sieve: Sieve, sql: string, ...args: (string | number)[]): number {
-  return (sieve.db.prepare(`SELECT count(*) AS n FROM ${sql}`).get(...args) as { n: number }).n;
+export function count(cloudfriend: cloudfriend, sql: string, ...args: (string | number)[]): number {
+  return (cloudfriend.db.prepare(`SELECT count(*) AS n FROM ${sql}`).get(...args) as { n: number }).n;
 }
 
 export interface Recorded {
