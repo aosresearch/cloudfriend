@@ -41,6 +41,7 @@ const { values: args } = parseArgs({
     "batch-size": { type: "string", default: "100" },
     "batch-wait": { type: "string", default: "10000" },
     "audit-wait": { type: "string", default: "300000" },
+    "decider-concurrency": { type: "string", default: "2" },
     "verdict-ttl": { type: "string", default: "900000" },
     "audit-rate": { type: "string", default: "0.002" },
     "novel-guard": { type: "string", default: "on" },
@@ -59,6 +60,7 @@ const classifier = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")
 const BATCH = Number(args["batch-size"]);
 const WAIT = Number(args["batch-wait"]);
 const AUDIT_WAIT = Number(args["audit-wait"]);
+const DECIDER_CONCURRENCY = Math.max(1, Number(args["decider-concurrency"]));
 const TTL = Number(args["verdict-ttl"]);
 const AUDIT = Number(args["audit-rate"]);
 const NOVEL = args["novel-guard"] !== "off";
@@ -78,6 +80,8 @@ interface SimFlag {
   templates: string[];
   positives: number;
   attached: number;
+  /** Later events added to this open flag by a cached verdict: when, and how many were fault events. */
+  additions: { t: number; positives: number }[];
   via: "jev" | "classifier" | "keyword" | "fallback";
 }
 
@@ -143,13 +147,30 @@ class Sim {
   }
 
   async push(id: string, now: number, score: number, errorish: boolean, novel: boolean, template: string) {
-    if (this.#pending.length && (this.#pending.length >= BATCH || now - (this.#oldestUrgent ?? this.#oldest + AUDIT_WAIT - WAIT) >= WAIT)) await this.flush(now);
+    if (this.#pending.length && (this.#pending.length >= BATCH || now - (this.#oldestUrgent ?? this.#oldest + AUDIT_WAIT - WAIT) >= WAIT)) await this.#launch(now);
     const route = this.route(score, errorish, novel);
     this.routed[route] = (this.routed[route] ?? 0) + 1;
     if (route === "drop") return;
     if (!this.#pending.length) this.#oldest = now;
     if (route !== "audit" && this.#oldestUrgent === null) this.#oldestUrgent = now;
     this.#pending.push({ id, template, score, route });
+  }
+
+  #inflight: Promise<void>[] = [];
+
+  /** Start a batch like the server does: up to DECIDER_CONCURRENCY calls in flight at once. */
+  async #launch(now: number) {
+    this.#inflight.push(this.flush(now));
+    if (this.#inflight.length >= DECIDER_CONCURRENCY) await this.#inflight.shift();
+  }
+
+  async finish(now: number) {
+    await this.#launch(now);
+    await Promise.all(this.#inflight.splice(0));
+  }
+
+  pendingIds(): string[] {
+    return this.#pending.map((p) => p.id);
   }
 
   async flush(now: number) {
@@ -212,6 +233,7 @@ class Sim {
         templates: f.templates,
         positives: f.event_ids.filter((id) => this.info.get(id)?.y).length,
         attached: 0,
+        additions: [],
         via: f.reason === "classifier fallback" ? "fallback" : f.via === "decider" ? "jev" : this.name === "keyword" ? "keyword" : "classifier",
       };
       this.flags.push(flag);
@@ -222,8 +244,10 @@ class Sim {
     for (const [fid, evs] of out.attach) {
       const f = this.#flagById.get(fid);
       if (!f) continue;
+      const pos = evs.filter((id) => this.info.get(id)?.y).length;
       f.attached += evs.length;
-      f.positives += evs.filter((id) => this.info.get(id)?.y).length;
+      f.positives += pos;
+      f.additions.push({ t: now, positives: pos });
     }
   }
 }
@@ -257,12 +281,17 @@ function summarize(c: Case, sim: Sim, events: number) {
     labels: sim.labels,
   };
   if (c.inject_ms !== undefined) {
-    const after = flags.filter((f) => f.created >= c.inject_ms!);
-    const first = after[0];
-    r.false_flags_before_fault = flags.filter((f) => f.created < c.inject_ms!).length;
-    r.detected = Boolean(first);
-    r.detected_precise = after.some((f) => f.positives > 0);
-    r.ttd_s = first ? (first.created - c.inject_ms) / 1000 : null;
+    const inject = c.inject_ms;
+    const after = flags.filter((f) => f.created >= inject);
+    // Escalated after the fault: a new flag, or fault events grouped into a flag that was
+    // already open (the server adds them to it; nobody is paged twice for the same thing).
+    const grouped = flags.flatMap((f) => f.additions.filter((a) => a.t >= inject && a.positives > 0).map((a) => a.t));
+    const times = [...after.map((f) => f.created), ...grouped].sort((a, b) => a - b);
+    r.false_flags_before_fault = flags.filter((f) => f.created < inject).length;
+    r.detected = times.length > 0;
+    r.detected_new_flag = after.length > 0;
+    r.detected_precise = after.some((f) => f.positives > 0) || grouped.length > 0;
+    r.ttd_s = times.length ? (times[0]! - inject) / 1000 : null;
   }
   if (c.incidents) {
     const grace = 5 * 60_000;
@@ -317,7 +346,7 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
         pruneAt = Math.max(200_000, info.size * 2);
       }
     }
-    for (const s of sims) await s.flush(now + WAIT);
+    for (const s of sims) await s.finish(now + WAIT);
     const res: CaseResult = { case: c, events: n, positives, perStrategy: {} };
     for (const s of sims) res.perStrategy[s.name] = summarize(c, s, n);
     if (c.incidents) {
@@ -355,7 +384,10 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
 /** Forget events no strategy can still need: older than the batch window and not in a flag. */
 function pruneInfo(info: Map<string, EventInfo>, sims: Sim[], now: number) {
   const keep = new Set<string>();
-  for (const s of sims) for (const f of s.flags) for (const id of f.events.slice(0, 50)) keep.add(id);
+  for (const s of sims) {
+    for (const f of s.flags) for (const id of f.events.slice(0, 50)) keep.add(id);
+    for (const id of s.pendingIds()) keep.add(id); // audits can wait minutes for their batch
+  }
   for (const [id, e] of info) if (e.t < now - WAIT * 3 && !keep.has(id)) info.delete(id);
 }
 
@@ -446,7 +478,7 @@ for (const s of STRATEGIES) {
 const summary = {
   model: { path: args.model, trained_at: classifier.file.trained_at, drop_below: classifier.file.drop_below, threshold: classifier.file.threshold, trees: classifier.gbdt.numTrees },
   split: args.split,
-  settings: { batch_size: BATCH, batch_wait_ms: WAIT, audit_wait_ms: AUDIT_WAIT, verdict_ttl_ms: TTL, audit_rate: AUDIT, novel_guard: NOVEL },
+  settings: { batch_size: BATCH, batch_wait_ms: WAIT, audit_wait_ms: AUDIT_WAIT, decider_concurrency: DECIDER_CONCURRENCY, verdict_ttl_ms: TTL, audit_rate: AUDIT, novel_guard: NOVEL },
   jev: {
     live: args.jev,
     model: process.env.JEV_MODEL || JEV.model,
