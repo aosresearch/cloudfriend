@@ -21,7 +21,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { JEV } from "../src/adapters/deciders/jev.ts";
 import { Jev } from "./jev.ts";
-import { applyVerdicts, planBatch, routeEvent, VerdictCache, type FullRoute, type Pending } from "../src/triage/cascade.ts";
+import { applyVerdicts, EscalatedTemplates, planBatch, routeEvent, VerdictCache, type FullRoute, type Pending } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, FEATURE_NAMES, Featurizer } from "../src/triage/features.ts";
 import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
@@ -45,6 +45,7 @@ const { values: args } = parseArgs({
     "verdict-ttl": { type: "string", default: "900000" },
     "audit-rate": { type: "string", default: "0.002" },
     "novel-guard": { type: "string", default: "on" },
+    "escalated-ttl": { type: "string", default: String(7 * 86_400_000) },
     concurrency: { type: "string", default: "6" },
     strategies: { type: "string", default: "cascade,classifier,keyword,jev-all" },
     // Write the cascade's Jev labels as a training CSV (the server's training loop, offline).
@@ -64,6 +65,7 @@ const DECIDER_CONCURRENCY = Math.max(1, Number(args["decider-concurrency"]));
 const TTL = Number(args["verdict-ttl"]);
 const AUDIT = Number(args["audit-rate"]);
 const NOVEL = args["novel-guard"] !== "off";
+const KNOWN_TTL = Number(args["escalated-ttl"]);
 const STRATEGIES = args.strategies!.split(",") as StrategyName[];
 type StrategyName = "cascade" | "classifier" | "keyword" | "jev-all";
 
@@ -125,7 +127,9 @@ class Sim {
     this.#rand = seeded(caseId);
   }
 
-  route(score: number, errorish: boolean, novel: boolean): FullRoute {
+  #escalated = new EscalatedTemplates(KNOWN_TTL);
+
+  route(score: number, errorish: boolean, novel: boolean, known: boolean): FullRoute {
     switch (this.name) {
       case "keyword":
         return errorish ? "classifier" : "drop";
@@ -142,13 +146,13 @@ class Sim {
           auditRate: AUDIT,
           novelGuard: NOVEL,
           rand: this.#rand,
-        }, novel);
+        }, novel, known);
     }
   }
 
   async push(id: string, now: number, score: number, errorish: boolean, novel: boolean, template: string) {
     if (this.#pending.length && (this.#pending.length >= BATCH || now - (this.#oldestUrgent ?? this.#oldest + AUDIT_WAIT - WAIT) >= WAIT)) await this.#launch(now);
-    const route = this.route(score, errorish, novel);
+    const route = this.route(score, errorish, novel, this.#escalated.has(template, now));
     this.routed[route] = (this.routed[route] ?? 0) + 1;
     if (route === "drop") return;
     if (!this.#pending.length) this.#oldest = now;
@@ -241,6 +245,7 @@ class Sim {
       ids.push(flag.id);
     }
     for (const [t, i] of out.verdicts) this.#cache.set(t, i >= 0, now, i >= 0 ? ids[i] : undefined);
+    if (this.name === "cascade") for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) this.#escalated.add(t, now);
     for (const [fid, evs] of out.attach) {
       const f = this.#flagById.get(fid);
       if (!f) continue;
@@ -478,7 +483,7 @@ for (const s of STRATEGIES) {
 const summary = {
   model: { path: args.model, trained_at: classifier.file.trained_at, drop_below: classifier.file.drop_below, threshold: classifier.file.threshold, trees: classifier.gbdt.numTrees },
   split: args.split,
-  settings: { batch_size: BATCH, batch_wait_ms: WAIT, audit_wait_ms: AUDIT_WAIT, decider_concurrency: DECIDER_CONCURRENCY, verdict_ttl_ms: TTL, audit_rate: AUDIT, novel_guard: NOVEL },
+  settings: { batch_size: BATCH, batch_wait_ms: WAIT, audit_wait_ms: AUDIT_WAIT, decider_concurrency: DECIDER_CONCURRENCY, verdict_ttl_ms: TTL, audit_rate: AUDIT, novel_guard: NOVEL, escalated_ttl_ms: KNOWN_TTL },
   jev: {
     live: args.jev,
     model: process.env.JEV_MODEL || JEV.model,

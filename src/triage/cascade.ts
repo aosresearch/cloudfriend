@@ -5,6 +5,7 @@
 //              escalated, no cost, unless it is an error-like event of a kind never seen
 //              before, which Jev always sees once. A small random share of the rest is still
 //              sent to Jev as an audit, which is how missed escalations (false negatives) get found.
+//              A template Jev or a person escalated recently also always goes to Jev.
 //   2. plan    the events headed for Jev are grouped by template. Templates Jev ruled on in
 //              the last `ttl` reuse that verdict. Otherwise at most `perTemplate` examples
 //              per template go to Jev, and the rest follow their example's verdict.
@@ -13,7 +14,7 @@
 import type { Route } from "./classifier.ts";
 import type { FlagDraft, Severity } from "../types.ts";
 
-export type FullRoute = Route | "audit" | "novel" | "classifier";
+export type FullRoute = Route | "audit" | "novel" | "known" | "classifier";
 
 export interface RouteOptions {
   dropBelow: number;
@@ -28,12 +29,18 @@ export interface RouteOptions {
   rand?: () => number;
 }
 
-/** Where one scored event goes. With no classifier (score null) everything goes to Jev. */
-export function routeEvent(score: number | null, o: RouteOptions, novel = false): FullRoute {
+/**
+ * Where one scored event goes. With no classifier (score null) everything goes to Jev.
+ * `novel`: an error-like event of a never-seen template. `known`: a template Jev or a person
+ * escalated recently. Both reach Jev whatever the score, so the classifier can never drop
+ * the next instance of something that was escalated.
+ */
+export function routeEvent(score: number | null, o: RouteOptions, novel = false, known = false): FullRoute {
   if (score === null) return o.hasJev ? "jev" : "drop";
   if (!o.hasJev) return score >= o.threshold ? "classifier" : "drop";
   if (score >= o.escalateAbove) return "auto";
   if (score >= o.dropBelow) return "jev";
+  if (known) return "known";
   if (novel && o.novelGuard !== false) return "novel";
   return o.auditRate > 0 && (o.rand ?? Math.random)() < o.auditRate ? "audit" : "drop";
 }
@@ -196,4 +203,43 @@ export function applyVerdicts(plan: Plan, drafts: FlagDraft[], maxFollowerLabels
 
 export function severityFromScore(score: number): Severity {
   return score >= 0.97 ? "high" : score >= 0.85 ? "medium" : "low";
+}
+
+/**
+ * Templates that were escalated recently (by Jev or a person), and when. Events of these
+ * templates always reach Jev; a person's "false positive" takes a template off the list.
+ */
+export class EscalatedTemplates {
+  #map = new Map<string, number>();
+  readonly ttlMs: number;
+  readonly max: number;
+  constructor(ttlMs: number, max = 100_000) {
+    this.ttlMs = ttlMs;
+    this.max = max;
+  }
+
+  has(template: string, now: number): boolean {
+    const t = this.#map.get(template);
+    if (t === undefined) return false;
+    if (now - t > this.ttlMs) {
+      this.#map.delete(template);
+      return false;
+    }
+    return true;
+  }
+
+  add(template: string, at: number): void {
+    if (this.ttlMs <= 0) return;
+    this.#map.delete(template);
+    this.#map.set(template, at);
+    if (this.#map.size > this.max) for (const k of [...this.#map.keys()].slice(0, this.max / 10)) this.#map.delete(k);
+  }
+
+  delete(template: string): void {
+    this.#map.delete(template);
+  }
+
+  get size(): number {
+    return this.#map.size;
+  }
 }

@@ -69,6 +69,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       verdictTtlMs: config.verdictTtlMs,
       perTemplate: config.perTemplate,
       novelGuard: config.novelGuard,
+      knownTtlMs: config.knownTtlMs,
       hasJev: decider !== null,
     });
     // The first model that loads: an explicit file, the last promoted one, the built-in one.

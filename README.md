@@ -102,6 +102,7 @@ Every parsed event goes through a featurizer: message template, rates, novelty, 
 | `drop` | score below the model's `drop_below` | done, no cost |
 | `jev` | score at or above `drop_below` | Jev decides |
 | `novel` | an error-like event whose template was never seen before | Jev sees it once |
+| `known` | its template was escalated (by Jev or a person) in the last 7 days | Jev always sees it; the classifier can't drop a repeat |
 | `audit` | 1% of what would be dropped | Jev checks it, to find what the classifier misses |
 | `classifier` | there is no Jev; score at or above the model's `threshold` | escalated by the classifier alone |
 
@@ -152,6 +153,7 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_AUDIT_RATE` | `0.01` | Share of dropped events sent to Jev anyway, to find missed escalations. |
 | `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send error-like events of a never-seen template to Jev once. |
+| `CLOUDFRIEND_ESCALATED_TTL` | `7d` | How long an escalated template keeps going to Jev whatever its score. `off` disables. |
 | `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |
 | **Training** | | |

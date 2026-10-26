@@ -105,6 +105,19 @@ On benchmark data we measured the same effect. We started from a classifier trai
 
 The events that still go to Jev after retraining look like real escalations to the classifier. Jev keeps answering "no" for them, and its cached verdict covers repeats for 15 minutes. Error templates the classifier has never seen also go to Jev once whatever their score, so a brand-new failure is not lost to a confident classifier.
 
+### What Jev said yes to keeps reaching Jev
+
+The reverse matters as much: once Jev escalates a kind of event, the classifier must never drop the next one. Look at the 8% of escalations above that the retrained classifier misses. They are `frontend request error` lines that score almost zero. They only reached Jev through the 1% audit sample, and Jev escalated them: stage-1 false negatives.
+
+Lowering the threshold doesn't fix this. At a 99.5% recall target instead of 98%, the classifier caught one more escalation but sent three times as many stage-1 false positives to Jev (272 instead of 91). The fix is a rule instead. A template that Jev or a person escalated in the last 7 days goes to Jev whatever its score (route `known`, see [Triage](./triage.md#routes)). Replaying the three held-out faults with Jev's recorded verdicts:
+
+| Later events of a kind Jev had escalated | Reach Jev |
+| --- | --- |
+| classifier alone | 3,086 of 12,035 (25.6%) |
+| classifier + escalated-kind rule | 12,035 of 12,035 (100%) |
+
+Most of them cost no Jev call: they are added to the open flag by Jev's cached verdict. The rule only covers kinds that were escalated, so it brings back none of the stage-1 false positives. A person marking the flag `false_positive` takes its templates off the list at once. The list survives restarts: it is rebuilt from the labels table.
+
 A flag that Jev raised and a person marks `false_positive` works the same way. Its events become "don't escalate" labels with five times the weight, and Jev's cached verdict for those templates is overturned at once, before any retraining.
 
 ## Schedule

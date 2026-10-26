@@ -149,6 +149,7 @@ describe("cascade", () => {
     assert.equal(routeEvent(0.05, { ...o, auditRate: 1 }), "audit");
     assert.equal(routeEvent(0.05, o, true), "novel", "a never-seen error goes to Jev once");
     assert.equal(routeEvent(0.05, { ...o, novelGuard: false }, true), "drop");
+    assert.equal(routeEvent(0.05, o, false, true), "known", "a kind of event that was escalated always reaches Jev");
     assert.equal(routeEvent(0.6, { ...o, hasJev: false }), "classifier");
     assert.equal(routeEvent(0.4, { ...o, hasJev: false }), "drop");
   });
@@ -272,6 +273,56 @@ describe("triage in the pipeline", () => {
     await cf.post("app", { level: "error", message: "disk almost full" });
     await run();
     assert.equal(count(cf, "flags"), 1);
+  });
+
+  it("keeps sending Jev a kind of event it escalated, even when the classifier would drop it", async () => {
+    // This classifier drops everything (errors score 0.98, the threshold is 0.99).
+    const d = fakeDecider((events) => {
+      const hit = events.filter((e) => JSON.stringify(e.data).includes("ledger"));
+      return hit.length ? [{ reason: "ledger writes failing", severity: "critical", event_ids: hit.map((e) => e.id) }] : [];
+    });
+    cf = await makeCloudfriend({
+      decider: d.adapter,
+      config: { triage: true, modelPath: writeModel(tinyModel({ drop_below: 0.99, threshold: 0.995 })), auditRate: 0, verdictTtlMs: 0, batchWaitMs: 0 },
+    });
+    const route = () => (cf.db.prepare("SELECT route FROM events ORDER BY id DESC LIMIT 1").get() as { route: string }).route;
+    // First time: a never-seen error goes to Jev once (novel), and Jev escalates it.
+    await cf.post("app", { level: "error", message: "ledger write failed for account 17" });
+    await run();
+    assert.equal(route(), "novel");
+    assert.equal(count(cf, "flags"), 1);
+    // Next ones would be dropped by the classifier, but Jev escalated this kind: they still reach it.
+    await cf.post("app", { level: "error", message: "ledger write failed for account 18" });
+    await run();
+    assert.equal(route(), "known");
+    assert.equal(d.calls.length, 2);
+    // A kind Jev didn't escalate is dropped once it isn't new.
+    await cf.post("app", [{ level: "error", message: "thumbnail cache miss for image 1" }, { level: "error", message: "thumbnail cache miss for image 2" }]);
+    await run();
+    assert.equal(route(), "drop");
+    // A person says the ledger flag was a false positive: the kind stops reaching Jev.
+    const [flag] = (await json(cf.get("/flags"))).flags.slice(-1);
+    await cf.app.request(`/flags/${flag.id}/feedback`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
+      body: JSON.stringify({ verdict: "false_positive" }),
+    });
+    await cf.post("app", { level: "error", message: "ledger write failed for account 19" });
+    await run();
+    assert.equal(route(), "drop");
+  });
+
+  it("remembers escalated kinds across a restart", async () => {
+    const d = fakeDecider((events) => [{ reason: "boom", severity: "high", event_ids: events.map((e) => e.id) }]);
+    const config = { triage: true, modelPath: writeModel(tinyModel({ drop_below: 0.99 })), auditRate: 0, verdictTtlMs: 0, batchWaitMs: 0 };
+    cf = await makeCloudfriend({ decider: d.adapter, config });
+    await cf.post("app", { level: "error", message: "replica lag over 30s on db 2" });
+    await run();
+    assert.equal(cf.triage!.escalated.size, 1);
+    const dataDir = cf.config.dataDir;
+    await cf.close(0);
+    cf = await makeCloudfriend({ decider: d.adapter, config: { ...config, dataDir } });
+    assert.equal(cf.triage!.escalated.size, 1, "loaded from the labels table");
   });
 
   it("acknowledges and resolves flags in the queue", async () => {

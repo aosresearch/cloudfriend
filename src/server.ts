@@ -201,7 +201,7 @@ export function createApp(deps: AppDeps): Hono {
     if (typeof body.escalate !== "boolean") throw new BadRequest("escalate must be true or false");
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id)) throw new BadRequest("unknown event id");
-    const res = eventFeedback(db, id, body.escalate, typeof body.note === "string" ? body.note : null);
+    const res = eventFeedback(db, id, body.escalate, typeof body.note === "string" ? body.note : null, triage);
     return res ? c.json(res) : c.json({ error: "not found (events are kept for CLOUDFRIEND_RETENTION)" }, 404);
   });
 

@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { applyVerdicts, planBatch, routeEvent, VerdictCache, type Pending } from "../src/triage/cascade.ts";
+import { applyVerdicts, EscalatedTemplates, planBatch, routeEvent, VerdictCache, type Pending } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, Featurizer } from "../src/triage/features.ts";
 import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
@@ -78,6 +78,7 @@ async function exportScenario(spec: string) {
 
   const featurizer = new Featurizer();
   const cache = new VerdictCache(TTL);
+  const escalated = new EscalatedTemplates(7 * 86_400_000);
   const rand = seeded(name);
   const shown: Shown[] = [];
   const dropped: Shown[] = [];
@@ -130,6 +131,7 @@ async function exportScenario(spec: string) {
       flags.push({ id, t: now, reason: f.reason, severity: f.severity, via: f.via, events: f.event_ids.slice(0, 50), count: f.event_ids.length, added: [], users: users.slice(0, 5) });
     }
     out.verdicts.forEach((i, tpl) => cache.set(tpl, i >= 0, now, i >= 0 ? ids[i] : undefined));
+    for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) escalated.add(t, now);
     for (const [fid, evs] of out.attach) {
       const f = flags.find((x) => x.id === fid);
       if (f && inWindow) {
@@ -151,7 +153,7 @@ async function exportScenario(spec: string) {
         hasJev: true,
         auditRate: Number(args["audit-rate"]),
         rand,
-      }, f.novel);
+      }, f.novel, escalated.has(f.template, e.t));
       const id = String(n++);
       if (pending.length && (pending.length >= BATCH || e.t - (oldestUrgent ?? oldest + AUDIT_WAIT - WAIT) >= WAIT)) await flush(e.t);
       const inWindow = e.t >= from && e.t <= to;

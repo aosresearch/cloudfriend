@@ -81,8 +81,8 @@ export class Worker {
         "UPDATE flags SET event_ids = ?, event_count = coalesce(event_count, 0) + ?, updated_at = ? WHERE id = ?",
       ),
       insertLabel: db.prepare(
-        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at)
-         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ? FROM events WHERE id = ? AND features IS NOT NULL
+        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template)
+         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, template FROM events WHERE id = ? AND features IS NOT NULL
          ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, created_at = excluded.created_at WHERE labels.source <> 'human'`,
       ),
       insertDelivery: db.prepare(
@@ -308,7 +308,7 @@ export class Worker {
     const items: Pending[] = rows.map((r) => {
       let route = (r.route ?? "jev") as Pending["route"];
       // Routed to Jev while one was configured, but there is none now: the classifier decides.
-      if (!decider && (route === "jev" || route === "audit" || route === "novel" || route === "auto")) route = (r.score ?? 0) >= threshold ? "classifier" : "drop";
+      if (!decider && (route === "jev" || route === "audit" || route === "novel" || route === "known" || route === "auto")) route = (r.score ?? 0) >= threshold ? "classifier" : "drop";
       return { id: String(r.id), template: r.template ?? `${r.source}|`, score: r.score, route };
     });
     // A cached "escalate" verdict only holds while its flag is still in the queue.
@@ -346,6 +346,8 @@ export class Worker {
     const out = applyVerdicts(plan, drafts);
     const flagIds = this.#storeOutcome(decider?.name ?? "classifier", ids, out, rows.map((r) => [String(r.id), r.user_key ?? null]));
     out.verdicts.forEach((i, template) => triage.cache.set(template, i >= 0, now, i >= 0 ? flagIds[i] : undefined));
+    // Whatever Jev escalated keeps reaching Jev, even where the classifier would drop it.
+    for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) triage.escalated.add(t, now);
     log.info("batch decided", {
       events: ids.length,
       asked: plan.ask.length,

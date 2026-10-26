@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { DB } from "../db.ts";
 import { errMsg, log } from "../log.ts";
-import { routeEvent, VerdictCache, type FullRoute } from "./cascade.ts";
+import { EscalatedTemplates, routeEvent, VerdictCache, type FullRoute } from "./cascade.ts";
 import { Classifier, type ClassifierFile } from "./classifier.ts";
 import { extractEntities, Featurizer, FEATURIZER_VERSION, type FeaturizerSnapshot } from "./features.ts";
 
@@ -19,6 +19,8 @@ export interface TriageOptions {
   perTemplate: number;
   /** Error-like events of a never-seen template always go to Jev once. */
   novelGuard: boolean;
+  /** How long a template Jev or a person escalated keeps going to Jev whatever its score. 0 = off. */
+  knownTtlMs?: number;
   /** The decider is there to ask; false means the classifier decides alone. */
   hasJev: boolean;
 }
@@ -34,6 +36,7 @@ export interface Scored {
 export class Triage {
   readonly featurizer = new Featurizer();
   readonly cache: VerdictCache;
+  readonly escalated: EscalatedTemplates;
   readonly opts: TriageOptions;
   classifier: Classifier | null = null;
   modelPath: string | null = null;
@@ -43,6 +46,8 @@ export class Triage {
     this.#db = db;
     this.opts = opts;
     this.cache = new VerdictCache(opts.verdictTtlMs);
+    this.escalated = new EscalatedTemplates(opts.knownTtlMs ?? 7 * 86_400_000);
+    this.#loadEscalated(db);
     const row = db.prepare("SELECT value FROM kv WHERE key = 'featurizer'").get() as { value: string } | undefined;
     if (row) {
       try {
@@ -98,7 +103,7 @@ export class Triage {
       auditRate: this.opts.auditRate,
       novelGuard: this.opts.novelGuard,
       rand,
-    }, f.novel);
+    }, f.novel, this.escalated.has(f.template.slice(0, 300), Date.now()));
     return {
       score,
       route,
@@ -106,6 +111,27 @@ export class Triage {
       features: encodeFeatures(f.values),
       user: extractEntities(data, f.text).user?.slice(0, 128) ?? null,
     };
+  }
+
+  /**
+   * Templates whose latest label says "escalate", within the window. A person's label wins
+   * over Jev's: a template a person marked as a false positive is not loaded.
+   */
+  #loadEscalated(db: DB): void {
+    if (!this.escalated.ttlMs) return;
+    const since = Date.now() - this.escalated.ttlMs;
+    const rows = db
+      .prepare(
+        `SELECT template, y, source, created_at FROM labels WHERE template IS NOT NULL AND created_at >= ?
+         ORDER BY template, (source = 'human') DESC, created_at DESC`,
+      )
+      .all(since) as { template: string; y: number; created_at: number }[];
+    let last = "";
+    for (const r of rows) {
+      if (r.template === last) continue;
+      last = r.template;
+      if (r.y) this.escalated.add(r.template, r.created_at);
+    }
   }
 
   saveState(): void {

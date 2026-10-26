@@ -136,6 +136,8 @@ const COLUMNS: [table: string, column: string, decl: string][] = [
   ["flags", "event_count", "INTEGER"],
   ["flags", "users", "TEXT"],
   ["flags", "note", "TEXT"],
+  // The labelled event's template, so a kind of event someone escalated keeps reaching Jev.
+  ["labels", "template", "TEXT"],
 ];
 
 function migrate(db: DB): void {
@@ -145,6 +147,7 @@ function migrate(db: DB): void {
   }
   db.exec("CREATE INDEX IF NOT EXISTS events_user ON events(user_key) WHERE user_key IS NOT NULL");
   db.exec("CREATE INDEX IF NOT EXISTS flags_status ON flags(status, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS labels_template ON labels(template) WHERE template IS NOT NULL");
 }
 
 export function dbPath(dataDir: string): string {

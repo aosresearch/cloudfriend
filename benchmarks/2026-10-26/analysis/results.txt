@@ -1,0 +1,11 @@
+{"fp":547,"fpStill":91,"tp":74,"tpStill":68,"low":576,"lowNow":41}
+stage-1 false positives (passed by M0, Jev said no): 547; still passed after retraining: 91 (16.6%)
+Jev escalations: 74; still passed after retraining: 68 (91.9%)
+audit/novel negatives M0 dropped: 576; passed after retraining: 41
+classifier only         : kinds Jev escalated that reach Jev at all 29/29; later events of those kinds reaching Jev 3086/12035 (25.6%)
+with escalated-kind rule: kinds Jev escalated that reach Jev at all 29/29; later events of those kinds reaching Jev 12035/12035 (100.0%)
+labels 1197, matched to templates 1197
+recall 0.98   classifier only      : Jev escalations reaching Jev 68/74 (91.9%), stage-1 false positives still sent 91/547 (16.6%)
+recall 0.98   + escalated/novel rule: Jev escalations reaching Jev 68/74 (91.9%), stage-1 false positives still sent 97/547 (17.7%)
+recall 0.995  classifier only      : Jev escalations reaching Jev 69/74 (93.2%), stage-1 false positives still sent 272/547 (49.7%)
+recall 0.995  + escalated/novel rule: Jev escalations reaching Jev 69/74 (93.2%), stage-1 false positives still sent 272/547 (49.7%)

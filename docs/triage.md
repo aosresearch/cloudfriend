@@ -16,7 +16,7 @@ flowchart LR
   ev(["events"]) --> feat["Featurizer<br/>template, rates,<br/>novelty"]
   feat --> clf{"LightGBM<br/>score"}
   clf -->|"below drop_below"| drop["dropped<br/>(no cost)"]
-  clf -->|"never-seen error"| jev
+  clf -->|"never-seen error,<br/>or a kind escalated before"| jev
   clf -->|"1% audit sample"| jev
   clf -->|"uncertain"| group["group by template,<br/>reuse recent verdicts"]
   group -->|"≤3 examples<br/>per template"| jev{{"Jev"}}
@@ -59,6 +59,7 @@ The model gives each event a probability that it should be escalated, and the ev
 | `drop` | score below the model's `drop_below` | Done. Not escalated, never sent anywhere. |
 | `jev` | score at or above `drop_below` | Goes to Jev in the next batch. |
 | `novel` | error-like (error level, error words or a 5xx) and its template has never been seen, whatever its score | Goes to Jev once. Later events of the template are scored normally. Turn off with `CLOUDFRIEND_NOVEL_ERRORS=off`. |
+| `known` | its template was escalated by Jev, or by a person, in the last `CLOUDFRIEND_ESCALATED_TTL` (7 days), whatever its score | Goes to Jev, where a cached verdict usually adds it to the open flag. The classifier can never drop the next instance of something that was escalated. A person marking the flag `false_positive` ends this for its templates. |
 | `audit` | a random `CLOUDFRIEND_AUDIT_RATE` (1%) of what would be dropped | Goes to Jev, so its answers measure what the classifier misses. Audits aren't urgent: they ride along with the next batch, or go on their own after `CLOUDFRIEND_AUDIT_WAIT` (5 minutes). |
 | `auto` | score at or above `escalate_above` | Escalated without asking Jev. Off in the shipped model (`escalate_above` is above 1). |
 | `classifier` | no Jev configured, score at or above the model's `threshold` | Escalated on the classifier alone. |
@@ -115,5 +116,6 @@ Flags are the queue. Each has a `status`:
 | `CLOUDFRIEND_AUDIT_RATE` | `0.01` | Share of dropped events sent to Jev anyway. |
 | `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send never-seen error templates to Jev once. |
+| `CLOUDFRIEND_ESCALATED_TTL` | `7d` | How long a template that was escalated keeps going to Jev whatever its score. `off` disables. |
 | `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |

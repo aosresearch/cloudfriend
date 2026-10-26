@@ -15,7 +15,7 @@ With `data/jev-cache` in place, the evaluations below replay Jev's recorded answ
 | --- | --- |
 | `jev-cache.tar.gz` | One JSON per Jev call, named by the SHA-256 of model + system prompt + batch prompt. Each holds the model the router picked, token usage and cost, latency, and Jev's flags (as indices into the batch). |
 | `results.tar.gz` | `ml/evaluate.ts` outputs. `re3-eval.json` is the final model with live Jev on the 20 held-out RCAEval cases. `re3-eval-live.json` and `re3-eval-dry.json` come from the earlier RE3-only model. `gaia-dry.json` and `gaia-dry-re3v3.json` are GAIA dry runs without Jev. `traces-re3/` holds every flag with its events, per case. |
-| `distill.tar.gz` | The "train the classifier on Jev's decisions" experiment. `jev-labels-{train,valid}.csv` are 12,045 Jev verdicts with the feature vectors the classifier saw, collected by the GAIA-only model on RCAEval replays. `m0-*.json` are those runs. `eval-{gaia-only,m1}.json` compare the model before and after retraining, on held-out faults with live Jev. `fp-{train,held}.csv` and `m1-fp.*` are the split by fault used to measure stage-1 false positives. |
+| `distill.tar.gz` | The "train the classifier on Jev's decisions" experiment. `jev-labels-{train,valid}.csv` are 12,045 Jev verdicts with the feature vectors the classifier saw, collected by the GAIA-only model on RCAEval replays. `m0-*.json` are those runs. `eval-{gaia-only,m1}.json` compare the model before and after retraining, on held-out faults with live Jev. `fp-{train,held}.csv` are the Jev labels split by fault: 10 faults to retrain on, 3 held out. `m1-fp.*` (recall target 98%) and `m1-fp995.*` (99.5%) are the models retrained on them. |
 | `models.tar.gz` | Every trained model: `gaia-only` (M0), `m1`, the RE3-only versions `re3-v1..v3`, and LightGBM parity fixtures. The shipped model is `models/base.json` in the repository. |
 | `re3-cases.json`, `gaia-cases.json` | Each case or day: split, fault or incident times, event and positive counts. |
 | `*-features-meta.json` | Featurizer version, feature names, sampling shares and row counts of the training CSVs. |
@@ -23,3 +23,11 @@ With `data/jev-cache` in place, the evaluations below replay Jev's recorded answ
 | `logs/` | Console output of the conversion and evaluation runs. |
 
 The GAIA live evaluation of Aug 12 and 13 was stopped before it finished. The Jev calls it made are in the cache, but there is no results file for it.
+
+## Analysis
+
+`analysis/` holds the scripts behind the "stage-1 false positives" and "what Jev said yes to keeps reaching Jev" results in `docs/training.md`, with their output in `results.txt`. Run them from the repository root, with `distill/` and `models/` unpacked into `data/` and the RE3 streams rebuilt in `data/prepared/re3`. They make no Jev calls, because Jev's recorded verdicts stand in for its answers.
+
+- `stage1-false-positives.ts`: of the events the GAIA-only model sent to Jev and Jev rejected, on held-out faults, how many the retrained model still sends.
+- `recall-target.ts`: the same at retraining recall targets of 98% and 99.5%, with and without the escalated-kind rule, on labelled events only.
+- `escalated-kinds.ts`: full-stream replay. Later events of kinds Jev had escalated, and how many reach Jev with and without the rule.
