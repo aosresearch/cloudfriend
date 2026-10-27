@@ -7,7 +7,7 @@ Sources ──> [ In ──> Classifier ──> Jev ──> Out ] ──> escala
                         │ LightGBM,   │ few examples      ▲
                         │ every event │ per template      │ labels: Jev verdicts,
                         └─────────────┴───────────────────┘ confirmed / false positive / missed
-                SQLite file: durable queue, events for 7 days, flags and labels kept
+                Postgres: durable queue, events for 7 days, flags and labels kept
 ```
 
 - **In:** `POST /in/<source>` accepts any JSON. Adapters for Sentry and PostHog pull out ids and grouping hints.
@@ -16,14 +16,17 @@ Sources ──> [ In ──> Classifier ──> Jev ──> Out ] ──> escala
 - **Out:** each escalation becomes a flag in the queue (`GET /queue`) and goes to every enabled action: Slack, a webhook, or your own adapter.
 - **Learn:** Jev's verdicts, audit samples and people's feedback are stored as labels. The classifier is retrained on them and swapped in only if it beats the current one.
 
-There is no Postgres or Redis. Everything lives in one SQLite file under `/data`.
+Everything lives in one Postgres database: the queue, events, flags, labels and secrets. There is no Redis and no separate job queue; only trained model files are written to disk, under `/data/models`.
 
 Try it: [cloudfriend.dev/demo](https://cloudfriend.dev/demo) replays real incidents from public benchmarks through the pipeline.
 
 ## Quick start
 
+cloudfriend needs a Postgres database (tested with Postgres 14) that its user can create tables in. It creates its schema on first boot and migrates it on later ones.
+
 ```bash
-docker run -p 8080:8080 -v cloudfriend-data:/data \
+docker run -p 8080:8080 -v cloudfriend-models:/data \
+  -e CLOUDFRIEND_DATABASE_URL=postgres://cloudfriend:secret@db.internal:5432/cloudfriend \
   -e CLOUDFRIEND_ADMIN_KEY=change-me \
   -e JEV_API_KEY=sk-or-... \
   -e SLACK_WEBHOOK_URL=https://hooks.slack.com/... \
@@ -73,13 +76,13 @@ Create an **HTTP Webhook** destination with URL `https://<your-host>/in/posthog`
 
 ### Durable intake
 
-An event is on disk before cloudfriend replies.
+An event is committed to Postgres before cloudfriend replies.
 
 1. The request's secret is checked, along with the source adapter's `verify()` if it has one.
-2. The raw bytes are appended to a `queue` table. A writer loop collects requests for about 2 ms and commits them in one transaction, so one fsync covers the batch. Each request waits for the commit that holds its row, then gets `202`.
+2. The raw bytes are appended to a `queue` table. A writer loop collects requests for about 2 ms and inserts them with one multi-row `INSERT` in one transaction, so one commit covers the batch. Each request waits for the commit that holds its row, then gets `202`.
 3. If the write fails or the queue is over its limit, cloudfriend replies `503` with `Retry-After`, so the sender retries.
 
-There is no JSON parsing and no model call in the request path. On a laptop, with `synchronous=FULL`, 50 concurrent senders get their `202` in about 3 ms at the median, at roughly 16k requests/s.
+There is no JSON parsing and no model call in the request path.
 
 ### The worker
 
@@ -91,7 +94,7 @@ Three stages run in the background. Each one commits its own result, so a crash 
 | decide | undecided events, once 100 are waiting or the oldest has waited 10 s | flags, one pending delivery per action, training labels, and marks the events decided |
 | deliver | pending deliveries that are due | `ok`, or a retry with backoff (5 s doubling up to 1 h, 15 attempts) |
 
-After a crash or restart, anything not yet done is picked up again. Delivery to actions is at-least-once. Each flag has a stable `id`, sent to webhooks as `x-cloudfriend-flag-id`, which receivers can use to ignore repeats. If the decider fails (model down, bad key), its events stay queued and the call is retried with backoff up to 5 minutes.
+After a crash or restart, anything not yet done is picked up again. No transaction is held open during a model call or a delivery. Delivery to actions is at-least-once. Each flag has a stable `id`, sent to webhooks as `x-cloudfriend-flag-id`, which receivers can use to ignore repeats. If the decider fails (model down, bad key), its events stay queued and the call is retried with backoff up to 5 minutes.
 
 ### Triage
 
@@ -126,7 +129,8 @@ Each event Jev judges relevant or benign becomes a label with the feature vector
 - **Events** are kept for `CLOUDFRIEND_RETENTION` (7 days by default), then deleted by a cleanup job that works in chunks of 1000 rows. Events the decider hasn't seen yet are never deleted.
 - **Flags** are kept until you delete them. Each flag lists its `event_ids`, its queue `status` and the `users` found in its events.
 - **Labels** and **models** are kept until you delete them. Labels carry their own copy of the event and its features, so they outlive event retention.
-- Mounting a volume at `/data` is optional, but without one the data does not survive a replaced container. Production setups should mount a volume. The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
+- Everything above lives in Postgres, so a replaced container loses nothing. Every row carries a `workspace_id`; this release has a single workspace.
+- Trained model files are written under `/data/models`. Mounting a volume at `/data` keeps a promoted model across a replaced container; without one, the built-in model is used until the next promotion. The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
 
 ## Configuration
 
@@ -136,7 +140,9 @@ Everything is set through environment variables.
 | --- | --- | --- |
 | `CLOUDFRIEND_ADMIN_KEY` | *(unset)* | Key for the admin API. The admin API is disabled until this is set. It can never be used to send events. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | |
-| `CLOUDFRIEND_DATA_DIR` | `/data` in the image, `./data` otherwise | Where `cloudfriend.db` lives. |
+| `CLOUDFRIEND_DATABASE_URL` | *(required)* | Postgres connection string, e.g. `postgres://user:password@host:5432/cloudfriend`. `DATABASE_URL` is used if this is unset. cloudfriend exits at boot if neither is set. |
+| `CLOUDFRIEND_DB_POOL` | `10` | Connections to Postgres per process. |
+| `CLOUDFRIEND_DATA_DIR` | `/data` in the image, `./data` otherwise | Where trained model files are written (`models/`). |
 | `CLOUDFRIEND_BATCH_SIZE` | `100` | Events per decider call. |
 | `CLOUDFRIEND_BATCH_WAIT` | `10s` | Longest an event waits for its batch to fill. |
 | `CLOUDFRIEND_DECIDER` | `jev` | Which decider adapter to use. |
@@ -145,7 +151,6 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_RETENTION` | `7d` | How long events are kept. |
 | `CLOUDFRIEND_MAX_QUEUE` | `1000000` | Unparsed requests allowed before ingest replies `503`. |
 | `CLOUDFRIEND_MAX_BODY_BYTES` | `1048576` | Larger bodies get `413`. |
-| `CLOUDFRIEND_SYNCHRONOUS` | `FULL` | `FULL` survives power loss. `NORMAL` survives a process crash and is faster. |
 | `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | Group-commit window. |
 | `CLOUDFRIEND_ADAPTER_DIR` | *(unset)* | Extra adapters to load without rebuilding the image (see below). |
 | `CLOUDFRIEND_LOG` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
@@ -376,11 +381,11 @@ export default {
 
 ## Development
 
-cloudfriend needs Node 22.18 or later. It runs the TypeScript directly and uses the built-in `node:sqlite`, so there is no build step and no native module.
+cloudfriend needs Node 22.18 or later and a Postgres database. It runs the TypeScript directly, so there is no build step and no native module.
 
 ```bash
 npm install
-npm run dev          # ./data/cloudfriend.db, restarts on change
+CLOUDFRIEND_DATABASE_URL=postgres://localhost/cloudfriend npm run dev   # restarts on change
 npm test             # unit tests, plus an end-to-end run with mock OpenRouter and Slack
 npm run test:docker  # builds the image and tests it in Docker (needs a running Docker daemon)
 npm run typecheck
@@ -388,13 +393,15 @@ npm run cloudfriend -- secrets list
 python3 -m pip install lightgbm numpy  # only for training; see ml/README.md
 ```
 
-`npm run test:docker` runs the image the way the Quick start does, against a mock OpenRouter and Slack on the host. It checks that:
+`npm test` needs no Docker. With `TEST_DATABASE_URL` set, it uses that server (its user needs `CREATEDB`). Otherwise it starts a throwaway Postgres cluster from the local binaries (`initdb` and `pg_ctl`, from Homebrew or `PG_BIN`) in a temporary directory on a free port, and removes it afterwards. Every test gets a fresh database.
+
+`npm run test:docker` runs the image against a mock OpenRouter and Slack on the host. It has not been updated for Postgres yet (it starts the container without a database), so it fails until it is. It checks that:
 
 - the container runs as a non-root user and reports healthy
 - the first-boot secret appears in `docker logs`
 - a Sentry webhook becomes a flag in Slack
 - the CLI works through `docker exec`
-- data survives `docker restart` and container replacement with the volume
+- data survives `docker restart` and container replacement
 - no accepted event is lost to a `SIGKILL` while requests are still unparsed
 - `docker stop` exits 0 promptly
 

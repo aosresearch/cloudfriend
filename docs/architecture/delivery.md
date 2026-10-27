@@ -6,7 +6,7 @@ title: Delivery
 
 Delivery takes each flag from [Process](./process.md) and runs every enabled action on it: post to Slack, call a webhook, or your own adapter. It retries until each action succeeds or runs out of attempts.
 
-Code: `src/worker.ts` (`deliverDue`, `#deliver`) and the adapters in `src/adapters/actions/`.
+Code: `src/worker.ts` (`claimDeliveries`, `deliverDue`, `#deliver`) and the adapters in `src/adapters/actions/`.
 
 ## The deliveries table
 
@@ -17,7 +17,7 @@ When a flag is stored, the same transaction adds one row to `deliveries` for eac
 | `flag_id`, `action` | Which flag goes to which action. |
 | `status` | `pending`, `ok` or `failed`. |
 | `attempts` | How many times it has run. |
-| `next_attempt_at` | When it is due next. |
+| `next_attempt_at` | When it is due next. While a delivery runs, this is the end of its claim. |
 | `last_error` | The error from the latest failed attempt. |
 
 `GET /flags/:id` returns these rows with the flag, so you can see where each flag went.
@@ -28,19 +28,21 @@ The worker starts a pass on every tick (200 ms) unless one is already running, a
 
 ```mermaid
 flowchart TD
-  due["Up to 50 pending deliveries<br/>that are due"] --> run["action.run(flag, events)<br/>15 s timeout"]
+  due["Claim up to 50 pending deliveries<br/>that are due"] --> run["action.run(flag, events)<br/>15 s timeout"]
   run -->|returns| ok["status = ok"]
   run -->|"throws, returns false,<br/>or times out"| retry{"15 attempts<br/>used?"}
   retry -->|no| later["pending, due again after backoff"]
   retry -->|yes| failed["status = failed"]
 ```
 
-1. Read up to 50 `pending` deliveries whose `next_attempt_at` has passed, earliest first.
+1. Claim up to 50 `pending` deliveries whose `next_attempt_at` has passed, earliest first. One statement selects them with `FOR UPDATE SKIP LOCKED` and moves their `next_attempt_at` a minute ahead, so another worker running a pass at the same moment skips them, and once the claim commits nobody finds them due. No transaction is open while the actions run.
 2. Run them all at once. Each gets the flag and up to 50 of its events, and has 15 seconds.
-3. Record each result:
+3. Record each result, if the claim is still this pass's:
    - **success:** `status = 'ok'`.
    - **failure** (it threw, returned `false`, or timed out): `attempts + 1`, the error is saved, and it is due again after the backoff.
    - **15th failure:** `status = 'failed'`. It is not tried again.
+
+If cloudfriend shuts down while an action runs, the action's `signal` fires and the claim is handed back: the delivery is due again at once on the next start. If the process dies instead, the delivery is due again when its claim runs out, a minute after it started.
 
 If a flag is deleted while its deliveries are pending, they are deleted with it. If an action is no longer enabled (for example its env var was removed and cloudfriend restarted), its pending deliveries are marked `failed` on their next run.
 

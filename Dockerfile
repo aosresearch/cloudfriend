@@ -1,5 +1,6 @@
-# cloudfriend: one container, one SQLite file. Node runs the TypeScript sources directly
-# (type stripping) and uses the built-in node:sqlite, so there is no build step.
+# cloudfriend: one container; all state lives in Postgres (CLOUDFRIEND_DATABASE_URL). Node runs
+# the TypeScript sources directly (type stripping), so there is no build step. /data holds only
+# trained model files.
 # Python with LightGBM is included only for retraining the classifier (ml/train.py);
 # scoring events happens in Node.
 FROM node:22.22.0-slim

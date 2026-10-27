@@ -12,9 +12,10 @@ This page gets you from nothing to a flag in Slack, and explains what each step 
 
 - **Docker**, on any machine that can receive HTTP from the services that will send events.
 - **An OpenRouter API key** ([openrouter.ai/keys](https://openrouter.ai/keys)) for Jev. cloudfriend uses it to ask Jev about the events the classifier passes on. Without it, the classifier escalates on its own, with less judgment.
+- **A Postgres database** (tested with Postgres 14) and a user that can create tables in it. cloudfriend creates its schema on first boot and migrates it on later ones.
 - **A Slack incoming webhook URL** ([api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks)), or any HTTP endpoint that should receive flags.
 
-There is no database to set up. Everything lives in one SQLite file inside the container's `/data` volume.
+Everything lives in that one Postgres database. The container itself only writes trained model files, under `/data/models`.
 
 ## 1. Build the image
 
@@ -24,14 +25,15 @@ From a checkout of the repository:
 docker build -t cloudfriend .
 ```
 
-The image is about Node 22 plus two small dependencies. It runs TypeScript directly, so there is no compile step.
+The image is about Node 22 plus three small dependencies (Hono, its Node server, and the `pg` Postgres driver). It runs TypeScript directly, so there is no compile step.
 
 ## 2. Run it
 
 ```bash
 docker run -d --name cloudfriend \
   -p 8080:8080 \
-  -v cloudfriend-data:/data \
+  -v cloudfriend-models:/data \
+  -e CLOUDFRIEND_DATABASE_URL=postgres://cloudfriend:secret@db.internal:5432/cloudfriend \
   -e CLOUDFRIEND_ADMIN_KEY=change-me \
   -e JEV_API_KEY=sk-or-... \
   -e SLACK_WEBHOOK_URL=https://hooks.slack.com/services/... \
@@ -43,7 +45,8 @@ What each line does:
 | Flag | Why |
 | --- | --- |
 | `-p 8080:8080` | cloudfriend listens on port 8080 for events and API calls. |
-| `-v cloudfriend-data:/data` | Keeps the database on a named volume, so events, flags and secrets survive a replaced container. Without it, data lives only as long as the container. |
+| `-v cloudfriend-models:/data` | Keeps trained model files on a named volume, so a promoted model survives a replaced container. Without it, the built-in model is used until the next promotion. Events, flags and secrets are in Postgres either way. |
+| `CLOUDFRIEND_DATABASE_URL` | The Postgres database cloudfriend stores everything in. `DATABASE_URL` works too. cloudfriend exits at boot if neither is set. |
 | `CLOUDFRIEND_ADMIN_KEY` | Turns on the admin API (`/secrets`, `/flags`, `/events`). Pick a long random value. It can never be used to send events. |
 | `JEV_API_KEY` | Turns on Jev, the default decider, for the events the classifier passes on. `OPENROUTER_API_KEY` works too. |
 | `SLACK_WEBHOOK_URL` | Turns on the Slack action. Every flag is posted to this channel. |
@@ -163,7 +166,9 @@ Everything is set through environment variables. Durations accept `ms`, `s`, `m`
 | --- | --- | --- |
 | `CLOUDFRIEND_ADMIN_KEY` | *(unset)* | Key for the admin API. The admin API is off until this is set. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Where to listen. |
-| `CLOUDFRIEND_DATA_DIR` | `/data` | Where `cloudfriend.db` lives. |
+| `CLOUDFRIEND_DATABASE_URL` | *(required)* | Postgres connection string. `DATABASE_URL` is used if this is unset. |
+| `CLOUDFRIEND_DB_POOL` | `10` | Connections to Postgres per process. |
+| `CLOUDFRIEND_DATA_DIR` | `/data` | Where trained model files are written (`models/`). |
 | `CLOUDFRIEND_BATCH_SIZE` | `100` | Events per decider call. |
 | `CLOUDFRIEND_BATCH_WAIT` | `10s` | Longest an event waits for its batch to fill. |
 | `CLOUDFRIEND_DECIDER` | `openrouter` | Which decider adapter to use. |
@@ -172,7 +177,6 @@ Everything is set through environment variables. Durations accept `ms`, `s`, `m`
 | `CLOUDFRIEND_RETENTION` | `7d` | How long events are kept. Flags are kept until deleted. |
 | `CLOUDFRIEND_MAX_QUEUE` | `1000000` | Unparsed requests allowed before ingest replies `503`. |
 | `CLOUDFRIEND_MAX_BODY_BYTES` | `1048576` | Larger bodies get `413`. |
-| `CLOUDFRIEND_SYNCHRONOUS` | `FULL` | `FULL` survives power loss. `NORMAL` survives a process crash and is faster. |
 | `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | How long intake collects requests before one commit. |
 | `CLOUDFRIEND_ADAPTER_DIR` | *(unset)* | Directory of extra adapters to load without rebuilding the image. |
 | `CLOUDFRIEND_LOG` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
@@ -193,18 +197,21 @@ Everything is set through environment variables. Durations accept `ms`, `s`, `m`
 
 ## Running it in production
 
-- **Mount a volume at `/data`.** The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
-- **Run one container per database.** SQLite has one writer. cloudfriend is built to do a lot with one process rather than to scale out.
+- **Back up Postgres.** Everything but model files is there. A `202` is as durable as the server's commits (`fsync` and `synchronous_commit` on, the defaults).
+- **Mount a volume at `/data`** to keep promoted models. The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
+- **Run one container per database.** The worker keeps some state in memory (the featurizer's history, the verdict cache), so this release is built to do a lot with one process rather than to scale out.
 - **Use `docker stop`, not `docker kill`.** On `SIGTERM` cloudfriend stops taking requests, gives in-flight work a few seconds to finish, and exits. A hard kill loses nothing that was acknowledged, but in-flight model calls are repeated after restart.
 - **Watch `/healthz`.** A `queued` count that keeps growing means the worker is falling behind intake.
 
 ## Running from source
 
-cloudfriend needs Node 22.18 or later.
+cloudfriend needs Node 22.18 or later and a Postgres database.
 
 ```bash
 npm install
-npm run dev          # ./data/cloudfriend.db, restarts on change
+CLOUDFRIEND_DATABASE_URL=postgres://localhost/cloudfriend npm run dev   # restarts on change
 npm test             # unit and end-to-end tests with a mock model and Slack
 npm run test:docker  # builds the image and tests it in Docker
 ```
+
+`npm test` needs no Docker: it uses `TEST_DATABASE_URL` if set, and otherwise starts a throwaway Postgres from the local binaries (`initdb`, `pg_ctl`) and gives every test a fresh database.

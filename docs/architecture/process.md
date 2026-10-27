@@ -16,11 +16,11 @@ Code: `src/worker.ts` (`parseNew`, `startDueBatches`, `#decideBatch`, `#storeDec
 ```mermaid
 flowchart TB
   queue[("queue<br/>status = new")] --> parse["Parse<br/>200 requests per pass"]
-  parse --> events[("events<br/>decided = 0")]
+  parse --> events[("events<br/>decided = false")]
   events --> ready{"100 waiting, or<br/>oldest waited 10 s?"}
   ready -->|yes| decide["Decide<br/>up to 2 batches at once"]
   ready -->|no| events
-  decide --> flags[("flags + deliveries<br/>events decided = 1")]
+  decide --> flags[("flags + deliveries<br/>events decided = true")]
 ```
 
 ## The worker loop
@@ -31,7 +31,7 @@ The worker wakes every `CLOUDFRIEND_POLL_INTERVAL` (200 ms) and, in order:
 2. starts a decide call for every batch that is ready,
 3. starts a [delivery](./delivery.md) pass if one is not already running.
 
-Parsing is synchronous and quick. Decide calls and deliveries are network calls, so the loop starts them and moves on instead of waiting.
+Parsing is quick and waits on nothing but the database. Decide calls and deliveries are network calls, so the loop starts them and moves on instead of waiting.
 
 ## Parse
 
@@ -51,7 +51,7 @@ Each event is stored with its JSON `data` and three optional hints set by the ad
 
 Deciders use the hints when they are there and work without them.
 
-All events from the pass, and the new status of each request, are written in one transaction. A request becomes `done`, or `failed` if its adapter threw. A failed request is kept, not retried, and logged with its queue id so you can look at the body.
+The pass reads its requests with `FOR UPDATE SKIP LOCKED`, and all events from the pass, and the new status of each request, are written in that same transaction, so no two parsers ever take the same request. A request becomes `done`, or `failed` if its adapter threw. A failed request is kept, not retried, and logged with its queue id so you can look at the body.
 
 ### Source adapter: `parse`
 
@@ -74,7 +74,7 @@ Return an array. Only `data` is required. Return `[]` to drop a request, and thr
 
 ### When a batch is ready
 
-Decide looks at events with `decided = 0`, oldest first. It starts a batch when either:
+Decide looks at events with `decided = false`, oldest first. It starts a batch when either:
 
 - `CLOUDFRIEND_BATCH_SIZE` events (100) are waiting, or
 - the oldest waiting event arrived `CLOUDFRIEND_BATCH_WAIT` (10 s) ago or more.
@@ -104,7 +104,7 @@ cloudfriend then, in one transaction:
 1. drops drafts with no reason, and event ids that are not in this batch,
 2. stores each remaining flag with a new id such as `flg_8c1d0e4f2a7b9c3d5e6f`,
 3. adds one `deliveries` row per enabled action for each flag,
-4. marks every event in the batch `decided = 1`, flagged or not.
+4. marks every event in the batch `decided = true`, flagged or not.
 
 ### Triage before the decider
 
@@ -124,7 +124,7 @@ Without a key the decider is off. With a classifier loaded, the classifier then 
 
 ### When the decider fails
 
-If the call throws (model down, bad key, unreadable reply), nothing is written: the events stay `decided = 0` and are tried again. Retries back off from 1 second, doubling up to 5 minutes, and reset after the first success. Events are never dropped because the model was unavailable.
+If the call throws (model down, bad key, unreadable reply), nothing is written: the events stay `decided = false` and are tried again. Retries back off from 1 second, doubling up to 5 minutes, and reset after the first success. Events are never dropped because the model was unavailable.
 
 ### Decider adapter: `decide`
 
