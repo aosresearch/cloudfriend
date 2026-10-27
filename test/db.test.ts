@@ -23,12 +23,14 @@ describe("database", () => {
     }
   });
 
+  // People and their sessions span workspaces (membership is workspace_members); everything else
+  // belongs to exactly one.
   it("puts a workspace on every data table", async () => {
     const db = await openDb(await freshDatabase());
     try {
       const { rows } = await db.query(
         `SELECT table_name FROM information_schema.tables t
-         WHERE table_schema = 'public' AND table_name NOT IN ('workspaces', 'schema_migrations')
+         WHERE table_schema = 'public' AND table_name NOT IN ('workspaces', 'schema_migrations', 'users', 'user_identities', 'sessions')
            AND NOT EXISTS (SELECT 1 FROM information_schema.columns c
                            WHERE c.table_schema = 'public' AND c.table_name = t.table_name AND c.column_name = 'workspace_id' AND c.is_nullable = 'NO')`,
       );
