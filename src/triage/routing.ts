@@ -5,7 +5,8 @@
 //   escalations  templates Jev judged relevant or a person escalated. Within `ttl` every event
 //                of one goes to Jev (route `known`). After that, up to `memory`, the next event
 //                goes to Jev once (route `review`): relevant renews the protection, benign
-//                retires it. Silence never ends it.
+//                retires it. Silence never ends it. A benign judgment while protected ends it
+//                too, once the last escalation is an hour old: Jev says the incident is over.
 //   suppression  the classifier may only drop an event whose key (template and severity) Jev
 //                or a person has judged benign within `ttl`, in a similar context: the template
 //                no more than 5x as frequent, and its service not suddenly erroring. Everything
@@ -17,6 +18,8 @@ import { routeEvent, VerdictCache, verdictKey, type FullRoute, type Outcome, typ
 export const CONTEXT_BURST = 5;
 /** Service errors (last 10 minutes) below this never count as a change of context. */
 export const SERVICE_ERROR_FLOOR = 10;
+/** A benign judgment this long after the last relevant one ends an escalation: the incident is over. */
+export const ESCALATION_SETTLE_MS = 3_600_000;
 
 const NEVER = -Infinity;
 
@@ -47,6 +50,21 @@ export class EscalationMemory {
 
   has(template: string, now: number): boolean {
     return this.status(template, now) === "protected";
+  }
+
+  /** When the template was last escalated, if it is remembered. */
+  lastAt(template: string): number | undefined {
+    return this.#map.get(template);
+  }
+
+  /**
+   * Jev judged the template benign at `now`. Within the review window that retires it; while
+   * protected, it does once the last escalation is at least an hour old (the incident is over).
+   */
+  judgedBenign(template: string, now: number): void {
+    const status = this.status(template, now);
+    const last = this.#map.get(template);
+    if (status === "review" || (status === "protected" && last !== undefined && now - last >= ESCALATION_SETTLE_MS)) this.#map.delete(template);
   }
 
   add(template: string, at: number): void {
@@ -195,7 +213,7 @@ export class RoutingState {
       if (!v.escalate && v.judged) {
         this.ledger.benign(key, now, b?.rate ?? 0, b?.serviceErrors ?? 0);
         const t = templateOfKey(key);
-        if (!out.relevant.has(t) && this.escalated.status(t, now) === "review") this.escalated.retire(t);
+        if (!out.relevant.has(t)) this.escalated.judgedBenign(t, now);
       }
     });
     for (const k of out.relevantKeys) this.ledger.relevant(k, now);
@@ -233,7 +251,8 @@ export class RoutingState {
         continue;
       }
       this.ledger.benign(key, l.at, l.rate ?? 0, l.serviceErrors ?? 0);
-      if (l.source === "human" || this.escalated.status(l.template, l.at) === "review") this.escalated.retire(l.template);
+      if (l.source === "human") this.escalated.retire(l.template);
+      else this.escalated.judgedBenign(l.template, l.at);
     }
   }
 

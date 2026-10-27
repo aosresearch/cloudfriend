@@ -8,7 +8,9 @@ Scripts that build, train and evaluate cloudfriend's classifier on public benchm
 | `datasets/gaia.py` | GAIA MicroSS → event streams, one per day, with weak labels and a split by day |
 | `featurize.ts` | streams → training CSVs, using the server's own featurizer |
 | `train.py` | CSVs → LightGBM model (JSON for the server, `.lgb.txt` to continue from) and thresholds |
-| `evaluate.ts` | replays streams through classifier → Jev, with baselines, and reports the benchmark numbers |
+| `evaluate.ts` | replays streams through the cascade as the server runs it (`src/triage/sim.ts`), with baselines, and reports per-incident results with bounds |
+| `lofo.ts` | leave one RE3 fault group out: one model per group, replayed on that group |
+| `review-samples.ts` | turns `evaluate.ts --samples-out` into CSVs for people to label: an audit of Jev's judgments, and a sample of drops |
 | `jev.ts` | Jev client for the scripts: cached on disk by prompt hash, with a budget |
 | `replay.ts` | streams a case into a running cloudfriend over HTTP |
 | `export-demo.ts` | records replays for cloudfriend.dev/demo |
@@ -53,15 +55,25 @@ python3 ml/train.py --train data/features/train.csv --valid data/features/valid.
 
 `--exclude` leaves out features that only describe the benchmark systems: hashed words, and how long or how busily a service has been watched. `--parity` writes rows with LightGBM's own scores, which `npm test` checks the TypeScript evaluator against. Keep only the first 60 rows to keep the fixture small.
 
-## 4. Evaluate with Jev
+## 4. Evaluate
 
 ```bash
+# Free: the decider answers from the weak labels (3 s latency), so suppression can still be earned.
+node ml/evaluate.ts --data data/prepared/re3 --model models/base.json --split eval --decider oracle --out data/results/re3-oracle.json
+# Leave one fault group out (one model per group; about an hour).
+node ml/lofo.ts --features data/features-v2 --data data/prepared/re3 --out data/results/lofo
+# With Jev.
 export JEV_API_KEY=sk-or-...
-node ml/evaluate.ts --data data/prepared/re3 --model models/base.json --split eval --jev --budget 5 --out data/results/re3-eval.json
-node ml/evaluate.ts --data data/prepared/gaia --model models/base.json --split eval --jev --budget 10 --out data/results/gaia-eval.json
+node ml/evaluate.ts --data data/prepared/re3 --model models/base.json --split eval --cases '-1$' --jev --budget 3 \
+  --batch-size 15 --samples-out data/results/samples --out data/results/re3-eval.json
+node ml/evaluate.ts --data data/prepared/gaia --model models/base.json --split eval --cases 'gaia-2021-08-13' --windows 30m:6 \
+  --jev --budget 3 --batch-size 15 --out data/results/gaia-eval.json
+node ml/review-samples.ts --in data/results/samples --out benchmarks/review
 ```
 
-Without `--jev` the run is a dry run. It counts the Jev calls the cascade would make, and the cascade falls back to the classifier's own threshold. Jev replies are cached in `data/jev-cache`, so a rerun with the same model and data costs nothing.
+Each case is replayed causally: a batch goes to Jev when the server would send it, and the answer takes effect only after the call's recorded latency. Results are per incident: **withheld** (no event of it reached Jev), **dismissed** (its events reached Jev, no alert followed), **detected** (an alert containing one of its events), with exact one-sided bounds and a bootstrap over fault groups. Incident events are the datasets' weak labels, so all of these are weak.
+
+`--batch-size 15` keeps prompts small: the Jev router picks a larger, pricier model for long prompts (about $0.002 an event against $0.0005). `--windows 30m:6` replays only GAIA's incident windows, padded by 30 minutes, plus 6 random quiet hours. Without `--jev` and without the oracle, Jev is unavailable, nothing earns suppression, and almost everything is counted as going to Jev. Jev replies are cached in `--cache` by prompt hash, so a rerun with the same model, data and settings costs nothing.
 
 ## 5. Build the safety-set candidates
 

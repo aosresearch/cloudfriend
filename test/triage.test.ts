@@ -243,10 +243,12 @@ describe("cascade", () => {
     cache.set(verdictKey(info), false, 0, undefined, 1, 0.01);
     assert.equal(planBatch([{ ...info, id: "i4", rate: 1, score: 0.02 }], cache, 1000).cached.length, 1, "a similar score: the no stands");
     assert.equal(planBatch([{ ...info, id: "i5", rate: 1, score: 0.6 }], cache, 1000).ask.length, 1, "a much higher score: asked");
-    // Audits, never-seen errors and escalated kinds get a second look past a cached "no".
-    for (const route of ["audit", "novel", "known", "review"] as const) {
-      assert.equal(planBatch([{ ...info, id: route, route, rate: 1 }], cache, 1000).ask.length, 1, route);
+    // Audits, never-seen errors and kinds under review get a second look past a cached "no".
+    for (const route of ["audit", "novel", "review"] as const) {
+      assert.equal(planBatch([{ ...info, id: route, route, rate: 1, score: 0.01 }], cache, 1000).ask.length, 1, route);
     }
+    // An escalated kind that Jev has just looked at again and called fine uses that answer.
+    assert.equal(planBatch([{ ...info, id: "k", route: "known", rate: 1, score: 0.01 }], cache, 1000).cached.length, 1);
   });
 
   it("reuses a cached verdict and adds events to the flag it raised", () => {

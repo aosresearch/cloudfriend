@@ -155,7 +155,9 @@ export interface Plan {
 }
 
 /** Routes that exist to get a second look: a cached "no" must not answer for them. */
-const BYPASS_NEGATIVE = new Set<FullRoute>(["audit", "novel", "known", "review"]);
+// `known` events may use a recent "no": Jev looked at the escalated kind again and said it is
+// fine for now, and the "no" still ends on a burst, a score jump, or after its TTL.
+const BYPASS_NEGATIVE = new Set<FullRoute>(["audit", "novel", "review"]);
 
 export function planBatch(items: Pending[], cache: VerdictCache, now: number, perTemplate = 3): Plan {
   const plan: Plan = { ask: [], followers: new Map(), cached: [], direct: new Map() };

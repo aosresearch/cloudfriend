@@ -79,6 +79,15 @@ describe("escalation memory", () => {
     assert.equal(m.status("pay|failed", 91 * DAY), null);
   });
 
+  it("ends a protection when Jev calls the kind benign an hour after the incident", () => {
+    const m = new EscalationMemory(7 * DAY, 90 * DAY);
+    m.add("pay|failed", 0);
+    m.judgedBenign("pay|failed", 30 * 60_000);
+    assert.equal(m.status("pay|failed", 31 * 60_000), "protected", "half an hour on: the incident may still be going");
+    m.judgedBenign("pay|failed", 2 * 3_600_000);
+    assert.equal(m.status("pay|failed", 2 * 3_600_000 + 1), null, "two hours on, Jev says it's over");
+  });
+
   it("renews on a relevant review and retires on a benign one", () => {
     const s = state();
     s.escalated.add("pay|failed", 0);
