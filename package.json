@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",
-    "hono": "4.13.14"
+    "hono": "4.13.14",
+    "oauth4webapi": "3.8.8"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
