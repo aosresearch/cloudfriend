@@ -54,6 +54,8 @@ curl -X POST http://localhost:8080/in/myapp \
 
 The classifier scores the event at once. If it might matter, it goes to Jev within about 10 seconds. If Jev escalates it, a flag is posted to Slack and appears in `GET /queue`.
 
+Open `http://localhost:8080` for the dashboard. Without `CLOUDFRIEND_ADMIN_EMAIL` and `CLOUDFRIEND_ADMIN_PASSWORD`, the first boot also prints a generated password for `admin@localhost`; see [Dashboard and sign-in](#dashboard-and-sign-in).
+
 To build the image yourself, run `docker build -t cloudfriend .`.
 
 ### Point Sentry at it
@@ -71,6 +73,31 @@ Create an **HTTP Webhook** destination with URL `https://<your-host>/in/posthog`
 ### Anything else
 
 `POST /in/<anything>` accepts any body. A JSON object becomes one event, a JSON array or NDJSON becomes one event per item, and plain text becomes `{ "raw": "..." }`. The `<anything>` part becomes the event's `source`. Senders that can't set headers can pass the secret as `?secret=`.
+
+## Dashboard and sign-in
+
+The server also serves a dashboard at `/`: a setup checklist, the escalation queue, events, sources, destinations and usage. People sign in with a password or with your identity provider (OIDC), and see only the workspaces they are members of.
+
+- **First admin.** Set `CLOUDFRIEND_ADMIN_EMAIL` and `CLOUDFRIEND_ADMIN_PASSWORD` (at least 12 characters) and that account exists with that password at every boot; changing the password in the environment signs its old sessions out. Without them, the first boot of an empty database creates `admin@localhost` with a random password and prints it to the logs once. The first admin becomes the owner of the `default` workspace, the one the admin API and the first-boot ingest secret use.
+- **Workspaces.** Anyone signed in can create a workspace and owns it. Sources, destinations, events and flags belong to one workspace, and every dashboard request is checked against the person's membership.
+- **Sources** each get an endpoint, `CLOUDFRIEND_PUBLIC_URL/in/<source id>`, and a secret shown once. Events sent there are filed under the source's id and parsed by its kind (`json`, `sentry`, `posthog`). Rotating a secret keeps the old one working for 24 hours; revoking a source stops all its secrets at once. Secrets made with the admin API keep working as before on `/in/<name>`.
+- **Destinations** are where alerts go: a Slack incoming webhook or your own webhook, over https. Private and loopback addresses are refused unless `CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS=on`. Their URLs and signing secrets are never shown again, only a masked URL.
+- **Setup** sends a test exception through the same path as real events (queued, scored, routed, judged), so you can watch the whole pipeline work.
+
+Sign-in uses an `HttpOnly`, `SameSite=Lax` session cookie (`Secure` when `CLOUDFRIEND_PUBLIC_URL` is https). Sessions expire after `CLOUDFRIEND_SESSION_TTL` without use. Put cloudfriend behind TLS and set `CLOUDFRIEND_PUBLIC_URL` to the address people use.
+
+### Single sign-on (OIDC)
+
+Set `CLOUDFRIEND_OIDC_ISSUER`, `CLOUDFRIEND_OIDC_CLIENT_ID`, `CLOUDFRIEND_OIDC_CLIENT_SECRET` and `CLOUDFRIEND_PUBLIC_URL`, and register this redirect URI with the provider:
+
+```
+<CLOUDFRIEND_PUBLIC_URL>/auth/oidc/callback      e.g. https://cloudfriend.example.com/auth/oidc/callback
+```
+
+- **Auth0:** create a *Regular Web Application*, add the redirect URI under *Allowed Callback URLs*, and use `https://<tenant>.auth0.com/` (with the trailing slash) as the issuer.
+- **Google:** create an *OAuth client ID* of type *Web application* in Google Cloud, add the redirect URI under *Authorized redirect URIs*, and use `https://accounts.google.com` as the issuer. Set `CLOUDFRIEND_OIDC_ALLOWED_DOMAINS=yourcompany.com`, or any Google account can sign in.
+
+People are matched by the provider's subject id, not by email. The first sign-in creates the account; it is linked to an existing account with the same email only when the provider says the email is verified. New accounts are members of no workspace until they create one.
 
 ## How it works
 
@@ -129,7 +156,7 @@ Each event Jev judges relevant or benign becomes a label with the feature vector
 - **Events** are kept for `CLOUDFRIEND_RETENTION` (7 days by default), then deleted by a cleanup job that works in chunks of 1000 rows. Events the decider hasn't seen yet are never deleted.
 - **Flags** are kept until you delete them. Each flag lists its `event_ids`, its queue `status` and the `users` found in its events.
 - **Labels** and **models** are kept until you delete them. Labels carry their own copy of the event and its features, so they outlive event retention.
-- Everything above lives in Postgres, so a replaced container loses nothing. Every row carries a `workspace_id`. A self-hosted install has the one workspace `ws_default`.
+- Everything above lives in Postgres, so a replaced container loses nothing. Every row carries a `workspace_id`.
 - Trained model files are written under `/data/models`. Mounting a volume at `/data` keeps a promoted model across a replaced container; without one, the built-in model is used until the next promotion. The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
 
 ## Configuration
@@ -199,6 +226,15 @@ Everything is set through environment variables.
 | **Webhook action** | | |
 | `WEBHOOK_URL` | | Receives `POST {"flag": ..., "events": [...]}`. Becomes a destination of the default workspace like `SLACK_WEBHOOK_URL`. |
 | `WEBHOOK_SECRET` | | Adds `x-cloudfriend-signature: sha256=<HMAC of body>`. |
+| **Dashboard and sign-in** | | |
+| `CLOUDFRIEND_PUBLIC_URL` | *(the request's address)* | The address people and senders use, e.g. `https://cloudfriend.example.com`. Used for source endpoint URLs, the OIDC redirect URI and `Secure` cookies. Required for OIDC. |
+| `CLOUDFRIEND_ADMIN_EMAIL` / `CLOUDFRIEND_ADMIN_PASSWORD` | *(unset)* | The first admin, kept in sync at every boot. Set both or neither; the password needs 12 characters or more. Without them, the first boot creates `admin@localhost` and prints its password once. |
+| `CLOUDFRIEND_SESSION_TTL` | `30d` | How long a session lasts without use (5m to 400d). |
+| `CLOUDFRIEND_OIDC_ISSUER` | | The provider's issuer URL, e.g. `https://example.auth0.com/`. OIDC is on when the issuer, client id and secret are all set. |
+| `CLOUDFRIEND_OIDC_CLIENT_ID` / `CLOUDFRIEND_OIDC_CLIENT_SECRET` | | The client registered with the provider. Its redirect URI is `CLOUDFRIEND_PUBLIC_URL/auth/oidc/callback`. |
+| `CLOUDFRIEND_OIDC_ALLOWED_DOMAINS` | *(any)* | Comma-separated email domains allowed to sign in, e.g. `example.com`. |
+| `CLOUDFRIEND_OIDC_LABEL` | `Sign in with SSO` | The sign-in button's label. |
+| `CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS` | `off` | `on` lets destinations use http and private or loopback addresses (self-hosted, e.g. a webhook on your network). |
 | **Sentry source** | | |
 | `SENTRY_CLIENT_SECRET` | | When set, the `Sentry-Hook-Signature` header is required and checked. |
 
@@ -206,13 +242,13 @@ Durations accept `ms`, `s`, `m`, `h` and `d`.
 
 ## API
 
-Ingest uses an ingest secret. Everything else uses `Authorization: Bearer $CLOUDFRIEND_ADMIN_KEY`.
+Ingest uses an ingest secret. The admin API below uses `Authorization: Bearer $CLOUDFRIEND_ADMIN_KEY` and works on the `default` workspace, for scripts and the CLI. The dashboard's own API (`/api/...`, signed-in sessions, every workspace) is described in [design/api-contract.md](design/api-contract.md).
 
 ### Ingest
 
 | | |
 | --- | --- |
-| `POST /in/:source` | `202` once stored. `401` for a bad secret, `413` if the body is too large, `503` to retry later. |
+| `POST /in/:source` | `202` once stored. `401` for a bad secret, `413` if the body is too large, `503` to retry later. `:source` is a source id from the dashboard (its secret works only there), or any name for secrets made with the admin API. |
 | `GET /healthz` | `{ "ok": true, "queued": <unparsed requests> }`. Needs no auth. |
 
 ### Secrets
@@ -431,4 +467,4 @@ Samples of Jev's judgments and of what stage 1 drops are in `benchmarks/review/`
 
 ## Left out on purpose
 
-These are left out on purpose: a rules engine, and retraining the classifier per workspace. They can be added when people ask for them.
+These are left out on purpose: a rules engine, roles beyond a workspace's owner and members, and retraining the classifier per workspace. They can be added when people ask for them.

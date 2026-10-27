@@ -3,6 +3,7 @@
 export { AuthConfigError, DEFAULT_OIDC_LABEL, loadAuthConfig, normalizeEmail, OIDC_CALLBACK_PATH, type AuthConfig, type OidcConfig } from "./config.ts";
 export { ensureBootstrapAdmin, FIRST_BOOT_ADMIN_EMAIL, type BootstrapResult } from "./bootstrap.ts";
 export { MemoryAuthStore } from "./memory-store.ts";
+export { PgAuthStore } from "./pg-store.ts";
 export { generatePassword, hashPassword, needsRehash, verifyPassword } from "./password.ts";
 export { DEFAULT_LOGIN_LIMITS, LoginRateLimiter, type LoginLimits } from "./rate-limit.ts";
 export {

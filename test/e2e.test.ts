@@ -38,6 +38,8 @@ describe("end to end: Sentry -> decider -> Slack", () => {
         OPENROUTER_API_KEY: "sk-or-test",
         OPENROUTER_BASE_URL: openrouter.url,
         SLACK_WEBHOOK_URL: slack.url + "/services/T/B/X",
+        // The mock Slack listens on 127.0.0.1.
+        CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS: "on",
       },
     });
     proc.stdout!.on("data", (d) => (logs += d));

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
 import { loadAdapters, type Adapters } from "./adapters.ts";
+import { setupAuth, type AuthSetup } from "./api/index.ts";
 import type { Config, Role } from "./config.ts";
 import { DEFAULT_WORKSPACE, one, openDb, tx, type DB } from "./db.ts";
 import { Intake } from "./intake.ts";
@@ -44,6 +45,8 @@ export interface cloudfriend {
   startRetraining(): void;
   /** Set on first boot only: the generated ingest secret, to print once. */
   bootSecret: string | null;
+  /** Sign-in: the bootstrap admin, and its generated password on first boot (print it once). */
+  auth: AuthSetup;
   /**
    * Shut down: stop the worker at once (no new decides or deliveries), give in-flight work
    * `graceMs` and requests already being read `drainMs` to reach the queue, commit, save each
@@ -75,6 +78,13 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
   }
 
   const db = await openDb(config.databaseUrl, { max: config.dbPool });
+  let auth: AuthSetup;
+  try {
+    auth = await setupAuth(db, env);
+  } catch (err) {
+    await db.end().catch(() => {});
+    throw err;
+  }
   const workspace = DEFAULT_WORKSPACE;
   const secrets = new Secrets(db, workspace);
   const bootSecret = role === "worker" ? null : ((await secrets.createFirst("default"))?.secret ?? null);
@@ -161,9 +171,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     app.get("/healthz", (c) => c.json({ ok: true, queued: intake.backlog, workspaces: worker.owned.length }));
     app.notFound((c) => c.json({ error: "not found (CLOUDFRIEND_ROLE=worker serves only /healthz)" }, 404));
   } else {
-    // Passed as a variable, so createApp (server.ts) takes what AppDeps names and ignores the
-    // rest: role, models, triageFor, actionKinds and env are there for its multi-workspace routes.
-    const deps = {
+    app = createApp({
       db,
       workspace,
       intake,
@@ -174,13 +182,13 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       triage,
       trainer,
       counters: () => ({ ...worker.counters }),
-      role,
-      models,
-      triageFor,
-      actionKinds: adapters.actions,
+      auth,
+      actionAdapters: adapters.actions,
+      decider: decider?.name ?? null,
       env,
-    };
-    app = createApp(deps);
+      triageFor,
+      jevDailyBudgetUsd: config.jevDailyBudgetUsd,
+    });
   }
 
   let retrainTimer: NodeJS.Timeout | null = null;
@@ -232,6 +240,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     triageFor,
     trainer,
     bootSecret,
+    auth,
     start() {
       if (role !== "web") worker.start();
       startRetraining();
@@ -240,6 +249,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     async close(graceMs, drainMs = config.commitWindowMs + 50) {
       if (retrainTimer) clearInterval(retrainTimer);
       if (reloadTimer) clearInterval(reloadTimer);
+      auth.stop();
       await Promise.all([worker.stop(graceMs), new Promise((r) => setTimeout(r, drainMs))]);
       await intake.flush();
       await db.end();
@@ -254,7 +264,10 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
  */
 async function seedEnvDestinations(db: DB, env: NodeJS.ProcessEnv, actions: Map<string, ActionAdapter>): Promise<Set<string>> {
   const seeds: { kind: string; name: string; config: Record<string, unknown> }[] = [];
-  if (env.SLACK_WEBHOOK_URL && actions.has("slack")) seeds.push({ kind: "slack", name: "Slack (SLACK_WEBHOOK_URL)", config: { url: env.SLACK_WEBHOOK_URL } });
+  if (env.SLACK_WEBHOOK_URL && actions.has("slack")) {
+    const min = env.SLACK_MIN_SEVERITY?.trim().toLowerCase();
+    seeds.push({ kind: "slack", name: "Slack (SLACK_WEBHOOK_URL)", config: { url: env.SLACK_WEBHOOK_URL, ...(min ? { min_severity: min } : {}) } });
+  }
   if (env.WEBHOOK_URL && actions.has("webhook")) {
     seeds.push({ kind: "webhook", name: "Webhook (WEBHOOK_URL)", config: { url: env.WEBHOOK_URL, ...(env.WEBHOOK_SECRET ? { signing_secret: env.WEBHOOK_SECRET } : {}) } });
   }

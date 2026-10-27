@@ -85,11 +85,11 @@ export interface TestCloudfriend extends cloudfriend {
 }
 
 export async function makeCloudfriend(
-  opts: { config?: Partial<Config>; decider?: DeciderAdapter | null; actions?: Record<string, ActionAdapter> } = {},
+  opts: { config?: Partial<Config>; decider?: DeciderAdapter | null; actions?: Record<string, ActionAdapter>; env?: NodeJS.ProcessEnv } = {},
 ): Promise<TestCloudfriend> {
   const config = await testConfig({ decider: "test", ...opts.config });
   const adapters = await testAdapters(opts.decider === undefined ? fakeDecider().adapter : opts.decider, opts.actions);
-  const cloudfriend = await createCloudfriend(config, {}, adapters);
+  const cloudfriend = await createCloudfriend(config, opts.env ?? {}, adapters);
   const secret = cloudfriend.bootSecret ?? (await cloudfriend.secrets.create("test")).secret;
   return Object.assign(cloudfriend, {
     config,

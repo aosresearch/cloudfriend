@@ -80,6 +80,8 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
     OPENROUTER_API_KEY: "sk-or-test",
     OPENROUTER_BASE_URL: `http://host.docker.internal:${openrouter.port}/api/v1`,
     SLACK_WEBHOOK_URL: `http://host.docker.internal:${slack.port}/services/T/B/X`,
+    // The mock Slack runs on the host, a private address from inside the container.
+    CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS: "on",
     CLOUDFRIEND_BATCH_WAIT: "300ms",
   });
 
