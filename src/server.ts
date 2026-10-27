@@ -214,7 +214,7 @@ export function createApp(deps: AppDeps): Hono {
         throw new BadRequest("each label needs source (string), data and escalate (boolean)");
       }
     }
-    return c.json({ imported: importLabels(db, items) }, 201);
+    return c.json({ imported: importLabels(db, items, triage?.featurizer.version) }, 201);
   });
 
   app.get("/labels", (c) => {

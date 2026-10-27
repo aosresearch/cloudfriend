@@ -132,14 +132,16 @@ export async function runScenario(sc: Scenario, model: Classifier, o: ScenarioOp
   const f = model.file;
   const simOptions = { route: { dropBelow: f.drop_below, escalateAbove: f.escalate_above, threshold: f.threshold, hasJev: true, auditRate: 0, novelGuard: o.novelGuard ?? true } };
 
-  let featurizer = new Featurizer();
+  // The model's feature version: a v2 model is tested as it runs, with v2 features.
+  const version = f.featurizer_version;
+  let featurizer = new Featurizer({ version });
   let sim = new CascadeSim(new RoutingState(routing), simOptions, hooks);
   let n = 0;
   let last = START;
   for (const step of sc.steps) {
     if (step.restart) {
       last = await sim.finish(last);
-      const restored = new Featurizer();
+      const restored = new Featurizer({ version });
       restored.restore(JSON.parse(JSON.stringify(featurizer.snapshot())));
       featurizer = restored;
       const state = new RoutingState(routing);

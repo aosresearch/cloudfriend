@@ -17,7 +17,8 @@ export interface StreamEvent {
 export interface Case {
   id: string;
   dataset: string;
-  split: "train" | "valid" | "eval";
+  /** GAIA Aug 15-21 is `holdout`: untouched until a candidate is frozen (benchmarks/<date>/roles.json). */
+  split: "train" | "valid" | "eval" | "holdout";
   start_ms: number;
   end_ms: number;
   /** RCAEval: when the fault was injected. */

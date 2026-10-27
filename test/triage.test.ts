@@ -7,8 +7,9 @@ import { applyVerdicts, planBatch, routeEvent, VerdictCache, verdictKey, type Pe
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, FEATURE_NAMES, Featurizer, FEATURIZER_VERSION, levelOf, maskMessage } from "../src/triage/features.ts";
 import { Gbdt } from "../src/triage/gbdt.ts";
-import { BUILTIN_MODEL } from "../src/triage/runtime.ts";
-import { gate, limitThreshold, rulesAtTheTime, splitLabels } from "../src/training.ts";
+import { BUILTIN_MODEL, encodeFeatures, Triage } from "../src/triage/runtime.ts";
+import { openDb } from "../src/db.ts";
+import { gate, limitThreshold, rulesAtTheTime, splitLabels, Trainer } from "../src/training.ts";
 import { count, fakeDecider, makeCloudfriend, tempDir, type TestCloudfriend } from "./helpers.ts";
 
 const ERRORISH = FEATURE_NAMES.indexOf("errorish");
@@ -813,5 +814,69 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     cf = await makeCloudfriend({ decider: fakeDecider().adapter, config: { triage: true, modelPath: writeModel(tinyModel()) } });
     const report = await json(cf.app.request("/model/train", { method: "POST", headers: { authorization: "Bearer test-admin-key" } }));
     assert.equal(report.status, "skipped");
+  });
+});
+
+describe("the runtime follows the model's feature version", () => {
+  const opts = { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true, suppressionTtlMs: 30 * 86_400_000 };
+  const model = (version: number) => {
+    const dir = tempDir();
+    const file = path.join(dir, `v${version}.json`);
+    fs.writeFileSync(file, JSON.stringify(tinyModel({ featurizer_version: version, trained_at: `2026-10-2${version}T00:00:00Z` })));
+    return file;
+  };
+
+  it("computes v2 features for a v2 model, and switches with the model", () => {
+    const db = openDb(path.join(tempDir(), "db.sqlite"));
+    const t = new Triage(db, opts);
+    assert.ok(t.load(model(2)));
+    assert.equal(t.featurizer.version, 2);
+    assert.equal(t.loadShadow(model(3)), false, "a shadow must use the active version");
+    assert.ok(t.load(model(3)));
+    assert.equal(t.featurizer.version, 3);
+    db.close();
+  });
+
+  it("drops benign permissions from labels of the old version on upgrade, keeping escalations", () => {
+    const db = openDb(path.join(tempDir(), "db.sqlite"));
+    const ins = db.prepare(
+      `INSERT INTO labels (event_id, y, source, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, severity, ctx_rate, ctx_service_errors)
+       VALUES (?, ?, 'jev', ?, 2, 'app', ?, '{}', ?, ?, 'review', 'i', 1, 0)`,
+    );
+    const now = Date.now();
+    ins.run(1, 0, encodeFeatures([0]), now, now, "app|web|GET /");
+    ins.run(2, 1, encodeFeatures([0]), now, now, "app|pay|failed");
+    const t = new Triage(db, opts);
+    t.load(model(2));
+    const facts = (template: string) => ({ template, severity: "i", novel: false, rate: 1, serviceErrors: 0 });
+    const route = { dropBelow: 0.5, escalateAbove: 2, threshold: 0.9, hasJev: true, auditRate: 0 };
+    assert.equal(t.routing.route(0.01, route, facts("app|web|GET /"), now + 1000), "drop", "v2 model, v2 permission");
+    t.load(model(3));
+    assert.equal(t.routing.route(0.01, route, facts("app|web|GET /"), now + 1000), "review", "v3: the kind must be judged again");
+    assert.equal(t.routing.route(0.01, route, facts("app|pay|failed"), now + 1000), "known", "the escalation is kept");
+    db.close();
+  });
+});
+
+describe("shadow evidence", () => {
+  it("counts only direct judgments as evidence, but any relevant label as a reason to reject", () => {
+    const db = openDb(path.join(tempDir(), "db.sqlite"));
+    const triage = new Triage(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
+    const trainer = new Trainer(db, triage, { dataDir: tempDir(), python: "python3", minLabels: 1, humanWeight: 1, recall: 0.99 });
+    const ev = db.prepare("INSERT INTO events (id, queue_id, source, received_at, data, route, shadow_route, shadow_model) VALUES (?, 0, 'app', 0, '{}', 'jev', 'drop', 'm1')");
+    const label = db.prepare(
+      "INSERT INTO labels (event_id, y, source, features, featurizer_version, event_source, received_at, data, created_at, provenance) VALUES (?, ?, 'jev', ?, 3, 'app', 0, '{}', 0, ?)",
+    );
+    for (let i = 1; i <= 6; i++) ev.run(i);
+    label.run(1, 0, encodeFeatures([0]), "review");
+    label.run(2, 0, encodeFeatures([0]), "threshold");
+    label.run(3, 0, encodeFeatures([0]), "follower");
+    label.run(4, 0, encodeFeatures([0]), "follower");
+    label.run(5, 1, encodeFeatures([0]), "follower");
+    const r = trainer.shadowEvidence("m1");
+    assert.equal(r.newly_suppressed, 6);
+    assert.equal(r.judged, 2, "followers only copy their group's answer");
+    assert.equal(r.relevant, 1, "a copied yes still rejects");
+    db.close();
   });
 });

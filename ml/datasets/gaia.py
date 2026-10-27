@@ -24,7 +24,8 @@ escalations happen on the quiet days.
 Labelling is a separate pass over the written streams: `--relabel` reruns it alone on an
 existing output directory, without reading the raw logs again.
 
-Split: by day. Days 1-8 train, 9-10 valid, 11-14 eval. All days form one chain: the
+Split: by day. Days 1-8 train, 9-10 valid, 11-14 eval (development), 15-21 holdout (frozen
+models only). All days form one chain: the
 featurizer's history carries over from one day to the next, as it would in production.
 """
 import argparse
@@ -284,7 +285,7 @@ def convert(args):
                 events.append(e)
         write_stream(stream_path(args.out, f"gaia-{d}"), events)
         start = lo + i * 86_400_000
-        split = "train" if i < TRAIN_DAYS else "valid" if i < 10 else "eval"
+        split = "train" if i < TRAIN_DAYS else "valid" if i < 10 else "eval" if i < 14 else "holdout"
         day_incidents = [x for x in incidents if start <= x["start_ms"] < start + 86_400_000]
         cases.append({
             "id": f"gaia-{d}", "dataset": "gaia", "split": split, "chain": "gaia",

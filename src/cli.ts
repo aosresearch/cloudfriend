@@ -134,6 +134,9 @@ async function mlCommand(
   db: ReturnType<typeof openDb>,
 ): Promise<number> {
   const out = (v: unknown) => console.log(JSON.stringify(v, null, values.json ? undefined : 2));
+  const triage = new Triage(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
+  const active = path.join(config.dataDir, "models", "active.json");
+  for (const f of [values.model, config.modelPath, active, BUILTIN_MODEL]) if (f && fs.existsSync(f) && triage.load(f)) break;
   if (cmd === "labels" && sub === "import") {
     if (!arg) throw new Error("usage: cloudfriend labels import <file.ndjson>");
     const items = fs
@@ -145,16 +148,14 @@ async function mlCommand(
         if (typeof it.source !== "string" || typeof it.escalate !== "boolean") throw new Error(`line ${i + 1}: needs source and escalate`);
         return it;
       });
-    console.log(`Imported ${importLabels(db, items)} labels.`);
+    // Featurized with the version the model in use runs with, so the next training run can use them.
+    console.log(`Imported ${importLabels(db, items, triage.featurizer.version)} labels.`);
     return 0;
   }
   if (cmd === "labels") {
     out(db.prepare("SELECT source, CASE y WHEN 1 THEN 'escalate' ELSE 'ignore' END AS verdict, count(*) AS n FROM labels GROUP BY 1, 2").all());
     return 0;
   }
-  const triage = new Triage(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
-  const active = path.join(config.dataDir, "models", "active.json");
-  for (const f of [values.model, config.modelPath, active, BUILTIN_MODEL]) if (f && fs.existsSync(f) && triage.load(f)) break;
   if (cmd === "regression") {
     if (!triage.classifier) throw new Error("no model to test");
     const r = await runSuite(loadScenarios(BUILTIN_SCENARIOS, config.regressionSuite), triage.classifier, {

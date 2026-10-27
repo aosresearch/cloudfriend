@@ -15,7 +15,7 @@ export type FlagVerdict = "confirmed" | "false_positive";
 
 const UPSERT_HUMAN = `
   INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template, provenance, weight, severity)
-  SELECT id, ?, 'human', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, ?, template, 'human', NULL, severity FROM events WHERE id = ? AND features IS NOT NULL
+  SELECT id, ?, 'human', route, score, features, coalesce(fv, 2), source, received_at, data, ?, ?, template, 'human', NULL, severity FROM events WHERE id = ? AND features IS NOT NULL
   ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, source = 'human', note = excluded.note, created_at = excluded.created_at,
     provenance = 'human', weight = NULL, decision_id = NULL`;
 
@@ -88,8 +88,8 @@ export interface ImportedLabel {
  * They are featurized in time order with a fresh featurizer, so their history features only
  * see each other. Stored with negative ids so they never collide with real events.
  */
-export function importLabels(db: DB, items: ImportedLabel[]): number {
-  const f = new Featurizer();
+export function importLabels(db: DB, items: ImportedLabel[], version = FEATURIZER_VERSION): number {
+  const f = new Featurizer({ version });
   const now = Date.now();
   const timed = items.map((it, i) => {
     const t = typeof it.received_at === "number" ? it.received_at : it.received_at ? Date.parse(it.received_at) : now - (items.length - i);
@@ -100,12 +100,12 @@ export function importLabels(db: DB, items: ImportedLabel[]): number {
   let next = Math.min(min, 0) - 1;
   const ins = db.prepare(
     `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template, provenance)
-     VALUES (?, ?, 'human', 'import', NULL, ?, ${FEATURIZER_VERSION}, ?, ?, ?, ?, ?, ?, 'import')`,
+     VALUES (?, ?, 'human', 'import', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'import')`,
   );
   tx(db, () => {
     for (const { it, t } of timed) {
       const out = f.featurize({ source: it.source, received_at: t, data: it.data });
-      ins.run(next--, it.escalate ? 1 : 0, encodeFeatures(out.values), it.source, t, JSON.stringify(it.data ?? null), it.note ?? null, now, out.template.slice(0, 300));
+      ins.run(next--, it.escalate ? 1 : 0, encodeFeatures(out.values), version, it.source, t, JSON.stringify(it.data ?? null), it.note ?? null, now, out.template.slice(0, 300));
     }
   });
   return timed.length;

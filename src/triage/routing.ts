@@ -181,6 +181,8 @@ export interface LabelFact {
   at: number;
   rate: number | null;
   serviceErrors: number | null;
+  /** The feature version the label was made under. */
+  featurizerVersion?: number | null;
 }
 
 export class RoutingState {
@@ -240,10 +242,16 @@ export class RoutingState {
     this.ledger.benign(key, now, ctx.rate ?? 0, ctx.serviceErrors ?? 0);
   }
 
-  /** Rebuild escalations and earned suppression from stored labels (oldest first). */
-  rebuild(labels: Iterable<LabelFact>): void {
+  /**
+   * Rebuild escalations and earned suppression from stored labels (oldest first). With
+   * `version`, a benign label made under another feature version is ignored: its severity key
+   * may read differently now, so it earns no suppression and retires nothing. Escalations are
+   * kept whatever the version.
+   */
+  rebuild(labels: Iterable<LabelFact>, version?: number): void {
     for (const l of labels) {
       if (!l.template || l.provenance === "follower") continue;
+      if (!l.y && version !== undefined && l.featurizerVersion != null && l.featurizerVersion !== version) continue;
       const key = verdictKey({ template: l.template, severity: l.severity ?? undefined });
       if (l.y) {
         this.escalated.add(l.template, l.at);

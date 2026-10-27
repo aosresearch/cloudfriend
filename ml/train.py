@@ -4,7 +4,7 @@
         [--eval data/features/eval.csv] [--init-model models/base.lgb.txt] --out models/base.json
 
 Input CSVs come from `node ml/featurize.ts` (benchmarks) or `cloudfriend train` (your own
-labels). Columns: case, t, y, w, then one column per feature, named as in the featurizer.
+labels). Columns: [id,] case, t, y, w, then one column per feature, named as in the featurizer.
 
 Output:
   <out>             the model cloudfriend loads: thresholds, metrics and the trees as JSON
@@ -35,7 +35,7 @@ try:  # pandas reads big benchmark files much faster, but the container doesn't 
 except ImportError:
     pd = None
 
-META = ["case", "t", "y", "w"]
+META = ["id", "case", "t", "y", "w"]
 
 
 def load(path):

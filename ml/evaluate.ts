@@ -97,6 +97,7 @@ const labelsOut = args["labels-out"] ? fs.openSync(args["labels-out"], "w") : nu
 if (labelsOut) fs.writeSync(labelsOut, ["case", "t", "y", "w", ...FEATURE_NAMES].join(",") + "\n");
 const fmt = (v: number) => (Number.isNaN(v) ? "" : Number.isInteger(v) ? String(v) : v.toPrecision(6));
 const compare = args["compare-model"] ? new Classifier(JSON.parse(fs.readFileSync(args["compare-model"], "utf8")) as ClassifierFile) : null;
+if (compare && compare.file.featurizer_version !== m.featurizer_version) throw new Error("--compare-model must use the same feature version as --model");
 const csvCell = (v: unknown) => {
   const t = String(v ?? "");
   return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
@@ -180,7 +181,7 @@ function parseDurationMs(v: string): number {
 }
 
 async function runCase(dir: string, c: Case) {
-  const featurizer = new Featurizer();
+  const featurizer = new Featurizer({ version: m.featurizer_version });
   // A GAIA day continues the one before it: warm up on that day. The featurizer sees all of
   // it; the routing state (earned suppression, escalations) learns from the weak labels, as
   // an oracle decider would have taught it, so the day doesn't start as a new system.

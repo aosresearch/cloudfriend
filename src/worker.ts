@@ -6,7 +6,6 @@ import { errMsg, log } from "./log.ts";
 import { EVENT_COLUMNS, eventsByIds, getFlagRow, toEvent, toFlag, type EventRow } from "./store.ts";
 import { applyVerdicts, labelProvenance, planBatch, verdictKey, type Outcome, type Pending } from "./triage/cascade.ts";
 import type { Triage } from "./triage/runtime.ts";
-import { FEATURIZER_VERSION } from "./triage/features.ts";
 import { toDecision, type ActionAdapter, type CloudfriendEvent, type DeciderAdapter, type Decision, type FlagDraft, type ParsedEvent, type Severity, type SourceAdapter } from "./types.ts";
 
 export interface WorkerOptions {
@@ -82,7 +81,7 @@ export class Worker {
       ),
       insertLabel: db.prepare(
         `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, weight, decision_id, severity, ctx_rate, ctx_service_errors)
-         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, template, ?, ?, ?, severity, ?, ? FROM events WHERE id = ? AND features IS NOT NULL
+         SELECT id, ?, 'jev', route, score, features, coalesce(fv, 2), source, received_at, data, ?, template, ?, ?, ?, severity, ?, ? FROM events WHERE id = ? AND features IS NOT NULL
          ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, created_at = excluded.created_at, provenance = excluded.provenance,
            weight = excluded.weight, decision_id = excluded.decision_id, ctx_rate = excluded.ctx_rate, ctx_service_errors = excluded.ctx_service_errors
            WHERE labels.source <> 'human'`,
@@ -228,7 +227,7 @@ export class Worker {
           const route = routing ? t.route : null;
           this.#stmts.insertEvent.run(
             row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key,
-            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0, t.severity, t.shadowScore, t.shadowRoute, t.shadowModel, FEATURIZER_VERSION,
+            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0, t.severity, t.shadowScore, t.shadowRoute, t.shadowModel, triage.featurizer.version,
           );
         }
         this.#stmts.setStatus.run(events ? "done" : "failed", row.id);

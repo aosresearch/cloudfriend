@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
-import { FEATURIZER_VERSION, FEATURE_NAMES, Featurizer, type Featurized } from "../src/triage/features.ts";
+import { FEATURE_NAMES, Featurizer, type Featurized } from "../src/triage/features.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
 const { values: args } = parseArgs({
@@ -42,6 +42,8 @@ if (!args.data?.length || !args.model || !args.out) {
 }
 
 const model = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as ClassifierFile);
+// The features are the model's version: the trainer checks the vectors against it.
+const version = model.file.featurizer_version;
 let seed = Number(args.seed) >>> 0 || 1;
 const rand = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 2 ** 32);
 
@@ -104,7 +106,7 @@ for (const dir of args.data) {
   }
   const chains = new Map<string, Featurizer>();
   for (const { c, pick } of replay) {
-    const f = c.chain ? (chains.get(c.chain) ?? chains.set(c.chain, new Featurizer()).get(c.chain)!) : new Featurizer();
+    const f = c.chain ? (chains.get(c.chain) ?? chains.set(c.chain, new Featurizer({ version })).get(c.chain)!) : new Featurizer({ version });
     const templates = new Map<string, TemplateState>();
     const dropped: Candidate[] = [];
     let droppedSeen = 0;
@@ -201,7 +203,7 @@ fs.writeFileSync(
 const fmt = (v: number) => (Number.isNaN(v) ? "" : Number.isInteger(v) ? String(v) : v.toPrecision(6));
 fs.writeFileSync(
   path.join(args.out, "candidates.features.csv"),
-  [["id", `featurizer_v${FEATURIZER_VERSION}`, ...FEATURE_NAMES].join(","), ...chosen.map((x) => [x.id, "", ...x.values.map(fmt)].join(","))].join("\n") + "\n",
+  [["id", `featurizer_v${version}`, ...FEATURE_NAMES].join(","), ...chosen.map((x) => [x.id, "", ...x.values.map(fmt)].join(","))].join("\n") + "\n",
 );
 console.log(`${chosen.length} candidates written to ${args.out}`);
 

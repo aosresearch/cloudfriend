@@ -1,5 +1,5 @@
 // The first stage of triage: a LightGBM model that scores every event. Browser-safe.
-import { FEATURE_NAMES, FEATURIZER_VERSION } from "./features.ts";
+import { FEATURE_NAMES, SUPPORTED_FEATURIZER_VERSIONS } from "./features.ts";
 import { Gbdt, type LightGbmDump } from "./gbdt.ts";
 
 /** A model file, as ml/train.py writes it. */
@@ -30,8 +30,8 @@ export class Classifier {
 
   constructor(file: ClassifierFile) {
     if (file.format !== "cloudfriend-classifier/1") throw new Error(`unknown model format: ${String(file.format)}`);
-    if (file.featurizer_version !== FEATURIZER_VERSION) {
-      throw new Error(`model needs featurizer v${file.featurizer_version}, this build has v${FEATURIZER_VERSION}`);
+    if (!SUPPORTED_FEATURIZER_VERSIONS.includes(file.featurizer_version)) {
+      throw new Error(`model needs featurizer v${file.featurizer_version}, this build computes v${SUPPORTED_FEATURIZER_VERSIONS.join(", v")}`);
     }
     this.file = file;
     this.gbdt = new Gbdt(file.lightgbm);

@@ -28,7 +28,7 @@ import path from "node:path";
 import type { DB } from "./db.ts";
 import { errMsg, log } from "./log.ts";
 import { Classifier, type ClassifierFile } from "./triage/classifier.ts";
-import { FEATURE_NAMES, FEATURIZER_VERSION } from "./triage/features.ts";
+import { FEATURE_NAMES } from "./triage/features.ts";
 import { upperBound } from "./stats.ts";
 import { verdictKey } from "./triage/cascade.ts";
 import { RoutingState, type RoutingOptions } from "./triage/routing.ts";
@@ -159,6 +159,15 @@ export function splitLabels<T extends Pick<LabelRow, "received_at" | "template" 
 }
 
 /** A label's training weight: a person's counts humanWeight; otherwise its provenance weight. */
+/** The feature version of the built-in model, or null if it can't be read. */
+function builtinVersion(): number | null {
+  try {
+    return (JSON.parse(fs.readFileSync(BUILTIN_MODEL, "utf8")) as ClassifierFile).featurizer_version;
+  } catch {
+    return null;
+  }
+}
+
 const weightOf = (r: Pick<LabelRow, "source" | "weight">, humanWeight: number) => (r.source === "human" ? humanWeight : (r.weight ?? 1));
 
 export class Trainer {
@@ -180,7 +189,7 @@ export class Trainer {
   /** Labels added since the last training run (any outcome). */
   newLabels(): number {
     const last = this.#db.prepare("SELECT max(created_at) AS t FROM models WHERE status <> 'skipped'").get() as { t: number | null };
-    return (this.#db.prepare("SELECT count(*) AS n FROM labels WHERE created_at > ? AND featurizer_version = ?").get(last.t ?? 0, FEATURIZER_VERSION) as { n: number }).n;
+    return (this.#db.prepare("SELECT count(*) AS n FROM labels WHERE created_at > ? AND featurizer_version = ?").get(last.t ?? 0, this.#triage.featurizer.version) as { n: number }).n;
   }
 
   /** Train if enough new labels arrived since the last run. Used by the scheduler. */
@@ -200,13 +209,15 @@ export class Trainer {
 
   async #train({ dryRun = false }): Promise<TrainReport> {
     const started = Date.now();
+    // Train for the feature version the active model runs with: that is what the labels hold.
+    const version = this.#triage.featurizer.version;
     const id = "mdl_" + new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "_" + randomBytes(3).toString("hex");
     const rows = this.#db
       .prepare(
         `SELECT event_id, y, source, features, received_at, template, provenance, weight, created_at, severity, ctx_rate, ctx_service_errors
          FROM labels WHERE featurizer_version = ? ORDER BY received_at, event_id`,
       )
-      .all(FEATURIZER_VERSION) as unknown as LabelRow[];
+      .all(version) as unknown as LabelRow[];
     const positives = rows.filter((r) => r.y).length;
     const { fit, calibrate, accept } = splitLabels(rows, this.#o.incidentWindowMs);
     const labels = { total: rows.length, positives, human: rows.filter((r) => r.source === "human").length, fit: fit.length, calibrate: calibrate.length, accept: accept.length };
@@ -233,10 +244,11 @@ export class Trainer {
       const base = BUILTIN_MODEL.replace(/\.json$/, ".lgb.txt");
       const argv = [
         TRAIN_SCRIPT, "--train", path.join(dir, "train.csv"), "--valid", path.join(dir, "valid.csv"), "--out", out,
-        "--featurizer-version", String(FEATURIZER_VERSION), "--recall", String(this.#o.recall),
+        "--featurizer-version", String(version), "--recall", String(this.#o.recall),
         "--rounds", "200", "--learning-rate", "0.05", "--note", `trained on ${rows.length} labels`,
       ];
-      if (fs.existsSync(base)) argv.push("--init-model", base);
+      // Boosting on from the built-in model only makes sense when its features mean the same.
+      if (fs.existsSync(base) && builtinVersion() === version) argv.push("--init-model", base);
       await run(this.#o.python, argv);
 
       const file = JSON.parse(fs.readFileSync(out, "utf8")) as ClassifierFile;
@@ -256,7 +268,7 @@ export class Trainer {
       });
       const cMetrics = evaluate(candidate, accept, this.#o.humanWeight, known);
       const aMetrics = active ? evaluate(active, accept, this.#o.humanWeight, known) : null;
-      const safety = loadSafetySet(this.#o.safetySet ?? null);
+      const safety = loadSafetySet(this.#o.safetySet ?? null, version);
       const safe = safety ? { must_reach: safety.length, reached: safety.filter((x) => candidate.score(x) >= candidate.file.drop_below).length } : null;
       const suite = await runSuite(loadScenarios(BUILTIN_SCENARIOS, this.#o.regressionSuite), candidate, {
         routing: {
@@ -322,9 +334,9 @@ export class Trainer {
       .prepare(
         `SELECT
            sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' THEN 1 ELSE 0 END) AS newly,
-           sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL THEN 1 ELSE 0 END) AS judged,
+           sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL AND coalesce(l.provenance, '') <> 'follower' THEN 1 ELSE 0 END) AS judged,
            sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.y = 1 THEN 1 ELSE 0 END) AS relevant,
-           sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL THEN 1 ELSE 0 END) AS shared_audited,
+           sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL AND coalesce(l.provenance, '') <> 'follower' THEN 1 ELSE 0 END) AS shared_audited,
            sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.y = 1 THEN 1 ELSE 0 END) AS shared_relevant,
            count(*) AS scored
          FROM events e LEFT JOIN labels l ON l.event_id = e.id WHERE e.shadow_model = ?`,
@@ -335,7 +347,9 @@ export class Trainer {
       scored: n("scored"),
       /** Events the active model sends to Jev and the candidate would drop: its savings, and its risk. */
       newly_suppressed: n("newly"),
+      /** Judged directly by Jev or a person. A follower only copies its group's answer, so it is no evidence. */
       judged: n("judged"),
+      /** Judged relevant, a follower's copied "yes" included: for rejecting, the cautious count. */
       relevant: n("relevant"),
       /** Exact 95% upper bound on the share of newly suppressed events that are relevant. */
       relevant_upper95: n("judged") ? upperBound(n("relevant"), n("judged")) : 1,
@@ -396,7 +410,7 @@ export class Trainer {
   #recentFeatures(limit = 50_000): Float32Array[] {
     const rows = this.#db
       .prepare("SELECT features FROM events WHERE features IS NOT NULL AND fv = ? ORDER BY id DESC LIMIT ?")
-      .all(FEATURIZER_VERSION, limit) as unknown as { features: Uint8Array }[];
+      .all(this.#triage.featurizer.version, limit) as unknown as { features: Uint8Array }[];
     return rows.map((r) => decodeFeatures(r.features));
   }
 
@@ -469,7 +483,7 @@ export function gate(
  * The labelled safety set's must-reach events, as feature vectors. Rows labelled anything
  * else are not used by the gate. Returns null when there is no set or nothing is labelled.
  */
-export function loadSafetySet(dir: string | null): Float32Array[] | null {
+export function loadSafetySet(dir: string | null, featurizerVersion: number): Float32Array[] | null {
   if (!dir) return null;
   const labels = path.join(dir, "candidates.csv");
   const features = path.join(dir, "candidates.features.csv");
@@ -487,7 +501,7 @@ export function loadSafetySet(dir: string | null): Float32Array[] | null {
   const out: Float32Array[] = [];
   const [fh, ...rows] = fs.readFileSync(features, "utf8").split(/\r?\n/).filter(Boolean);
   const fcols = fh!.split(",");
-  const version = fcols[1] === "featurizer_v" + FEATURIZER_VERSION;
+  const version = fcols[1] === "featurizer_v" + featurizerVersion;
   if (!version) throw new Error(`${features} is for another featurizer version (${fcols[1]}); regenerate it with ml/safety-candidates.ts`);
   for (const r of rows) {
     const c = r.split(",");

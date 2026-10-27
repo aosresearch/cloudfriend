@@ -82,7 +82,7 @@ async function exportScenario(spec: string) {
   }
   const inWindow = (t: number) => t >= from && t <= to + WAIT;
 
-  const featurizer = new Featurizer();
+  const featurizer = new Featurizer({ version: mf.featurizer_version });
   const shown: Shown[] = [];
   const dropped: Shown[] = [];
   const calls: { t: number; model: string; latency_ms: number | null; cost: number; examples: { id: string; similar: number; score: number }[]; flags: { reason: string; severity: string; events: string[] }[]; judged: Record<string, number> }[] = [];

@@ -6,7 +6,7 @@ import type { DB } from "../db.ts";
 import { errMsg, log } from "../log.ts";
 import { severityBucket, type FullRoute, type RouteOptions } from "./cascade.ts";
 import { Classifier, type ClassifierFile } from "./classifier.ts";
-import { extractEntities, Featurizer, FEATURIZER_VERSION, type FeaturizerSnapshot } from "./features.ts";
+import { extractEntities, Featurizer, type FeaturizerSnapshot } from "./features.ts";
 import { RoutingState, type LabelFact } from "./routing.ts";
 
 export const BUILTIN_MODEL = path.join(import.meta.dirname, "..", "..", "models", "base.json");
@@ -48,9 +48,10 @@ export interface Scored {
 }
 
 export class Triage {
-  readonly featurizer = new Featurizer();
+  /** Computes the feature version of the loaded model (it changes when a model of another version loads). */
+  featurizer = new Featurizer();
   /** Verdict cache, escalation memory and earned suppression (routing.ts). */
-  readonly routing: RoutingState;
+  routing: RoutingState;
   readonly opts: TriageOptions;
   classifier: Classifier | null = null;
   modelPath: string | null = null;
@@ -62,21 +63,43 @@ export class Triage {
   constructor(db: DB, opts: TriageOptions) {
     this.#db = db;
     this.opts = opts;
-    this.routing = new RoutingState({
-      verdictTtlMs: opts.verdictTtlMs,
-      escalatedTtlMs: opts.knownTtlMs ?? 7 * 86_400_000,
-      escalatedMemoryMs: opts.escalatedMemoryMs,
-      suppressionTtlMs: opts.suppressionTtlMs ?? 0,
-    });
+    this.routing = this.#newRouting();
     this.#rebuildRouting(db);
-    const row = db.prepare("SELECT value FROM kv WHERE key = 'featurizer'").get() as { value: string } | undefined;
-    if (row) {
-      try {
-        if (!this.featurizer.restore(JSON.parse(row.value) as FeaturizerSnapshot)) log.info("featurizer history is from another version; starting fresh");
-      } catch (err) {
-        log.warn("could not restore featurizer history", { error: errMsg(err) });
-      }
+    this.#restoreFeaturizer();
+  }
+
+  #newRouting(): RoutingState {
+    return new RoutingState({
+      verdictTtlMs: this.opts.verdictTtlMs,
+      escalatedTtlMs: this.opts.knownTtlMs ?? 7 * 86_400_000,
+      escalatedMemoryMs: this.opts.escalatedMemoryMs,
+      suppressionTtlMs: this.opts.suppressionTtlMs ?? 0,
+    });
+  }
+
+  #restoreFeaturizer(): void {
+    const row = this.#db.prepare("SELECT value FROM kv WHERE key = 'featurizer'").get() as { value: string } | undefined;
+    if (!row) return;
+    try {
+      if (!this.featurizer.restore(JSON.parse(row.value) as FeaturizerSnapshot)) log.info("featurizer history is from another version; starting fresh");
+    } catch (err) {
+      log.warn("could not restore featurizer history", { error: errMsg(err) });
     }
+  }
+
+  /**
+   * A model of another feature version was loaded: compute that version from now on. Its
+   * history starts fresh unless a snapshot of that version exists, and routing is rebuilt so
+   * that benign judgments made under the other version no longer earn suppression (the
+   * severity they were keyed by may read differently). Escalations are kept.
+   */
+  #switchFeaturizer(version: number): void {
+    log.info("featurizer version changes with the model", { from: this.featurizer.version, to: version });
+    this.featurizer = new Featurizer({ version });
+    this.#restoreFeaturizer();
+    this.routing = this.#newRouting();
+    this.#rebuildRouting(this.#db);
+    if (this.shadow && this.shadow.file.featurizer_version !== version) this.shadow = null;
   }
 
   #loadedMtime = 0;
@@ -86,6 +109,7 @@ export class Triage {
     try {
       const mtime = fs.statSync(file).mtimeMs;
       const c = new Classifier(JSON.parse(fs.readFileSync(file, "utf8")) as ClassifierFile);
+      if (c.file.featurizer_version !== this.featurizer.version) this.#switchFeaturizer(c.file.featurizer_version);
       this.classifier = c;
       this.modelPath = file;
       this.#loadedMtime = mtime;
@@ -116,7 +140,11 @@ export class Triage {
   loadShadow(file: string): boolean {
     try {
       this.#shadowMtime = fs.statSync(file).mtimeMs;
-      this.shadow = new Classifier(JSON.parse(fs.readFileSync(file, "utf8")) as ClassifierFile);
+      const candidate = new Classifier(JSON.parse(fs.readFileSync(file, "utf8")) as ClassifierFile);
+      if (candidate.file.featurizer_version !== this.featurizer.version) {
+        throw new Error(`a shadow model must use the active feature version v${this.featurizer.version}, not v${candidate.file.featurizer_version}`);
+      }
+      this.shadow = candidate;
       log.info("shadow classifier loaded", { path: file, trees: this.shadow.gbdt.numTrees });
       return true;
     } catch (err) {
@@ -182,11 +210,12 @@ export class Triage {
     const since = Date.now() - this.routing.horizonMs;
     const rows = db
       .prepare(
-        `SELECT template, severity, y, source, provenance, created_at AS at, ctx_rate AS rate, ctx_service_errors AS serviceErrors
+        `SELECT template, severity, y, source, provenance, created_at AS at, ctx_rate AS rate, ctx_service_errors AS serviceErrors,
+                featurizer_version AS featurizerVersion
          FROM labels WHERE template IS NOT NULL AND created_at >= ? ORDER BY created_at, event_id`,
       )
       .all(since) as unknown as LabelFact[];
-    this.routing.rebuild(rows);
+    this.routing.rebuild(rows, this.featurizer.version);
   }
 
   /** The verdict cache (routing.ts), for callers that only need it. */
@@ -216,6 +245,5 @@ export function decodeFeatures(blob: Uint8Array): Float32Array {
   return new Float32Array(copy.buffer, 0, copy.byteLength / 4);
 }
 
-export const FEATURIZER = FEATURIZER_VERSION;
 
 const round = (n: number) => Math.round(n * 1e4) / 1e4;

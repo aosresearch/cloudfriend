@@ -121,3 +121,21 @@ describe("routing state after a restart", () => {
     assert.equal(s.route(0.01, LOW, facts("pay|failed", { severity: "e" }), 8 * DAY), "review", "and its expiry still means review after the restart");
   });
 });
+
+describe("routing state across feature versions", () => {
+  it("drops benign permissions made under another version, and keeps escalations", () => {
+    const labels: LabelFact[] = [
+      { template: "web|GET /", severity: "i", y: 0, source: "jev", provenance: "review", at: 0, rate: 1, serviceErrors: 0, featurizerVersion: 2 },
+      { template: "pay|failed", severity: "e", y: 1, source: "jev", provenance: "threshold", at: 0, rate: 1, serviceErrors: 0, featurizerVersion: 2 },
+      { template: "db|slow", severity: "w", y: 0, source: "jev", provenance: "review", at: 0, rate: 1, serviceErrors: 0, featurizerVersion: 3 },
+    ];
+    const s = state();
+    s.rebuild(labels, 3);
+    assert.equal(s.route(0.01, LOW, facts("web|GET /"), 1000), "review", "a v2 benign judgment earns nothing under v3");
+    assert.equal(s.route(0.01, LOW, facts("db|slow", { severity: "w" }), 1000), "drop", "a v3 one does");
+    assert.equal(s.route(0.01, LOW, facts("pay|failed", { severity: "e" }), 1000), "known", "the v2 escalation still protects");
+    const same = state();
+    same.rebuild(labels, 2);
+    assert.equal(same.route(0.01, LOW, facts("web|GET /"), 1000), "drop", "the same version keeps its permissions");
+  });
+});

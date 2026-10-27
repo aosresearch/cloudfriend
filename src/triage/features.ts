@@ -9,7 +9,14 @@
 // Bump FEATURIZER_VERSION whenever a feature changes meaning. Models record the version
 // they were trained with, and stored feature vectors with another version are not mixed in.
 
-export const FEATURIZER_VERSION = 2;
+export const FEATURIZER_VERSION = 3;
+/**
+ * Versions this build can compute. A model runs with the version it was trained on.
+ *   2  the RCAEval/GAIA models of October 2026
+ *   3  numbers in timestamps, IPs and versions no longer count as HTTP statuses or keywords
+ *      (the milliseconds in "15:27:27,503" used to read as a 503)
+ */
+export const SUPPORTED_FEATURIZER_VERSIONS: readonly number[] = [2, 3];
 
 export interface FeatureInput {
   source: string;
@@ -119,12 +126,44 @@ export function levelOf(data: unknown, text: string): number {
   return NaN;
 }
 
-function statusOf(data: unknown, text: string): number {
+function statusOf(data: unknown, text: string, version = FEATURIZER_VERSION): number {
   const raw = findKey(data, STATUS_KEYS, 2);
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
   if (n >= 100 && n < 600) return n;
+  if (version >= 3) return statusInText(text);
   const m = /\b(?:status(?:_code)?|code|HTTP\/\d(?:\.\d)?)["']?\s*[=: ]\s*([1-5]\d\d)\b/i.exec(text) ?? /\b([45]\d\d) (?:[A-Z][a-z]+ ?){1,3}\b/.exec(text);
   return m ? Number(m[1]) : NaN;
+}
+
+/** Numbers that are never statuses: timestamps with their fractions, IPs with ports, versions. */
+const NOT_STATUS =
+  /\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?|\b\d\d?:\d\d:\d\d(?:[.,]\d+)?|\[\d\d\/\w{3}\/\d{4}:\d\d:\d\d:\d\d [+-]\d{4}\]|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b|\bv?\d+\.\d+(?:\.\d+)+\b/g;
+/**
+ * An HTTP status in text, only where text says it is one: after status/code, after the request
+ * in an access log ("POST /cart 503 - ms", '"GET /x HTTP/1.1" 503 12'), or before its reason phrase.
+ * Kept in step with ml/datasets/common.py; test/fixtures/parsing.json checks both.
+ */
+const STATUS_IN_TEXT = new RegExp(
+  [
+    `\\b(?:status(?:[_ ]?code)?|http[_ ]?code|response[_ ]?code)["']?\\s*[=:]?\\s*([1-5]\\d\\d)\\b`,
+    `\\bHTTP\\/\\d(?:\\.\\d)?"?\\s+([1-5]\\d\\d)\\b`,
+    `\\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) \\S+ ([1-5]\\d\\d)\\b`,
+    `\\breturn(?:s|ed)? ([1-5]\\d\\d)\\b`,
+    `\\b([1-5]\\d\\d) (?:OK|Created|Accepted|No Content|Found|Not Modified|Bad Request|Unauthorized|Forbidden|Not Found|` +
+      `Method Not Allowed|Conflict|Gone|Too Many Requests|Internal Server Error|Not Implemented|Bad Gateway|Service Unavailable|Gateway Time-?out)\\b`,
+  ].join("|"),
+  "i",
+);
+
+/** Text with timestamps, IPs and versions blanked, so their digits can't read as anything. */
+export function withoutIncidentalNumbers(text: string): string {
+  return text.replace(NOT_STATUS, " ");
+}
+
+export function statusInText(text: string): number {
+  const m = STATUS_IN_TEXT.exec(withoutIncidentalNumbers(text));
+  if (!m) return NaN;
+  return Number(m.slice(1).find((g) => g !== undefined));
 }
 
 function serviceOf(source: string, data: unknown): string {
@@ -232,7 +271,7 @@ const KEYWORDS: [string, RegExp][] = [
   ["kw_timeout", /time(d)? ?out|deadline exceeded/i],
   ["kw_refused", /refused|reset by peer|broken pipe|unreachable|no route|connection (closed|lost|aborted)/i],
   ["kw_denied", /denied|forbidden|unauthori[sz]ed|permission|not allowed|invalid token|authentication/i],
-  ["kw_unavailable", /unavailable|service down|\b503\b|\b502\b|bad gateway|circuit/i],
+  ["kw_unavailable", /unavailable|service down|\b503\b|\b502\b|bad gateway|circuit/i], // v3: no bare numbers (KEYWORDS_V3)
   ["kw_crash", /panic|fatal|crash|segfault|core dump|killed|oom|out of memory|terminated|exit(ed)? (with )?(code|status)/i],
   ["kw_null", /null ?pointer|nonetype|undefined is not|cannot read propert|nil pointer|attributeerror|typeerror|keyerror|indexerror|valueerror/i],
   ["kw_warn", /\bwarn/i],
@@ -243,6 +282,11 @@ const KEYWORDS: [string, RegExp][] = [
   ["kw_success", /success|succeeded|\bok\b|completed|done|\b200\b/i],
   ["kw_security", /attack|injection|xss|csrf|brute|suspicious|malicious|blocked/i],
 ];
+
+/** v3: the same keywords without bare status numbers, which the status features carry. */
+const KEYWORDS_V3: [string, RegExp][] = KEYWORDS.map(([n, re]) =>
+  n === "kw_unavailable" ? [n, /unavailable|service down|bad gateway|circuit/i] : n === "kw_success" ? [n, /success|succeeded|\bok\b|completed|done/i] : [n, re],
+);
 
 const HASH_BUCKETS = 32;
 
@@ -338,13 +382,15 @@ export interface TemplateContext {
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
 export interface FeaturizerOptions {
+  /** Feature version to compute (SUPPORTED_FEATURIZER_VERSIONS); the latest by default. */
+  version?: number;
   /** Most templates remembered; the least recently seen are forgotten first. */
   maxTemplates?: number;
   maxServices?: number;
 }
 
 export class Featurizer {
-  readonly version = FEATURIZER_VERSION;
+  readonly version: number;
   readonly names = FEATURE_NAMES;
   #templates = new Map<string, TemplateState>();
   #services = new Map<string, ServiceState>();
@@ -357,6 +403,8 @@ export class Featurizer {
   #maxServices: number;
 
   constructor(opts: FeaturizerOptions = {}) {
+    this.version = opts.version ?? FEATURIZER_VERSION;
+    if (!SUPPORTED_FEATURIZER_VERSIONS.includes(this.version)) throw new Error(`featurizer v${this.version} is not supported by this build`);
     this.#maxTemplates = opts.maxTemplates ?? 100_000;
     this.#maxServices = opts.maxServices ?? 10_000;
   }
@@ -371,8 +419,9 @@ export class Featurizer {
     const service = serviceOf(e.source, e.data);
     const t = eventTime(e);
     const level = levelOf(e.data, text);
-    const status = statusOf(e.data, text);
-    const kws = KEYWORDS.map(([, re]) => (re.test(text) ? 1 : 0));
+    const status = statusOf(e.data, text, this.version);
+    const kwText = this.version >= 3 ? withoutIncidentalNumbers(text) : text;
+    const kws = (this.version >= 3 ? KEYWORDS_V3 : KEYWORDS).map(([, re]) => (re.test(kwText) ? 1 : 0));
     const errorish =
       level >= 3 || status >= 500 || kws[0]! + kws[1]! + kws[2]! + kws[3]! + kws[4]! + kws[6]! + kws[7]! + kws[8]! > 0;
     const masked = maskMessage(text);
@@ -503,7 +552,7 @@ export class Featurizer {
   snapshot(): FeaturizerSnapshot {
     const rate = (r: Rate) => [r.m1, r.m10, r.h1, r.last];
     return {
-      version: FEATURIZER_VERSION,
+      version: this.version,
       templates: [...this.#templates].map(([k, v]) => [k, v.count, v.first, ...rate(v.rate)]),
       services: [...this.#services].map(([k, v]) => [k, v.count, v.first, v.templates, ...rate(v.all), ...rate(v.errors), ...rate(v.newTemplates)]),
       global: [...rate(this.#all), ...rate(this.#allErrors), ...rate(this.#allNewTemplates)],
@@ -513,7 +562,7 @@ export class Featurizer {
 
   /** Load a snapshot. Returns false (and keeps a clean state) if it is from another version. */
   restore(snap: FeaturizerSnapshot): boolean {
-    if (!snap || snap.version !== FEATURIZER_VERSION) return false;
+    if (!snap || snap.version !== this.version) return false;
     const rate = (a: number[], i: number): Rate => ({ m1: a[i]!, m10: a[i + 1]!, h1: a[i + 2]!, last: a[i + 3]! });
     this.#templates = new Map(snap.templates.map((a) => [a[0] as string, { count: a[1] as number, first: a[2] as number, rate: rate(a as number[], 3) }]));
     this.#services = new Map(
