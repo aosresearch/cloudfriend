@@ -1,17 +1,27 @@
 // The dashboard API (design/api-contract.md) on the real server: access control, workspace scoping,
 // sources and ingest, destinations, events/flags/decisions, the test event, usage, and the UI files.
 import assert from "node:assert/strict";
-import { afterEach, describe, it } from "node:test";
+import { after, afterEach, before, describe, it } from "node:test";
 import { displayUrl } from "../src/api/destinations.ts";
 import { UI_CSP } from "../src/api/static.ts";
 import { testSourceId } from "../src/api/sources.ts";
 import { hashPassword } from "../src/auth/index.ts";
 import { DEFAULT_WORKSPACE } from "../src/db.ts";
-import { checkDestinationUrl } from "../src/net/outbound.ts";
+import { checkDestinationUrl, setDefaultResolver } from "../src/net/outbound.ts";
 import { createApp } from "../src/server.ts";
 import type { ActionAdapter, Decision } from "../src/types.ts";
 import { Client, until } from "./dashboard-client.ts";
 import { ADMIN, fakeDecider, makeCloudfriend, rows, type TestCloudfriend } from "./helpers.ts";
+
+// Destination checks resolve hostnames. Answer for the names these tests use, so the suite
+// doesn't depend on the network (hooks.example.com doesn't resolve at all).
+before(() =>
+  setDefaultResolver(async (host) => {
+    if (host === "example.com" || host.endsWith(".example.com") || host === "hooks.slack.com") return [{ address: "93.184.215.14", family: 4 }];
+    throw Object.assign(new Error("not found"), { code: "ENOTFOUND" });
+  }),
+);
+after(() => setDefaultResolver());
 
 const ALICE = { email: "alice@example.com", password: "alice has a long password" };
 const BOB = { email: "bob@example.com", password: "bob has a long password too" };
