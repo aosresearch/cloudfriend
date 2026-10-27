@@ -37,7 +37,7 @@ import { JEV } from "../src/adapters/deciders/jev.ts";
 import { parseCsvLine } from "../src/training.ts";
 import { labelProvenance, severityBucket, type FullRoute } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
-import { FEATURE_NAMES, Featurizer } from "../src/triage/features.ts";
+import { extractText, FEATURE_NAMES, Featurizer, levelOf, statusInText, withoutIncidentalNumbers } from "../src/triage/features.ts";
 import { RoutingState } from "../src/triage/routing.ts";
 import { CascadeSim, type SimFlag } from "../src/triage/sim.ts";
 import { bootstrap, lowerBound, upperBound } from "../src/stats.ts";
@@ -59,6 +59,9 @@ const { values: args } = parseArgs({
     jev: { type: "boolean", default: false },
     // "jev" (cached or live calls) or "oracle": answers from the dataset's weak labels, with a
     // 3 s latency, for free runs that still let suppression be earned (sizing, stage-1 recall).
+    // "oracle-cautious" also calls every error-like event relevant (error words, an error level
+    // or a 5xx status, read the same way for every model), as Jev mostly does: the weak labels
+    // call errors that were there before the fault benign, which teaches routing to drop them.
     decider: { type: "string", default: "jev" },
     budget: { type: "string" },
     cache: { type: "string", default: "data/jev-cache" },
@@ -229,7 +232,7 @@ async function runCase(dir: string, c: Case) {
       for await (const e of readStream(dir, prev.id)) {
         const f = featurizer.featurize({ source: e.source, received_at: e.t, data: e.data });
         const id = `w${k++}`;
-        if (e.y) pos.add(id);
+        if (e.y || (args.decider === "oracle-cautious" && errorLike(e.data))) pos.add(id);
         const ctx = featurizer.context(f.template);
         await warm.push({ id, t: e.t, score: classifier.score(f.values), template: f.template, severity: severityBucket(f.level, f.status), novel: f.novel, rate: ctx?.last_1m, serviceErrors: ctx?.service_errors_10m });
       }
@@ -267,13 +270,14 @@ async function runCase(dir: string, c: Case) {
         },
         {
           route: name === "keyword" ? (e, r) => (keywordHit.has(e.id) ? "classifier" : r === "classifier" ? "drop" : r) : undefined,
-          decide: cascade && args.decider === "oracle"
+          decide: cascade && args.decider!.startsWith("oracle")
             ? async (asked) => {
-                const hot = asked.filter(({ item }) => positives.has(item.id)).map(({ item }) => item.id);
+                const yes = (id: string) => positives.has(id) || cautious.has(id);
+                const hot = asked.filter(({ item }) => yes(item.id)).map(({ item }) => item.id);
                 return {
                   latencyMs: 3000,
                   decision: {
-                    judgments: asked.map(({ item }) => ({ event_id: item.id, relevance: positives.has(item.id) ? ("relevant" as const) : ("benign" as const) })),
+                    judgments: asked.map(({ item }) => ({ event_id: item.id, relevance: yes(item.id) ? ("relevant" as const) : ("benign" as const) })),
                     flags: hot.length ? [{ reason: "oracle", severity: "high" as const, event_ids: hot }] : [],
                   },
                 };
@@ -347,6 +351,8 @@ async function runCase(dir: string, c: Case) {
     );
   }
   const keywordHit = new Set<string>();
+  /** oracle-cautious: error-like events, which that decider calls relevant. */
+  const cautious = new Set<string>();
   const drops: string[] = [];
   let dropSeen = 0;
   const dropRand = seeded(`${c.id}:drops`);
@@ -366,6 +372,7 @@ async function runCase(dir: string, c: Case) {
       const ctx = featurizer.context(f.template);
       info.set(id, { t: e.t, source: e.source, data: e.data, template: f.template, values: labelsOut ? [...f.values] : undefined });
       if (f.errorish) keywordHit.add(id);
+      if (args.decider === "oracle-cautious" && errorLike(e.data)) cautious.add(id);
       if (e.y) {
         const situation: Situation = h.count === 0 ? "new" : h.errors === 0 ? "transition" : h.errors >= 5 && e.t - h.lastError <= 30 * 60_000 ? "sustained" : "recurring";
         positives.set(id, { id, t: e.t, template: f.template, situation, incidents: e.inc ?? [], reached: null });
@@ -423,6 +430,14 @@ async function runCase(dir: string, c: Case) {
 
 function incidentLine(s: ReturnType<typeof summarize>) {
   return s.incidents.map((i) => (i.censored ? "C" : i.detected ? "D" : i.withheld ? "W" : i.unanswered ? "U" : i.dismissed ? "X" : "-")).join("") + ` pre=${s.flags_before_fault ?? "-"}`;
+}
+
+const ERROR_WORDS =
+  /\b(error|err|exception|traceback|fail(ed|ure|s)?|fatal|panic|crash|refused|unavailable|timed? ?out|denied|forbidden|unauthori[sz]ed|cannot|can't|unable|invalid|severe|critical|killed|oom)\b|Error\b|Exception\b/i;
+/** Error-like by words, level or a 5xx status, the same for every feature version (ml/datasets/common.py's rule). */
+function errorLike(data: unknown): boolean {
+  const text = extractText(data);
+  return levelOf(data, text) >= 3 || statusInText(text) >= 500 || ERROR_WORDS.test(withoutIncidentalNumbers(text));
 }
 
 /** Forget events no strategy can still need: older than the batch window and not in a flag. */
