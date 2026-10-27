@@ -6,7 +6,10 @@ export interface IntakeRow {
   source: string;
   received_at: number;
   body: Uint8Array;
-  secret_id: string;
+  /** The source adapter that parses the row (the source's kind), or null for legacy rows. */
+  adapter?: string | null;
+  /** The ingest secret used, or null for rows the server queues itself (the dashboard's test event). */
+  secret_id: string | null;
 }
 
 interface Pending {
@@ -17,8 +20,8 @@ interface Pending {
 
 export class QueueFullError extends Error {}
 
-const INSERT = `INSERT INTO queue (workspace_id, source, received_at, body)
-  SELECT w, s, t, b FROM unnest($1::text[], $2::text[], $3::bigint[], $4::bytea[]) WITH ORDINALITY AS r(w, s, t, b, n) ORDER BY n`;
+const INSERT = `INSERT INTO queue (workspace_id, source, received_at, body, adapter)
+  SELECT w, s, t, b, a FROM unnest($1::text[], $2::text[], $3::bigint[], $4::bytea[], $5::text[]) WITH ORDINALITY AS r(w, s, t, b, a, n) ORDER BY n`;
 
 /**
  * Group-commit writer. Requests that arrive within one commit window are inserted with one
@@ -88,7 +91,7 @@ export class Intake {
     try {
       const rows = batch.map((p) => p.row);
       await tx(this.#db, async (c) => {
-        await c.query(INSERT, [rows.map((r) => r.workspace_id), rows.map((r) => r.source), rows.map((r) => r.received_at), rows.map((r) => r.body)]);
+        await c.query(INSERT, [rows.map((r) => r.workspace_id), rows.map((r) => r.source), rows.map((r) => r.received_at), rows.map((r) => r.body), rows.map((r) => r.adapter ?? null)]);
         await Secrets.touch(c, rows.map((r) => r.secret_id), rows.at(-1)!.received_at);
       });
     } catch (err) {

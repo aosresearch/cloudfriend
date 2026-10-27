@@ -1,6 +1,8 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
-import { parseDuration } from "./config.ts";
+import { registerDashboardApi, registerUi, type AuthSetup } from "./api/index.ts";
+import { BadRequest, HttpError, MAX_LIMIT, parseLimit, parseTime } from "./api/http.ts";
 import { all, DEFAULT_WORKSPACE, one, pgText, run, type DB } from "./db.ts";
+import { checkDestinationUrl } from "./net/outbound.ts";
 import { QueueFullError, type Intake } from "./intake.ts";
 import { errMsg, log } from "./log.ts";
 import { safeEqual, SOURCE_NAME, type SecretMatch, type Secrets } from "./secrets.ts";
@@ -8,7 +10,9 @@ import { eventFeedback, flagFeedback, importLabels, type ImportedLabel } from ".
 import { deliveriesFor, eventsByIds, FLAG_COLUMNS, getFlagRow, listEvents, listFlags, queue, toFlag, type FlagRow } from "./store.ts";
 import type { Trainer } from "./training.ts";
 import type { Triage } from "./triage/runtime.ts";
-import { SEVERITIES, type SourceAdapter } from "./types.ts";
+import { SEVERITIES, type ActionAdapter, type SourceAdapter } from "./types.ts";
+
+export { parseTime } from "./api/http.ts";
 
 export interface AppDeps {
   db: DB;
@@ -23,6 +27,30 @@ export interface AppDeps {
   trainer?: Trainer | null;
   /** Decider calls and examples asked since start, for /stats. */
   counters?: () => Record<string, number>;
+  /**
+   * Sign-in and the dashboard (setupAuth, src/api/). When set, the /api routes and the UI at /
+   * are served; without it, only ingest, /healthz and the admin API.
+   */
+  auth?: AuthSetup | null;
+  /** Every loaded action adapter (not only the env-enabled ones): the kinds a destination may have. */
+  actionAdapters?: Map<string, ActionAdapter>;
+  /** The configured decider's name, or null when none is enabled (for /api/w/:ws/usage). */
+  decider?: string | null;
+  /** Environment for action adapters and CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS. Default process.env. */
+  env?: NodeJS.ProcessEnv;
+  /** The destination address check; tests replace it. Default checkDestinationUrl. */
+  checkDestinationUrl?: typeof checkDestinationUrl;
+  /** Where the dashboard's files are. Default src/ui/static. */
+  uiDir?: string;
+}
+
+/** CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS: on | off (default off). */
+export function allowPrivateDestinations(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS?.trim().toLowerCase();
+  if (!raw) return false;
+  if (["1", "true", "on", "yes"].includes(raw)) return true;
+  if (["0", "false", "off", "no"].includes(raw)) return false;
+  throw new Error(`CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS must be on or off, got ${JSON.stringify(env.CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS)}`);
 }
 
 const QUEUE_STATUSES = ["open", "acknowledged"];
@@ -36,37 +64,11 @@ async function jsonBody<T>(c: Context, hint: string): Promise<T> {
   }
 }
 
-class BadRequest extends Error {}
-
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 1000;
-
 function bearer(c: Context): string | null {
   const h = c.req.header("authorization");
   if (!h) return null;
   const m = /^Bearer\s+(.+)$/i.exec(h);
   return m ? m[1]!.trim() : null;
-}
-
-/** Accepts ISO 8601, epoch milliseconds, or a duration meaning "that long ago" (`1h`, `30m`, `7d`). */
-export function parseTime(value: string | undefined, now = Date.now()): number | undefined {
-  if (value === undefined || value === "") return undefined;
-  if (/^\d+(\.\d+)?(ms|s|m|h|d)$/.test(value)) {
-    const t = now - parseDuration(value);
-    if (!Number.isSafeInteger(t)) throw new BadRequest(`invalid time: ${value}`);
-    return t;
-  }
-  const t = /^\d+$/.test(value) ? Number(value) : Date.parse(value);
-  // Out of range (e.g. 30 digits) is as invalid as unparseable: no stored time is near it.
-  if (!Number.isSafeInteger(t)) throw new BadRequest(`invalid time: ${value} (use ISO 8601, epoch ms, or e.g. 1h)`);
-  return t;
-}
-
-function parseLimit(value: string | undefined): number {
-  if (value === undefined || value === "") return DEFAULT_LIMIT;
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < 1) throw new BadRequest("limit must be a positive integer");
-  return Math.min(n, MAX_LIMIT);
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -75,7 +77,7 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
   app.onError((err, c) => {
-    if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
+    if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
     log.error("request failed", { path: c.req.path, error: errMsg(err) });
     return c.json({ error: "internal error" }, 500);
   });
@@ -105,15 +107,16 @@ export function createApp(deps: AppDeps): Hono {
     const body = new Uint8Array(await c.req.arrayBuffer());
     if (body.byteLength > maxBodyBytes) return c.text("payload too large", 413);
 
-    const adapter = sources.get(source) ?? sources.get("json")!;
+    // A source's kind names its adapter; legacy paths use the adapter named like the path.
+    const adapter = sources.get(secret.adapter ?? source) ?? sources.get("json")!;
     if (adapter.verify) {
       const headers: Record<string, string> = {};
       c.req.raw.headers.forEach((v, k) => (headers[k] = v));
-      if (!adapter.verify({ source, headers, query: c.req.query(), body })) return c.text("unauthorized", 401);
+      if (!adapter.verify({ source: secret.source, headers, query: c.req.query(), body })) return c.text("unauthorized", 401);
     }
 
     try {
-      await intake.append({ workspace_id: secret.workspace_id, source, received_at: Date.now(), body, secret_id: secret.id });
+      await intake.append({ workspace_id: secret.workspace_id, source: secret.source, adapter: secret.adapter, received_at: Date.now(), body, secret_id: secret.id });
     } catch (err) {
       if (!(err instanceof QueueFullError)) log.error("queue write failed", { error: errMsg(err) });
       c.header("retry-after", "5");
@@ -367,6 +370,26 @@ export function createApp(deps: AppDeps): Hono {
     const [event] = await eventsByIds(db, ws, [c.req.param("id")]);
     return event ? c.json(event) : c.json({ error: "not found" }, 404);
   });
+
+  // --- the dashboard: sign-in, the /api routes, and the UI at / (registered last) ----------
+
+  if (deps.auth) {
+    const env = deps.env ?? process.env;
+    registerDashboardApi(app, deps.auth, {
+      db,
+      intake,
+      sources,
+      actions: deps.actionAdapters ?? new Map(),
+      env,
+      publicUrl: deps.auth.config.publicUrl,
+      allowPrivateDestinations: allowPrivateDestinations(env),
+      checkUrl: deps.checkDestinationUrl ?? checkDestinationUrl,
+      decider: deps.decider ?? null,
+      triage,
+      triageWorkspace: ws,
+    });
+    registerUi(app, deps.uiDir);
+  }
 
   return app;
 }

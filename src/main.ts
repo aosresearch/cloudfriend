@@ -22,6 +22,22 @@ export async function main(): Promise<void> {
       ].join("\n"),
     );
   }
+  if (cloudfriend.auth.generatedPassword) {
+    const bar = "=".repeat(72);
+    console.log(
+      [
+        bar,
+        "First boot: created a dashboard admin. The password is shown only once:",
+        "",
+        `  email:     ${cloudfriend.auth.bootstrap.email}`,
+        `  password:  ${cloudfriend.auth.generatedPassword}`,
+        "",
+        `Sign in at ${cloudfriend.auth.config.publicUrl?.href ?? `http://localhost:${config.port}/`}`,
+        "Set CLOUDFRIEND_ADMIN_EMAIL and CLOUDFRIEND_ADMIN_PASSWORD to choose the admin yourself.",
+        bar,
+      ].join("\n"),
+    );
+  }
   if (!config.adminKey) log.warn("CLOUDFRIEND_ADMIN_KEY is not set; the admin API (/secrets, /flags, /events) is disabled");
   if (!cloudfriend.decider) {
     log.warn(
