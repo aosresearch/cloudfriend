@@ -169,11 +169,15 @@ describe("read API", () => {
     assert.equal(await count(cloudfriend, "flags"), 1);
   });
 
-  it("returns JSON 404 for unknown routes", async () => {
+  it("returns JSON 404 for unknown API routes (other GETs get the dashboard)", async () => {
     cloudfriend = await makeCloudfriend();
-    const res = await cloudfriend.app.request("/nope");
-    assert.equal(res.status, 404);
-    assert.deepEqual(await res.json(), { error: "not found" });
+    for (const path of ["/api/nope", "/in/x", "/auth/nope"]) {
+      const res = await cloudfriend.app.request(path);
+      assert.equal(res.status, 404, path);
+      assert.deepEqual(await res.json(), { error: "not found" }, path);
+    }
+    assert.equal((await cloudfriend.app.request("/nope", { method: "POST" })).status, 404);
+    assert.match((await cloudfriend.app.request("/nope")).headers.get("content-type") ?? "", /text\/html/);
   });
 });
 

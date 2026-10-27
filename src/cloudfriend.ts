@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
 import { loadAdapters, type Adapters } from "./adapters.ts";
+import { setupAuth, type AuthSetup } from "./api/index.ts";
 import type { Config } from "./config.ts";
 import { DEFAULT_WORKSPACE, openDb, type DB } from "./db.ts";
 import { Intake } from "./intake.ts";
@@ -28,6 +29,8 @@ export interface cloudfriend {
   startRetraining(): void;
   /** Set on first boot only: the generated ingest secret, to print once. */
   bootSecret: string | null;
+  /** Sign-in: the bootstrap admin, and its generated password on first boot (print it once). */
+  auth: AuthSetup;
   /**
    * Shut down: stop the worker at once (no new decides or deliveries), give in-flight work
    * `graceMs` and requests already being read `drainMs` to reach the queue, commit, close.
@@ -57,6 +60,13 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
   }
 
   const db = await openDb(config.databaseUrl, { max: config.dbPool });
+  let auth: AuthSetup;
+  try {
+    auth = await setupAuth(db, env);
+  } catch (err) {
+    await db.end().catch(() => {});
+    throw err;
+  }
   const workspace = DEFAULT_WORKSPACE;
   const secrets = new Secrets(db, workspace);
   const bootSecret = (await secrets.createFirst("default"))?.secret ?? null;
@@ -130,6 +140,10 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     triage,
     trainer,
     counters: () => ({ ...worker.counters }),
+    auth,
+    actionAdapters: adapters.actions,
+    decider: decider?.name ?? null,
+    env,
   });
 
   let retrainTimer: NodeJS.Timeout | null = null;
@@ -167,10 +181,12 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     triage,
     trainer,
     bootSecret,
+    auth,
     startRetraining,
     async close(graceMs, drainMs = config.commitWindowMs + 50) {
       if (retrainTimer) clearInterval(retrainTimer);
       if (reloadTimer) clearInterval(reloadTimer);
+      auth.stop();
       await Promise.all([worker.stop(graceMs), new Promise((r) => setTimeout(r, drainMs))]);
       await intake.flush();
       await db.end();
