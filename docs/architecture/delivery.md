@@ -4,23 +4,25 @@ title: Delivery
 
 # Delivery
 
-Delivery takes each flag from [Process](./process.md) and runs every enabled action on it: post to Slack, call a webhook, or your own adapter. It retries until each action succeeds or runs out of attempts.
+Delivery takes each flag from [Process](./process.md) and sends it to every destination of its workspace: post to Slack, call a webhook, or your own adapter. It retries until each delivery succeeds or runs out of attempts. Any worker runs any workspace's deliveries; they are not tied to leases.
 
 Code: `src/worker.ts` (`claimDeliveries`, `deliverDue`, `#deliver`) and the adapters in `src/adapters/actions/`.
 
 ## The deliveries table
 
-When a flag is stored, the same transaction adds one row to `deliveries` for each enabled action. A flag with Slack and a webhook enabled gets two rows, and each is tracked on its own: Slack can succeed while the webhook is still retrying.
+A destination is a row in `destinations`: its `kind` names the action adapter, and its `config` holds what that adapter needs (for example `{"url": "...", "signing_secret": "..."}`). When a flag is stored, the same transaction adds one row to `deliveries` for each destination of its workspace that isn't deleted. A flag with a Slack and a webhook destination gets two rows, and each is tracked on its own: Slack can succeed while the webhook is still retrying.
+
+Self-hosted setups configured with `SLACK_WEBHOOK_URL` or `WEBHOOK_URL` (and `WEBHOOK_SECRET`) get those as destinations of the default workspace on the first boot where it has none. Other actions enabled by environment variables (such as your own adapter) still get one delivery each for the default workspace's flags, by name.
 
 | Column | |
 | --- | --- |
-| `flag_id`, `action` | Which flag goes to which action. |
+| `flag_id`, `action` | Which flag goes where. `action` is the destination's id, or an action adapter's name for env-configured actions and rows from before destinations. |
 | `status` | `pending`, `ok` or `failed`. |
 | `attempts` | How many times it has run. |
 | `next_attempt_at` | When it is due next. While a delivery runs, this is the end of its claim. |
 | `last_error` | The error from the latest failed attempt. |
 
-`GET /flags/:id` returns these rows with the flag, so you can see where each flag went.
+`GET /flags/:id` returns these rows with the flag, with each destination's name and kind, so you can see where each flag went.
 
 ## A delivery pass
 
@@ -35,16 +37,16 @@ flowchart TD
   retry -->|yes| failed["status = failed"]
 ```
 
-1. Claim up to 50 `pending` deliveries whose `next_attempt_at` has passed, earliest first. One statement selects them with `FOR UPDATE SKIP LOCKED` and moves their `next_attempt_at` a minute ahead, so another worker running a pass at the same moment skips them, and once the claim commits nobody finds them due. No transaction is open while the actions run.
-2. Run them all at once. Each gets the flag and up to 50 of its events, and has 15 seconds.
+1. Claim up to 50 `pending` deliveries of any workspace whose `next_attempt_at` has passed, earliest first. One statement selects them with `FOR UPDATE SKIP LOCKED` and moves their `next_attempt_at` a minute ahead, so another worker running a pass at the same moment skips them, and once the claim commits nobody finds them due. No transaction is open while the actions run.
+2. Run them all at once. Each runs the action adapter named by its destination's `kind`, and gets the flag, up to 50 of its events and the destination's `config`, with 15 seconds.
 3. Record each result, if the claim is still this pass's:
-   - **success:** `status = 'ok'`.
-   - **failure** (it threw, returned `false`, or timed out): `attempts + 1`, the error is saved, and it is due again after the backoff.
+   - **success:** `status = 'ok'`, and the destination's `last_delivery_at` is set.
+   - **failure** (it threw, returned `false`, or timed out): `attempts + 1`, the error message is saved on the delivery and as the destination's `last_error`, and it is due again after the backoff.
    - **15th failure:** `status = 'failed'`. It is not tried again.
 
 If cloudfriend shuts down while an action runs, the action's `signal` fires and the claim is handed back: the delivery is due again at once on the next start. If the process dies instead, the delivery is due again when its claim runs out, a minute after it started.
 
-If a flag is deleted while its deliveries are pending, they are deleted with it. If an action is no longer enabled (for example its env var was removed and cloudfriend restarted), its pending deliveries are marked `failed` on their next run.
+If a flag is deleted while its deliveries are pending, they are deleted with it. If its destination is deleted, or an env-configured action is no longer enabled (for example its env var was removed and cloudfriend restarted), its pending deliveries are marked `failed` on their next run, without retrying.
 
 ## Retries
 
@@ -106,7 +108,7 @@ Any `2xx` reply counts as delivered. Anything else is retried.
 
 ## Choosing actions
 
-By default every action whose `enabled()` says yes is used. To pick explicitly, set `CLOUDFRIEND_ACTIONS=slack,webhook`. The list applies to flags created after cloudfriend starts with it. Deliveries already in the table keep the actions they were created with.
+Destinations are added per workspace in the dashboard or API. For the default workspace's env-configured actions, every action whose `enabled()` says yes is used by default; to pick explicitly, set `CLOUDFRIEND_ACTIONS=slack,webhook`. The list applies to flags created after cloudfriend starts with it. Deliveries already in the table keep the destinations they were created with.
 
 ## Action adapter: `run`
 

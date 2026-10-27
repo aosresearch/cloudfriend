@@ -55,9 +55,9 @@ A `202` means the transaction holding the request's row has committed. How durab
 
 ## Backpressure
 
-If the worker falls behind (the model is down, or a burst is bigger than parsing can keep up with), unparsed requests pile up in `queue`. Intake keeps a count of them in memory, so checking it costs nothing per request.
+If the worker falls behind (the model is down, or a burst is bigger than parsing can keep up with), unparsed requests pile up in `queue`. Each workspace's count of them is kept in `workspaces.backlog`: the intake commit adds to it and parse subtracts from it, each in its own transaction, so it stays right when web and worker run in different processes. Intake reads it from a cache that is refreshed at most once a second, so checking it costs nothing per request. The same commit counts the accepted requests in `usage`.
 
-Once the count reaches `CLOUDFRIEND_MAX_QUEUE` (one million by default), new requests get `503` with `Retry-After: 5` instead of growing the database without limit. Senders that retry (Sentry, PostHog and most webhook senders do) deliver the event later. `GET /healthz` reports the current count as `queued`.
+Once a workspace's count, plus its requests waiting for a commit, reaches `CLOUDFRIEND_MAX_QUEUE` (one million by default), its new requests get `503` with `Retry-After: 5` instead of growing the database without limit. Other workspaces are not affected. Senders that retry (Sentry, PostHog and most webhook senders do) deliver the event later. `GET /healthz` reports the current count as `queued`.
 
 Note that the queue only holds requests that are not yet parsed. Parsed events waiting for the model sit in `events` and do not count toward the limit.
 

@@ -80,18 +80,18 @@ An event is committed to Postgres before cloudfriend replies.
 
 1. The request's secret is checked, along with the source adapter's `verify()` if it has one.
 2. The raw bytes are appended to a `queue` table. A writer loop collects requests for about 2 ms and inserts them with one multi-row `INSERT` in one transaction, so one commit covers the batch. Each request waits for the commit that holds its row, then gets `202`.
-3. If the write fails or the queue is over its limit, cloudfriend replies `503` with `Retry-After`, so the sender retries.
+3. If the write fails or the workspace's queue is over its limit, cloudfriend replies `503` with `Retry-After`, so the sender retries.
 
 There is no JSON parsing and no model call in the request path.
 
 ### The worker
 
-Three stages run in the background. Each one commits its own result, so a crash at any point loses nothing.
+Three stages run in the background. Each one commits its own result, so a crash at any point loses nothing. Parse and decide run per workspace, in the one worker that holds the workspace's lease; delivery is shared by all workers.
 
 | Stage | Reads | Writes (in one transaction) |
 | --- | --- | --- |
 | parse | queue rows with status `new` | events with their classifier score, route and feature vector. Dropped events are marked decided. Then the queue row is set to `done` (or `failed` if the adapter threw) |
-| decide | undecided events, once 100 are waiting or the oldest has waited 10 s | flags, one pending delivery per action, training labels, and marks the events decided |
+| decide | undecided events, once 100 are waiting or the oldest has waited 10 s | flags, one pending delivery per destination, training labels, and marks the events decided with Jev's judgment, flag and call |
 | deliver | pending deliveries that are due | `ok`, or a retry with backoff (5 s doubling up to 1 h, 15 attempts) |
 
 After a crash or restart, anything not yet done is picked up again. No transaction is held open during a model call or a delivery. Delivery to actions is at-least-once. Each flag has a stable `id`, sent to webhooks as `x-cloudfriend-flag-id`, which receivers can use to ignore repeats. If the decider fails (model down, bad key), its events stay queued and the call is retried with backoff up to 5 minutes.
@@ -129,7 +129,7 @@ Each event Jev judges relevant or benign becomes a label with the feature vector
 - **Events** are kept for `CLOUDFRIEND_RETENTION` (7 days by default), then deleted by a cleanup job that works in chunks of 1000 rows. Events the decider hasn't seen yet are never deleted.
 - **Flags** are kept until you delete them. Each flag lists its `event_ids`, its queue `status` and the `users` found in its events.
 - **Labels** and **models** are kept until you delete them. Labels carry their own copy of the event and its features, so they outlive event retention.
-- Everything above lives in Postgres, so a replaced container loses nothing. Every row carries a `workspace_id`; this release has a single workspace.
+- Everything above lives in Postgres, so a replaced container loses nothing. Every row carries a `workspace_id`. A self-hosted install has the one workspace `ws_default`.
 - Trained model files are written under `/data/models`. Mounting a volume at `/data` keeps a promoted model across a replaced container; without one, the built-in model is used until the next promotion. The image runs as the `node` user (uid 1000), so a bind-mounted directory must be writable by that user.
 
 ## Configuration
@@ -139,6 +139,7 @@ Everything is set through environment variables.
 | Variable | Default | |
 | --- | --- | --- |
 | `CLOUDFRIEND_ADMIN_KEY` | *(unset)* | Key for the admin API. The admin API is disabled until this is set. It can never be used to send events. |
+| `CLOUDFRIEND_ROLE` | `all` | `all` runs HTTP and the worker. `web` runs HTTP and intake only. `worker` runs the worker and serves only `/healthz`. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | |
 | `CLOUDFRIEND_DATABASE_URL` | *(required)* | Postgres connection string, e.g. `postgres://user:password@host:5432/cloudfriend`. `DATABASE_URL` is used if this is unset. cloudfriend exits at boot if neither is set. |
 | `CLOUDFRIEND_DB_POOL` | `10` | Connections to Postgres per process. |
@@ -146,14 +147,20 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_BATCH_SIZE` | `100` | Events per decider call. |
 | `CLOUDFRIEND_BATCH_WAIT` | `10s` | Longest an event waits for its batch to fill. |
 | `CLOUDFRIEND_DECIDER` | `jev` | Which decider adapter to use. |
-| `CLOUDFRIEND_DECIDER_CONCURRENCY` | `2` | Decider calls in flight at once. |
+| `CLOUDFRIEND_DECIDER_CONCURRENCY` | `2` | Decider calls in flight at once per worker, shared fairly between workspaces. |
+| `CLOUDFRIEND_JEV_DAILY_BUDGET_USD` | *(unset: no cap)* | Decider spend per workspace per UTC day. Once reached, the classifier decides alone until the day ends. A workspace's `jev_budget_usd` setting overrides it. |
 | `CLOUDFRIEND_ACTIONS` | *(every configured action)* | Comma-separated list, e.g. `slack,webhook`. |
 | `CLOUDFRIEND_RETENTION` | `7d` | How long events are kept. |
-| `CLOUDFRIEND_MAX_QUEUE` | `1000000` | Unparsed requests allowed before ingest replies `503`. |
+| `CLOUDFRIEND_MAX_QUEUE` | `1000000` | Unparsed requests per workspace allowed before ingest replies `503`. |
 | `CLOUDFRIEND_MAX_BODY_BYTES` | `1048576` | Larger bodies get `413`. |
 | `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | Group-commit window. |
 | `CLOUDFRIEND_ADAPTER_DIR` | *(unset)* | Extra adapters to load without rebuilding the image (see below). |
 | `CLOUDFRIEND_LOG` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
+| **Workers** | | |
+| `CLOUDFRIEND_LEASE_TTL` | `30s` | How long a worker's hold on a workspace lasts without renewal. After a crash, another worker takes over once it runs out. |
+| `CLOUDFRIEND_LEASE_RENEW` | `10s` | How often a worker renews its leases. Must be shorter than the TTL. |
+| `CLOUDFRIEND_MAX_WORKSPACES_PER_WORKER` | `200` | Most workspaces one worker holds at once. |
+| `CLOUDFRIEND_IDLE_UNLOAD` | `10m` | A workspace with no work for this long is saved, released and dropped from the worker's memory. |
 | **Triage** | | |
 | `CLOUDFRIEND_TRIAGE` | `on` | `off` sends every event to the decider, as v0 did. |
 | `CLOUDFRIEND_MODEL` | | Model file to load. By default the last promoted model (`/data/models/active.json`), else the built-in `models/base.json`. |
@@ -166,7 +173,7 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template, at one severity, is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |
 | **Training** | | |
-| `CLOUDFRIEND_RETRAIN_INTERVAL` | `24h` | How often to retrain if enough labels arrived. `off` disables. |
+| `CLOUDFRIEND_RETRAIN_INTERVAL` | `24h` | How often to retrain if enough labels arrived. `off` disables. Only runs while there is one workspace, since the model serves all of them. |
 | `CLOUDFRIEND_RETRAIN_MIN_LABELS` | `200` | New labels needed before a scheduled run. |
 | `CLOUDFRIEND_HUMAN_LABEL_WEIGHT` | `5` | Weight of a person's label relative to Jev's. |
 | `CLOUDFRIEND_RECALL_TARGET` | `0.995` | Share of held-out relevant events a new model must still send to Jev. |
@@ -187,10 +194,10 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_DECIDER_INSTRUCTIONS` | | Extra context for the model, e.g. "Checkout and billing matter most; ignore staging." |
 | `CLOUDFRIEND_EVENT_CHARS` | `1500` | Most characters of each event shown to the model. |
 | **Slack action** | | |
-| `SLACK_WEBHOOK_URL` | | Slack incoming webhook. The action is enabled when this is set. |
+| `SLACK_WEBHOOK_URL` | | Slack incoming webhook. On first boot it becomes a destination of the default workspace, if that has none yet. |
 | `SLACK_MIN_SEVERITY` | `low` | Only post flags at or above this severity. |
 | **Webhook action** | | |
-| `WEBHOOK_URL` | | Receives `POST {"flag": ..., "events": [...]}`. The action is enabled when this is set. |
+| `WEBHOOK_URL` | | Receives `POST {"flag": ..., "events": [...]}`. Becomes a destination of the default workspace like `SLACK_WEBHOOK_URL`. |
 | `WEBHOOK_SECRET` | | Adds `x-cloudfriend-signature: sha256=<HMAC of body>`. |
 | **Sentry source** | | |
 | `SENTRY_CLIENT_SECRET` | | When set, the `Sentry-Hook-Signature` header is required and checked. |
@@ -424,4 +431,4 @@ Samples of Jev's judgments and of what stage 1 drops are in `benchmarks/review/`
 
 ## Left out on purpose
 
-These are left out on purpose: a UI (the API serves the queue), a rules engine, budgets, and users and roles. They can be added when people ask for them.
+These are left out on purpose: a rules engine, and retraining the classifier per workspace. They can be added when people ask for them.
