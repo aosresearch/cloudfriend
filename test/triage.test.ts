@@ -608,7 +608,10 @@ describe("training split and gate", () => {
     assert.equal(gate(m(1, 0.1), m(1, 0.3), 0.995).ok, true);
     assert.equal(gate(m(1, 0.4), m(1, 0.3), 0.995).ok, false, "meets recall but sends Jev more");
     assert.equal(gate(m(1, 0.4), m(0.9, 0.3), 0.995).ok, true, "replaces an incumbent that fails recall");
-    assert.equal(gate(m(1, 0.1), null, 0.995, { must_reach: 10, reached: 9 }).ok, false, "every safety must-reach item must pass");
+    const suite = (passed: boolean) => ({ passed, scenarios: 3, must_reach: 10, reached: passed ? 10 : 9, reached_by_score: 4, failures: passed ? [] : [{ scenario: "new-error", message: "x", route: "drop" }] });
+    assert.equal(gate(m(1, 0.1), null, 0.995, { regression: suite(false) }).ok, false, "every regression scenario must pass");
+    assert.equal(gate(m(1, 0.1), null, 0.995, { regression: suite(true), safety: { must_reach: 10, reached: 3 } }).ok, true, "the score-only safety set is a diagnostic");
+    assert.match(gate(m(1, 0.1), null, 0.995, { regression: suite(true), safety: { must_reach: 10, reached: 3 } }).reason, /safety set by score 3\/10/);
   });
 });
 

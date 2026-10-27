@@ -201,6 +201,25 @@ export class RoutingState {
     for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) this.escalated.add(t, now);
   }
 
+  /**
+   * A person's verdict on a kind of event, applied at once. "Escalate" protects the template,
+   * revokes its earned suppression and clears any cached "no"; "don't" retires the protection
+   * and earns suppression in the context given. `cacheNo` also caches a "no" for the key.
+   */
+  personSaid(template: string, severity: string | undefined, escalate: boolean, now: number, ctx: { rate?: number; serviceErrors?: number } = {}, cacheNo = false): void {
+    const key = verdictKey({ template, severity });
+    if (escalate) {
+      this.cache.deleteTemplate(template);
+      this.escalated.add(template, now);
+      this.ledger.relevantTemplate(template, now);
+      this.ledger.relevant(key, now);
+      return;
+    }
+    if (cacheNo) this.cache.set(key, false, now);
+    this.escalated.retire(template);
+    this.ledger.benign(key, now, ctx.rate ?? 0, ctx.serviceErrors ?? 0);
+  }
+
   /** Rebuild escalations and earned suppression from stored labels (oldest first). */
   rebuild(labels: Iterable<LabelFact>): void {
     for (const l of labels) {

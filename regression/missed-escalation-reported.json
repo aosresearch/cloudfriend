@@ -1,0 +1,45 @@
+{
+ "name": "missed-escalation-reported",
+ "situation": "A person reports a missed escalation: Sock Shop's carts warnings were judged benign and suppressed, then someone says they mattered. The next ones must reach Jev.",
+ "jev": [
+  {
+   "match": "never",
+   "relevance": "relevant"
+  }
+ ],
+ "steps": [
+  {
+   "at": "0s",
+   "every": "30s",
+   "events": [
+    {
+     "data": {
+      "service": "carts",
+      "level": "warn",
+      "message": "Cart {i} not found, creating a new one"
+     },
+     "repeat": 20
+    }
+   ]
+  },
+  {
+   "human": {
+    "match": "Cart .* not found",
+    "escalate": true
+   }
+  },
+  {
+   "at": "11m",
+   "events": [
+    {
+     "data": {
+      "service": "carts",
+      "level": "warn",
+      "message": "Cart 9001 not found, creating a new one"
+     },
+     "must_reach": true
+    }
+   ]
+  }
+ ]
+}

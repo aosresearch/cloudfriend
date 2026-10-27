@@ -1,0 +1,97 @@
+{
+ "name": "returning-after-expiry",
+ "situation": "A previously escalated problem returns after its seven-day protection expired: Train Ticket's TokenException, escalated on day 0, quiet for a week, back on day 8.",
+ "jev": [
+  {
+   "match": "TokenException",
+   "relevance": "relevant"
+  }
+ ],
+ "steps": [
+  {
+   "at": "0s",
+   "every": "2s",
+   "events": [
+    {
+     "data": {
+      "service": "ts-travel2-service",
+      "level": "error",
+      "message": "edu.fudan.common.exception.TokenException: Token is not proper, user {i}"
+     },
+     "repeat": 30
+    }
+   ]
+  },
+  {
+   "at": "1h",
+   "every": "2s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request started",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request complete",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "currencyservice",
+      "level": "info",
+      "message": "conversion request successful"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "message": "serving product page",
+      "product": "{i}"
+     },
+     "repeat": 225
+    }
+   ]
+  },
+  {
+   "at": "8d",
+   "events": [
+    {
+     "data": {
+      "service": "ts-travel2-service",
+      "level": "error",
+      "message": "edu.fudan.common.exception.TokenException: Token is not proper, user {i}"
+     },
+     "must_reach": true
+    }
+   ]
+  },
+  {
+   "at": "11521m",
+   "every": "5s",
+   "events": [
+    {
+     "data": {
+      "service": "ts-travel2-service",
+      "level": "error",
+      "message": "edu.fudan.common.exception.TokenException: Token is not proper, user {i}"
+     },
+     "repeat": 5,
+     "must_reach": true
+    }
+   ]
+  }
+ ]
+}

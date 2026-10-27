@@ -9,7 +9,6 @@
 import { tx, type DB } from "./db.ts";
 import { getFlagRow } from "./store.ts";
 import { Featurizer, FEATURIZER_VERSION } from "./triage/features.ts";
-import { verdictKey } from "./triage/cascade.ts";
 import { encodeFeatures, type Triage } from "./triage/runtime.ts";
 
 export type FlagVerdict = "confirmed" | "false_positive";
@@ -34,19 +33,8 @@ const kindsOf = (db: DB, ids: number[]) =>
  * cached "no"; "don't" retires the protection and earns suppression in the current context.
  */
 function humanVerdict(triage: Triage, k: { template: string; severity: string | null }, escalate: boolean, now: number, cacheNo: boolean): void {
-  const key = verdictKey({ template: k.template, severity: k.severity ?? undefined });
-  const r = triage.routing;
-  if (escalate) {
-    r.cache.deleteTemplate(k.template);
-    r.escalated.add(k.template, now);
-    r.ledger.relevantTemplate(k.template, now);
-    r.ledger.relevant(key, now);
-    return;
-  }
   const ctx = triage.featurizer.context(k.template);
-  if (cacheNo) r.cache.set(key, false, now);
-  r.escalated.retire(k.template);
-  r.ledger.benign(key, now, ctx?.last_1m ?? 0, ctx?.service_errors_10m ?? 0);
+  triage.routing.personSaid(k.template, k.severity ?? undefined, escalate, now, { rate: ctx?.last_1m, serviceErrors: ctx?.service_errors_10m }, cacheNo);
 }
 
 export function flagFeedback(db: DB, triage: Triage | null, flagId: string, verdict: FlagVerdict, note: string | null) {

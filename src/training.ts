@@ -8,8 +8,8 @@
 //               hundred labels refine it rather than replace it) and picks thresholds
 //   3. gate     hard requirements, not a comparison (`gate`): the candidate must still send at
 //               least the recall target of the accept part's escalations to Jev (by its score,
-//               or by the escalated-template rule as it stood at the time), and every
-//               "must reach Jev" event of the human safety set. Only then does a lower Jev load
+//               or by the routing rules as they stood at the time), and pass every
+//               regression scenario (scenarios.ts). Only then does a lower Jev load
 //               count. Labels only exist for events that got past the classifier, so the drop
 //               threshold is also checked on recent unlabelled traffic (`limitThreshold`).
 //   4. shadow   a candidate that passes runs beside the active model for
@@ -31,6 +31,7 @@ import { Classifier, type ClassifierFile } from "./triage/classifier.ts";
 import { FEATURE_NAMES, FEATURIZER_VERSION } from "./triage/features.ts";
 import { verdictKey } from "./triage/cascade.ts";
 import { RoutingState, type RoutingOptions } from "./triage/routing.ts";
+import { BUILTIN_SCENARIOS, loadScenarios, runSuite } from "./triage/scenarios.ts";
 import { BUILTIN_MODEL, decodeFeatures, type Triage } from "./triage/runtime.ts";
 
 export const TRAIN_SCRIPT = path.join(import.meta.dirname, "..", "ml", "train.py");
@@ -55,6 +56,10 @@ export interface TrainOptions {
   escalatedMemoryMs?: number;
   /** CLOUDFRIEND_SUPPRESSION_TTL: 0 means the classifier may drop without an earned benign judgment. */
   suppressionTtlMs?: number;
+  verdictTtlMs?: number;
+  novelGuard?: boolean;
+  /** CLOUDFRIEND_REGRESSION_SUITE: a directory of extra scenarios, run with the built-in pack. */
+  regressionSuite?: string | null;
 }
 
 /** One retrain may cut the share of live events sent to Jev to no less than this fraction. */
@@ -65,8 +70,10 @@ export interface TrainReport {
   status: "promoted" | "shadow" | "rejected" | "skipped" | "failed";
   reason: string;
   labels?: { total: number; positives: number; human: number; fit: number; calibrate: number; accept: number };
-  /** Must-reach events of the human safety set the candidate would still send to Jev. */
+  /** Must-reach events of the human safety set the candidate would still send to Jev by score (a diagnostic). */
   safety?: { must_reach: number; reached: number } | null;
+  /** The regression scenarios, run with the candidate through the complete pipeline. */
+  regression?: RegressionSummary;
   candidate?: Metrics;
   active?: Metrics | null;
   model?: Pick<ClassifierFile, "drop_below" | "threshold" | "trained_at"> & { path: string; trees: number };
@@ -244,8 +251,24 @@ export class Trainer {
       const aMetrics = active ? evaluate(active, accept, this.#o.humanWeight, known) : null;
       const safety = loadSafetySet(this.#o.safetySet ?? null);
       const safe = safety ? { must_reach: safety.length, reached: safety.filter((x) => candidate.score(x) >= candidate.file.drop_below).length } : null;
-      const activeSafe = safety && active ? safety.every((x) => active.score(x) >= active.file.drop_below) : null;
-      const verdict = gate(cMetrics, aMetrics, this.#o.recall, safe, activeSafe);
+      const suite = await runSuite(loadScenarios(BUILTIN_SCENARIOS, this.#o.regressionSuite), candidate, {
+        routing: {
+          verdictTtlMs: this.#o.verdictTtlMs ?? 15 * 60_000,
+          escalatedTtlMs: this.#o.knownTtlMs ?? 0,
+          escalatedMemoryMs: this.#o.escalatedMemoryMs,
+          suppressionTtlMs: this.#o.suppressionTtlMs ?? 0,
+        },
+        novelGuard: this.#o.novelGuard ?? true,
+      });
+      const regression: RegressionSummary = {
+        passed: suite.passed,
+        scenarios: suite.scenarios,
+        must_reach: suite.must_reach,
+        reached: suite.reached,
+        reached_by_score: suite.reached_by_score,
+        failures: suite.failures.slice(0, 20).map((f) => ({ scenario: f.scenario, message: f.message, route: f.route })),
+      };
+      const verdict = gate(cMetrics, aMetrics, this.#o.recall, { regression, safety: safe });
       const model = { path: out, trees: candidate.gbdt.numTrees, drop_below: candidate.file.drop_below, threshold: candidate.file.threshold, trained_at: candidate.file.trained_at };
       const shadow = (this.#o.shadowPeriodMs ?? 0) > 0;
       const report: TrainReport = {
@@ -254,6 +277,7 @@ export class Trainer {
         reason: dryRun ? `dry run: ${verdict.reason}` : verdict.ok && shadow ? `${verdict.reason}; running in shadow before promotion` : verdict.reason,
         labels,
         safety: safe,
+        regression,
         candidate: cMetrics,
         active: aMetrics,
         model,
@@ -347,36 +371,55 @@ export class Trainer {
   }
 }
 
+/** What the regression scenarios (scenarios.ts) said about a candidate. */
+export interface RegressionSummary {
+  passed: boolean;
+  scenarios: number;
+  must_reach: number;
+  reached: number;
+  reached_by_score: number;
+  failures: { scenario: string; message: string; route: string }[];
+}
+
 /**
  * Hard requirements first, then workload:
  *   - at least `recallTarget` of the accept part's escalations (by weight) still reach Jev,
- *     with no slack and no relaxing to what the active model manages;
- *   - every "must reach Jev" event of the safety set reaches Jev;
+ *     by score or by the routing rules as they stood, with no slack and no relaxing to what
+ *     the active model manages;
+ *   - every must-reach event of every regression scenario reaches Jev through the complete
+ *     pipeline;
  *   - then it must not send Jev more than the active model does, unless the active model
  *     fails the requirements itself.
+ * The safety set's score-only result is reported, not required: the rules, which it leaves
+ * out, are part of what reaches Jev.
  */
 export function gate(
   candidate: Metrics,
   active: Metrics | null,
   recallTarget: number,
-  safety: { must_reach: number; reached: number } | null = null,
-  activeSafe: boolean | null = null,
+  checks: { regression?: RegressionSummary | null; safety?: { must_reach: number; reached: number } | null } = {},
 ): { ok: boolean; reason: string } {
+  const { regression, safety } = checks;
+  const notes = [
+    ...(candidate.recall_by_score === undefined ? [] : [`${pct(candidate.recall_by_score)} by score alone`]),
+    ...(regression ? [`regression scenarios ${regression.reached}/${regression.must_reach} (${regression.reached_by_score} by score alone)`] : []),
+    ...(safety ? [`safety set by score ${safety.reached}/${safety.must_reach}`] : []),
+  ].join(", ");
   if (candidate.recall_at_drop < recallTarget) {
-    const byScore = candidate.recall_by_score === undefined ? "" : ` (${pct(candidate.recall_by_score)} by score alone)`;
-    return { ok: false, reason: `candidate sends ${pct(candidate.recall_at_drop)} of the accept set's escalations to Jev${byScore}; it must send at least ${pct(recallTarget)}` };
+    return { ok: false, reason: `candidate sends ${pct(candidate.recall_at_drop)} of the accept set's escalations to Jev (${notes}); it must send at least ${pct(recallTarget)}` };
   }
-  if (safety && safety.reached < safety.must_reach) {
-    return { ok: false, reason: `candidate would drop ${safety.must_reach - safety.reached} of ${safety.must_reach} must-reach events of the safety set` };
+  if (regression && !regression.passed) {
+    const names = [...new Set(regression.failures.map((f) => f.scenario))];
+    return { ok: false, reason: `candidate fails ${names.length} regression scenario(s): ${names.slice(0, 5).join(", ")}; ${regression.must_reach - regression.reached} must-reach events would not reach Jev` };
   }
-  if (!active) return { ok: true, reason: "no active model; requirements met" };
-  const activeOk = active.recall_at_drop >= recallTarget && activeSafe !== false;
+  if (!active) return { ok: true, reason: `no active model; requirements met (${notes})` };
+  const activeOk = active.recall_at_drop >= recallTarget;
   if (activeOk && candidate.forwarded_share > active.forwarded_share + 1e-9) {
     return { ok: false, reason: `requirements met, but Jev would see ${pct(candidate.forwarded_share)} of events vs ${pct(active.forwarded_share)} now` };
   }
   return {
     ok: true,
-    reason: `recall ${pct(candidate.recall_at_drop)}${candidate.recall_by_score === undefined ? "" : `, ${pct(candidate.recall_by_score)} by score alone`} (target ${pct(recallTarget)})${safety ? `, safety set ${safety.reached}/${safety.must_reach}` : ""}; Jev would see ${pct(candidate.forwarded_share)} of events vs ${pct(active.forwarded_share)}${activeOk ? "" : " (the active model fails the requirements)"}`,
+    reason: `recall ${pct(candidate.recall_at_drop)} (target ${pct(recallTarget)}; ${notes}); Jev would see ${pct(candidate.forwarded_share)} of events vs ${pct(active.forwarded_share)}${activeOk ? "" : " (the active model fails the requirements)"}`,
   };
 }
 

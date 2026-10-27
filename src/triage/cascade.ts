@@ -71,8 +71,13 @@ export function severityBucket(level: number, status: number): string {
   return Number.isNaN(status) ? l : `${l}${Math.floor(status / 100)}`;
 }
 
-/** A cached "no" stops applying once the template runs this many times faster than when it was given. */
-export const NEGATIVE_BURST = 5;
+/**
+ * A cached "no" stops applying once the template runs twice as fast as when it was given, and
+ * at least 5 more a minute: a growing failure gets a fresh look at each doubling, which costs
+ * a few calls per burst. (Earned suppression, which lasts longer, uses 5x: routing.ts.)
+ */
+export const NEGATIVE_GROWTH = 2;
+export const NEGATIVE_GROWTH_MIN = 5;
 
 export interface Verdict {
   escalate: boolean;
@@ -97,7 +102,8 @@ export class VerdictCache {
   get(key: string, now: number, rate?: number): Verdict | undefined {
     const v = this.#map.get(key);
     if (!v) return undefined;
-    const burst = !v.escalate && rate !== undefined && rate > NEGATIVE_BURST * Math.max(v.rate ?? 0, 1);
+    const base = v.rate ?? 0;
+    const burst = !v.escalate && rate !== undefined && rate > Math.max(NEGATIVE_GROWTH * base, base + NEGATIVE_GROWTH_MIN);
     if (v.until < now || burst) {
       this.#map.delete(key);
       return undefined;

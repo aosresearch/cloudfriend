@@ -1,0 +1,72 @@
+{
+ "name": "benign-to-error",
+ "situation": "An existing benign message becomes an error: the same 'request complete' line, judged routine at info/200, comes back at error/500.",
+ "jev": [
+  {
+   "match": "\"status\":500",
+   "relevance": "relevant"
+  }
+ ],
+ "steps": [
+  {
+   "at": "0s",
+   "every": "2s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request started",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request complete",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "currencyservice",
+      "level": "info",
+      "message": "conversion request successful"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "message": "serving product page",
+      "product": "{i}"
+     },
+     "repeat": 225
+    }
+   ]
+  },
+  {
+   "at": "31m",
+   "every": "1s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "error",
+      "status": 500,
+      "message": "request complete",
+      "http.req.path": "/cart/checkout"
+     },
+     "must_reach": true,
+     "repeat": 3
+    }
+   ]
+  }
+ ]
+}

@@ -5,6 +5,7 @@
 //   cloudfriend secrets revoke <id>
 //   cloudfriend train [--dry-run]
 //   cloudfriend model
+//   cloudfriend regression [--model <file>]
 //   cloudfriend labels import <file.ndjson>
 //   cloudfriend labels stats
 import fs from "node:fs";
@@ -13,6 +14,7 @@ import { parseArgs } from "node:util";
 import { importLabels, type ImportedLabel } from "./feedback.ts";
 import { Trainer } from "./training.ts";
 import { BUILTIN_MODEL, Triage } from "./triage/runtime.ts";
+import { BUILTIN_SCENARIOS, loadScenarios, runSuite } from "./triage/scenarios.ts";
 import { loadConfig } from "./config.ts";
 import { dbPath, openDb } from "./db.ts";
 import { errMsg } from "./log.ts";
@@ -26,6 +28,8 @@ const USAGE = `Usage:
   cloudfriend train [--dry-run]                       train a classifier on the labels now; a
                                                       running server picks up a promoted model
   cloudfriend model                                   show the active classifier and past runs
+  cloudfriend regression [--model <file>]             run the regression scenarios through the
+                                                      whole pipeline with a model (default: active)
   cloudfriend labels import <file.ndjson>             add labelled events, one JSON per line:
                                                       {"source","data","received_at","escalate"}
   cloudfriend labels stats                            count labels by source and verdict
@@ -40,6 +44,7 @@ export async function cli(argv: string[]): Promise<number> {
       source: { type: "string" },
       json: { type: "boolean" },
       "dry-run": { type: "boolean" },
+      model: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -54,7 +59,7 @@ export async function cli(argv: string[]): Promise<number> {
     await main();
     return -1; // keep running
   }
-  if (!["secrets", "train", "model", "labels"].includes(cmd) || ((cmd === "secrets" || cmd === "labels") && !sub)) {
+  if (!["secrets", "train", "model", "labels", "regression"].includes(cmd) || ((cmd === "secrets" || cmd === "labels") && !sub)) {
     console.error(USAGE);
     return 2;
   }
@@ -124,7 +129,7 @@ async function mlCommand(
   cmd: string,
   sub: string | undefined,
   arg: string | undefined,
-  values: { json?: boolean; "dry-run"?: boolean },
+  values: { json?: boolean; "dry-run"?: boolean; model?: string },
   config: ReturnType<typeof loadConfig>,
   db: ReturnType<typeof openDb>,
 ): Promise<number> {
@@ -149,7 +154,16 @@ async function mlCommand(
   }
   const triage = new Triage(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
   const active = path.join(config.dataDir, "models", "active.json");
-  for (const f of [config.modelPath, active, BUILTIN_MODEL]) if (f && fs.existsSync(f) && triage.load(f)) break;
+  for (const f of [values.model, config.modelPath, active, BUILTIN_MODEL]) if (f && fs.existsSync(f) && triage.load(f)) break;
+  if (cmd === "regression") {
+    if (!triage.classifier) throw new Error("no model to test");
+    const r = await runSuite(loadScenarios(BUILTIN_SCENARIOS, config.regressionSuite), triage.classifier, {
+      routing: { verdictTtlMs: config.verdictTtlMs, escalatedTtlMs: config.knownTtlMs, escalatedMemoryMs: config.escalatedMemoryMs, suppressionTtlMs: config.suppressionTtlMs },
+      novelGuard: config.novelGuard,
+    });
+    out({ model: triage.modelPath, passed: r.passed, scenarios: r.scenarios, must_reach: r.must_reach, reached: r.reached, reached_by_score: r.reached_by_score, failures: r.failures });
+    return r.passed ? 0 : 1;
+  }
   if (cmd === "model") {
     const history = db.prepare("SELECT id, created_at, status, labels, report FROM models ORDER BY created_at DESC LIMIT 10").all() as { report: string; status: string }[];
     const f = triage.classifier?.file;
@@ -167,6 +181,9 @@ async function mlCommand(
     recall: config.recallTarget,
     shadowPeriodMs: config.shadowPeriodMs,
     safetySet: config.safetySet,
+    regressionSuite: config.regressionSuite,
+    verdictTtlMs: config.verdictTtlMs,
+    novelGuard: config.novelGuard,
     incidentWindowMs: config.incidentWindowMs,
     knownTtlMs: config.knownTtlMs,
     escalatedMemoryMs: config.escalatedMemoryMs,

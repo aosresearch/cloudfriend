@@ -1,0 +1,97 @@
+{
+ "name": "isolated-to-sustained",
+ "situation": "An isolated, handled error becomes a sustained failure: 'failed to retrieve ads' shows up once every ten minutes (judged benign: ads are optional), then 60 times a minute when the ad service goes down. Thirty seconds into the outage, while it is clearly sustained, Jev must get another look.",
+ "jev": [
+  {
+   "match": "failed to retrieve ads",
+   "relevance": "relevant",
+   "min_rate": 10
+  }
+ ],
+ "steps": [
+  {
+   "at": "0s",
+   "every": "10m",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "warn",
+      "message": "failed to retrieve ads",
+      "error": "rpc error: code = Unavailable desc = connection error"
+     },
+     "repeat": 12
+    }
+   ]
+  },
+  {
+   "at": "121m",
+   "every": "2s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request started",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 150
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request complete",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 150
+    },
+    {
+     "data": {
+      "service": "currencyservice",
+      "level": "info",
+      "message": "conversion request successful"
+     },
+     "repeat": 150
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "message": "serving product page",
+      "product": "{i}"
+     },
+     "repeat": 150
+    }
+   ]
+  },
+  {
+   "at": "142m",
+   "every": "1s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "warn",
+      "message": "failed to retrieve ads",
+      "error": "rpc error: code = Unavailable desc = connection error"
+     },
+     "repeat": 30
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "warn",
+      "message": "failed to retrieve ads",
+      "error": "rpc error: code = Unavailable desc = connection error"
+     },
+     "repeat": 30,
+     "must_reach": true,
+     "reach": "any"
+    }
+   ]
+  }
+ ]
+}

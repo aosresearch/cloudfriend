@@ -1,0 +1,76 @@
+{
+ "name": "new-error",
+ "situation": "A genuinely new error: a service crashes with an error never seen before, after half an hour of routine traffic that has earned suppression.",
+ "jev": [
+  {
+   "match": "Failed to bind|BindException",
+   "relevance": "relevant"
+  }
+ ],
+ "steps": [
+  {
+   "at": "0s",
+   "every": "2s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request started",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "request complete",
+      "http.req.path": "/product/{i}"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "currencyservice",
+      "level": "info",
+      "message": "conversion request successful"
+     },
+     "repeat": 225
+    },
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "message": "serving product page",
+      "product": "{i}"
+     },
+     "repeat": 225
+    }
+   ]
+  },
+  {
+   "at": "31m",
+   "events": [
+    {
+     "data": {
+      "service": "adservice",
+      "level": "error",
+      "message": "Exception in thread \"main\" java.io.IOException: Failed to bind to address 0.0.0.0/0.0.0.0:9555"
+     },
+     "must_reach": true
+    },
+    {
+     "data": {
+      "service": "adservice",
+      "level": "error",
+      "message": "Caused by: java.net.BindException: Address in use"
+     },
+     "must_reach": true
+    }
+   ]
+  }
+ ]
+}

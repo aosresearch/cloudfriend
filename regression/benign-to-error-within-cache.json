@@ -1,0 +1,39 @@
+{
+ "name": "benign-to-error-within-cache",
+ "situation": "The previous review's reproduction: the error/500 version arrives seconds after the info/200 version was judged benign, while that verdict is still cached.",
+ "jev": [
+  {
+   "match": "\"status\":500",
+   "relevance": "relevant"
+  }
+ ],
+ "steps": [
+  {
+   "at": "0s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "info",
+      "status": 200,
+      "message": "POST /checkout"
+     }
+    }
+   ]
+  },
+  {
+   "at": "20s",
+   "events": [
+    {
+     "data": {
+      "service": "frontend",
+      "level": "error",
+      "status": 500,
+      "message": "POST /checkout"
+     },
+     "must_reach": true
+    }
+   ]
+  }
+ ]
+}

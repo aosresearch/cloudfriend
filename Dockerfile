@@ -20,6 +20,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY bin ./bin
 COPY models ./models
+COPY regression ./regression
 COPY ml/train.py ./ml/train.py
 RUN ln -s /app/bin/cloudfriend /usr/local/bin/cloudfriend \
  && mkdir -p /data && chown node:node /data

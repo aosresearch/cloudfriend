@@ -45,6 +45,7 @@ export interface Config {
   shadowPeriodMs: number;
   /** Directory with a human-labelled safety set the gate must pass, or null. */
   safetySet: string | null;
+  regressionSuite: string | null;
   incidentWindowMs: number;
   humanLabelWeight: number;
   recallTarget: number;
@@ -133,6 +134,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     retrainMinLabels: int(env, "CLOUDFRIEND_RETRAIN_MIN_LABELS", 200),
     shadowPeriodMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SHADOW_PERIOD ?? "") ? 0 : duration(env, "CLOUDFRIEND_SHADOW_PERIOD", "24h"),
     safetySet: env.CLOUDFRIEND_SAFETY_SET ? path.resolve(env.CLOUDFRIEND_SAFETY_SET) : null,
+    regressionSuite: env.CLOUDFRIEND_REGRESSION_SUITE ? path.resolve(env.CLOUDFRIEND_REGRESSION_SUITE) : null,
     incidentWindowMs: duration(env, "CLOUDFRIEND_INCIDENT_WINDOW", "30m"),
     humanLabelWeight: num(env, "CLOUDFRIEND_HUMAN_LABEL_WEIGHT", 5, 0, 1000),
     recallTarget: num(env, "CLOUDFRIEND_RECALL_TARGET", 0.995, 0.5, 1),
