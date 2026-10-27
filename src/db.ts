@@ -1,201 +1,118 @@
+// Postgres is the server's only stateful component. One small pool per process; the schema is
+// versioned SQL in src/migrations/, applied at boot.
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import pg from "pg";
+import { errMsg, log } from "./log.ts";
 
-export type DB = DatabaseSync;
+export type DB = pg.Pool;
+/** The pool, or a client inside a transaction: anything that can run a query. */
+export type Queryable = pg.Pool | pg.PoolClient;
 
-const SCHEMA = `
--- Raw request bodies, appended in the request path. status: new | done | failed
-CREATE TABLE IF NOT EXISTS queue (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  source      TEXT    NOT NULL,
-  received_at INTEGER NOT NULL,
-  body        BLOB    NOT NULL,
-  status      TEXT    NOT NULL DEFAULT 'new'
-);
-CREATE INDEX IF NOT EXISTS queue_status_id ON queue(status, id);
+/** This release has one workspace. Every data row carries its id; the next makes it many. */
+export const DEFAULT_WORKSPACE = "ws_default";
 
--- Parsed events. decided = 1 once the decider has looked at it.
-CREATE TABLE IF NOT EXISTS events (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  queue_id    INTEGER NOT NULL,
-  source      TEXT    NOT NULL,
-  received_at INTEGER NOT NULL,
-  data        TEXT    NOT NULL,
-  external_id TEXT,
-  type        TEXT,
-  group_key   TEXT,
-  decided     INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS events_pending ON events(id) WHERE decided = 0;
-CREATE INDEX IF NOT EXISTS events_received ON events(received_at);
-CREATE INDEX IF NOT EXISTS events_source_received ON events(source, received_at);
+const MIGRATIONS = path.join(import.meta.dirname, "migrations");
+/** Any constant works, as long as nothing else in the database takes the same advisory lock. */
+const MIGRATION_LOCK = 0x636c6f7564;
 
-CREATE TABLE IF NOT EXISTS flags (
-  id         TEXT    PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  reason     TEXT    NOT NULL,
-  severity   TEXT    NOT NULL,
-  event_ids  TEXT    NOT NULL,
-  decider    TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS flags_created ON flags(created_at);
-
--- Outbox: one row per (flag, action). status: pending | ok | failed
-CREATE TABLE IF NOT EXISTS deliveries (
-  flag_id         TEXT    NOT NULL REFERENCES flags(id) ON DELETE CASCADE,
-  action          TEXT    NOT NULL,
-  status          TEXT    NOT NULL DEFAULT 'pending',
-  attempts        INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER NOT NULL,
-  last_error      TEXT,
-  updated_at      INTEGER NOT NULL,
-  PRIMARY KEY (flag_id, action)
-);
-CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(next_attempt_at) WHERE status = 'pending';
-
--- Training labels for the classifier: what Jev or a person decided about an event, with the
--- feature vector the classifier saw. Copied out of events so labels outlive retention.
--- source: jev | human. A human label always replaces a Jev label, never the other way round.
-CREATE TABLE IF NOT EXISTS labels (
-  event_id           INTEGER PRIMARY KEY,
-  y                  INTEGER NOT NULL,
-  source             TEXT    NOT NULL,
-  route              TEXT,
-  score              REAL,
-  features           BLOB    NOT NULL,
-  featurizer_version INTEGER NOT NULL,
-  event_source       TEXT    NOT NULL,
-  received_at        INTEGER NOT NULL,
-  data               TEXT    NOT NULL,
-  note               TEXT,
-  created_at         INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS labels_created ON labels(created_at);
-
--- Every classifier cloudfriend trained or loaded. status: active | candidate | rejected | retired
-CREATE TABLE IF NOT EXISTS models (
-  id         TEXT    PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  path       TEXT    NOT NULL,
-  status     TEXT    NOT NULL,
-  labels     INTEGER NOT NULL DEFAULT 0,
-  report     TEXT    NOT NULL
-);
-
--- Every decider call that produced labels: the exact prompt and raw reply, for audit.
-CREATE TABLE IF NOT EXISTS decisions (
-  id         TEXT    PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  decider    TEXT    NOT NULL,
-  model      TEXT,
-  prompt     TEXT,
-  response   TEXT,
-  event_ids  TEXT    NOT NULL
-);
-
--- Small state that should survive restarts, e.g. the featurizer's template history.
-CREATE TABLE IF NOT EXISTS kv (
-  key        TEXT    PRIMARY KEY,
-  value      TEXT    NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS secrets (
-  id           TEXT    PRIMARY KEY,
-  name         TEXT    NOT NULL,
-  source       TEXT,
-  hash         TEXT    NOT NULL UNIQUE,
-  prefix       TEXT    NOT NULL,
-  created_at   INTEGER NOT NULL,
-  last_used_at INTEGER,
-  revoked_at   INTEGER
-);
-`;
+const INT8 = 20;
+const NUMERIC = 1700;
+/**
+ * bigint (ids, epoch ms, counts) and numeric (sums of them) come back as JS numbers rather
+ * than strings: every value cloudfriend stores in them stays far below 2^53.
+ */
+const types = {
+  getTypeParser: ((oid: number, format?: "text" | "binary") =>
+    oid === INT8 || oid === NUMERIC ? (v: string) => Number(v) : pg.types.getTypeParser(oid, format)) as pg.CustomTypesConfig["getTypeParser"],
+};
 
 export interface OpenOptions {
-  synchronous?: "FULL" | "NORMAL";
+  /** Connections in the pool (CLOUDFRIEND_DB_POOL). */
+  max?: number;
 }
 
-/** Open (and create if needed) the cloudfriend database. Use ":memory:" in tests. */
-export function openDb(file: string, opts: OpenOptions = {}): DB {
-  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = ${opts.synchronous ?? "FULL"};
-    PRAGMA busy_timeout = 5000;
-    PRAGMA foreign_keys = ON;
-  `);
-  db.exec(SCHEMA);
-  migrate(db);
+/** Connect, bring the schema up to date, and make sure the default workspace exists. */
+export async function openDb(url: string, opts: OpenOptions = {}): Promise<DB> {
+  const db = new pg.Pool({ connectionString: url, max: opts.max ?? 10, types });
+  // An idle client can lose its connection (a restarted server, a dropped socket). Without a
+  // listener that is an unhandled 'error' event and kills the process; the pool replaces it.
+  db.on("error", (err) => log.warn("idle database connection failed", { error: errMsg(err) }));
+  try {
+    await migrate(db);
+    await db.query("INSERT INTO workspaces (id, name, created_at) VALUES ($1, 'default', $2) ON CONFLICT (id) DO NOTHING", [DEFAULT_WORKSPACE, Date.now()]);
+  } catch (err) {
+    await db.end().catch(() => {});
+    throw err;
+  }
   return db;
 }
 
-/** Columns added after v0. Each is added once, to databases that don't have it yet. */
-const COLUMNS: [table: string, column: string, decl: string][] = [
-  // Triage: the classifier's score, where the event went, its template and feature vector.
-  // route: drop | jev | audit | auto | classifier, or NULL when no triage ran.
-  ["events", "score", "REAL"],
-  ["events", "route", "TEXT"],
-  ["events", "template", "TEXT"],
-  ["events", "features", "BLOB"],
-  ["events", "user_key", "TEXT"],
-  // The escalation queue: open -> acknowledged -> resolved, or confirmed / false_positive by feedback.
-  ["flags", "status", "TEXT NOT NULL DEFAULT 'open'"],
-  ["flags", "updated_at", "INTEGER"],
-  ["flags", "event_count", "INTEGER"],
-  ["flags", "users", "TEXT"],
-  ["flags", "note", "TEXT"],
-  // The labelled event's template, so a kind of event someone escalated keeps reaching Jev.
-  ["labels", "template", "TEXT"],
-  // How the label came about (threshold | audit | novel | known | follower | human | import),
-  // its training weight, and the decider call it came from.
-  ["labels", "provenance", "TEXT"],
-  ["labels", "weight", "REAL"],
-  ["labels", "decision_id", "TEXT"],
-  // Level and status class (e.g. e5): verdicts are cached per template and severity.
-  ["events", "severity", "TEXT"],
-  // What a model running in shadow would have scored the event, and the route it would have
-  // taken (audits aside): `drop` means it would not have reached Jev.
-  ["events", "shadow_score", "REAL"],
-  ["events", "shadow_route", "TEXT"],
-  // Which shadow model (its trained_at) those are from, and the featurizer version of `features`.
-  ["events", "shadow_model", "TEXT"],
-  ["events", "fv", "INTEGER"],
-  // Severity and context of a label's event when it was judged, so earned suppression and
-  // escalation memory can be rebuilt exactly after a restart (routing.ts).
-  ["labels", "severity", "TEXT"],
-  ["labels", "ctx_rate", "REAL"],
-  ["labels", "ctx_service_errors", "REAL"],
-];
-
-function migrate(db: DB): void {
-  for (const [table, column, decl] of COLUMNS) {
-    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
-    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
-  }
-  db.exec("CREATE INDEX IF NOT EXISTS events_user ON events(user_key) WHERE user_key IS NOT NULL");
-  db.exec("CREATE INDEX IF NOT EXISTS flags_status ON flags(status, created_at)");
-  db.exec("CREATE INDEX IF NOT EXISTS labels_template ON labels(template) WHERE template IS NOT NULL");
-}
-
-export function dbPath(dataDir: string): string {
-  return path.join(dataDir, "cloudfriend.db");
+/** The migration files, in order: `NNN_name.sql`. */
+export function migrations(): { version: number; name: string; sql: string }[] {
+  return fs
+    .readdirSync(MIGRATIONS)
+    .filter((f) => /^\d+_.+\.sql$/.test(f))
+    .sort()
+    .map((f) => ({ version: Number(f.split("_")[0]), name: f, sql: fs.readFileSync(path.join(MIGRATIONS, f), "utf8") }));
 }
 
 /**
- * Run `fn` in a write transaction. `fn` must be synchronous: a transaction never spans an
- * `await`, which is what lets one connection serve the whole process safely.
+ * Apply the migrations not applied yet, in one transaction under an advisory lock: when
+ * several processes boot at once, one migrates and the others wait, then find nothing to do.
  */
-export function tx<T>(db: DB, fn: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
+async function migrate(db: DB): Promise<void> {
+  await tx(db, async (c) => {
+    await c.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK]);
+    await c.query("CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
+    const done = new Set((await c.query<{ version: number }>("SELECT version FROM schema_migrations")).rows.map((r) => r.version));
+    for (const m of migrations()) {
+      if (done.has(m.version)) continue;
+      await c.query(m.sql);
+      await c.query("INSERT INTO schema_migrations (version, name) VALUES ($1, $2)", [m.version, m.name]);
+      log.info("database migrated", { migration: m.name });
+    }
+  });
+}
+
+/**
+ * Run `fn` in a transaction on a client of its own. Nothing inside may wait on the network
+ * other than the database: a transaction holds its locks until it ends.
+ */
+export async function tx<T>(db: DB, fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+  const c = await db.connect();
+  let broken: Error | undefined;
   try {
-    const out = fn();
-    db.exec("COMMIT");
+    await c.query("BEGIN");
+    const out = await fn(c);
+    await c.query("COMMIT");
     return out;
   } catch (err) {
-    if (db.isTransaction) db.exec("ROLLBACK");
+    // A failed ROLLBACK means the connection itself is gone: drop it instead of reusing it.
+    await c.query("ROLLBACK").catch((e: Error) => (broken = e));
     throw err;
+  } finally {
+    c.release(broken);
   }
 }
+
+/** All rows of a query. */
+export async function all<T>(q: Queryable, sql: string, params: unknown[] = []): Promise<T[]> {
+  return (await q.query(sql, params)).rows as T[];
+}
+
+/** The first row of a query, if any. */
+export async function one<T>(q: Queryable, sql: string, params: unknown[] = []): Promise<T | undefined> {
+  return (await q.query(sql, params)).rows[0] as T | undefined;
+}
+
+/** Rows a statement changed. */
+export async function run(q: Queryable, sql: string, params: unknown[] = []): Promise<number> {
+  return (await q.query(sql, params)).rowCount ?? 0;
+}
+
+/**
+ * Postgres text can't hold NUL. Untrusted strings (hints, templates, decider replies) lose it
+ * rather than fail the whole transaction they are written in, again on every retry.
+ */
+export const pgText = <T extends string | null | undefined>(s: T): T => (typeof s === "string" && s.includes("\0") ? (s.replaceAll("\0", "") as T) : s);

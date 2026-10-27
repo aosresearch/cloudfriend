@@ -2,7 +2,7 @@
 // The worker calls `score` while parsing (in arrival order) and `plan`/`apply` while deciding.
 import fs from "node:fs";
 import path from "node:path";
-import type { DB } from "../db.ts";
+import { all, DEFAULT_WORKSPACE, one, type DB } from "../db.ts";
 import { errMsg, log } from "../log.ts";
 import { severityBucket, type FullRoute, type RouteOptions } from "./cascade.ts";
 import { Classifier, type ClassifierFile } from "./classifier.ts";
@@ -59,13 +59,21 @@ export class Triage {
   shadow: Classifier | null = null;
   #shadowMtime = 0;
   #db: DB;
+  #ws: string;
 
-  constructor(db: DB, opts: TriageOptions) {
+  private constructor(db: DB, ws: string, opts: TriageOptions) {
     this.#db = db;
+    this.#ws = ws;
     this.opts = opts;
     this.routing = this.#newRouting();
-    this.#rebuildRouting(db);
-    this.#restoreFeaturizer();
+  }
+
+  /** Triage for a workspace, with its routing state rebuilt from labels and its featurizer history restored. */
+  static async open(db: DB, opts: TriageOptions, workspace = DEFAULT_WORKSPACE): Promise<Triage> {
+    const t = new Triage(db, workspace, opts);
+    await t.#rebuildRouting(t.routing, t.featurizer.version);
+    await t.#restoreFeaturizer(t.featurizer);
+    return t;
   }
 
   #newRouting(): RoutingState {
@@ -77,39 +85,45 @@ export class Triage {
     });
   }
 
-  #restoreFeaturizer(): void {
-    const row = this.#db.prepare("SELECT value FROM kv WHERE key = 'featurizer'").get() as { value: string } | undefined;
+  async #restoreFeaturizer(featurizer: Featurizer): Promise<void> {
+    const row = await one<{ featurizer: string }>(this.#db, "SELECT featurizer FROM snapshots WHERE workspace_id = $1", [this.#ws]);
     if (!row) return;
     try {
-      if (!this.featurizer.restore(JSON.parse(row.value) as FeaturizerSnapshot)) log.info("featurizer history is from another version; starting fresh");
+      if (!featurizer.restore(JSON.parse(row.featurizer) as FeaturizerSnapshot)) log.info("featurizer history is from another version; starting fresh");
     } catch (err) {
       log.warn("could not restore featurizer history", { error: errMsg(err) });
     }
   }
 
   /**
-   * A model of another feature version was loaded: compute that version from now on. Its
+   * A model of another feature version is being loaded: compute that version from now on. Its
    * history starts fresh unless a snapshot of that version exists, and routing is rebuilt so
    * that benign judgments made under the other version no longer earn suppression (the
-   * severity they were keyed by may read differently). Escalations are kept.
+   * severity they were keyed by may read differently). Escalations are kept. Both are built
+   * aside and swapped in by `load` in one step, so events are never scored half-switched.
    */
-  #switchFeaturizer(version: number): void {
+  async #prepareSwitch(version: number): Promise<{ featurizer: Featurizer; routing: RoutingState }> {
     log.info("featurizer version changes with the model", { from: this.featurizer.version, to: version });
-    this.featurizer = new Featurizer({ version });
-    this.#restoreFeaturizer();
-    this.routing = this.#newRouting();
-    this.#rebuildRouting(this.#db);
-    if (this.shadow && this.shadow.file.featurizer_version !== version) this.shadow = null;
+    const featurizer = new Featurizer({ version });
+    await this.#restoreFeaturizer(featurizer);
+    const routing = this.#newRouting();
+    await this.#rebuildRouting(routing, version);
+    return { featurizer, routing };
   }
 
   #loadedMtime = 0;
 
   /** Load a model file. Returns false (keeping the current model) if it can't be used. */
-  load(file: string): boolean {
+  async load(file: string): Promise<boolean> {
     try {
       const mtime = fs.statSync(file).mtimeMs;
       const c = new Classifier(JSON.parse(fs.readFileSync(file, "utf8")) as ClassifierFile);
-      if (c.file.featurizer_version !== this.featurizer.version) this.#switchFeaturizer(c.file.featurizer_version);
+      if (c.file.featurizer_version !== this.featurizer.version) {
+        const next = await this.#prepareSwitch(c.file.featurizer_version);
+        this.featurizer = next.featurizer;
+        this.routing = next.routing;
+        if (this.shadow && this.shadow.file.featurizer_version !== c.file.featurizer_version) this.shadow = null;
+      }
       this.classifier = c;
       this.modelPath = file;
       this.#loadedMtime = mtime;
@@ -125,7 +139,7 @@ export class Triage {
    * Switch to `file` if it appeared or changed since it was loaded, e.g. after
    * `cloudfriend train` promoted a model in another process.
    */
-  reloadIfChanged(file: string): void {
+  async reloadIfChanged(file: string): Promise<void> {
     let mtime: number;
     try {
       mtime = fs.statSync(file).mtimeMs;
@@ -133,7 +147,7 @@ export class Triage {
       return;
     }
     if (this.modelPath === file && mtime === this.#loadedMtime) return;
-    this.load(file);
+    await this.load(file);
   }
 
   /** Load a candidate to run in shadow. */
@@ -206,16 +220,16 @@ export class Triage {
   }
 
   /** Rebuild escalations and earned suppression from the labels table, so a restart forgets nothing. */
-  #rebuildRouting(db: DB): void {
-    const since = Date.now() - this.routing.horizonMs;
-    const rows = db
-      .prepare(
-        `SELECT template, severity, y, source, provenance, created_at AS at, ctx_rate AS rate, ctx_service_errors AS serviceErrors,
-                featurizer_version AS featurizerVersion
-         FROM labels WHERE template IS NOT NULL AND created_at >= ? ORDER BY created_at, event_id`,
-      )
-      .all(since) as unknown as LabelFact[];
-    this.routing.rebuild(rows, this.featurizer.version);
+  async #rebuildRouting(routing: RoutingState, version: number): Promise<void> {
+    const since = Date.now() - routing.horizonMs;
+    const rows = await all<LabelFact>(
+      this.#db,
+      `SELECT template, severity, y, source, provenance, created_at AS at, ctx_rate AS rate, ctx_service_errors AS "serviceErrors",
+              featurizer_version AS "featurizerVersion"
+       FROM labels WHERE workspace_id = $1 AND template IS NOT NULL AND created_at >= $2 ORDER BY created_at, event_id`,
+      [this.#ws, since],
+    );
+    routing.rebuild(rows, version);
   }
 
   /** The verdict cache (routing.ts), for callers that only need it. */
@@ -228,10 +242,12 @@ export class Triage {
     return this.routing.escalated;
   }
 
-  saveState(): void {
-    this.#db
-      .prepare("INSERT INTO kv (key, value, updated_at) VALUES ('featurizer', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-      .run(JSON.stringify(this.featurizer.snapshot()), Date.now());
+  async saveState(): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO snapshots (workspace_id, featurizer, updated_at) VALUES ($1, $2, $3)
+       ON CONFLICT (workspace_id) DO UPDATE SET featurizer = excluded.featurizer, updated_at = excluded.updated_at`,
+      [this.#ws, JSON.stringify(this.featurizer.snapshot()), Date.now()],
+    );
   }
 }
 

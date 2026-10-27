@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { DB } from "./db.ts";
+import { all, DEFAULT_WORKSPACE, one, tx, type DB } from "./db.ts";
 import { errMsg, log } from "./log.ts";
 import { Classifier, type ClassifierFile } from "./triage/classifier.ts";
 import { FEATURE_NAMES } from "./triage/features.ts";
@@ -80,7 +80,7 @@ export interface TrainReport {
   /** The regression scenarios, run with the candidate through the complete pipeline. */
   regression?: RegressionSummary;
   /** What the shadow period showed (see `shadowEvidence`). */
-  shadow?: ReturnType<Trainer["shadowEvidence"]>;
+  shadow?: Awaited<ReturnType<Trainer["shadowEvidence"]>>;
   candidate?: Metrics;
   active?: Metrics | null;
   model?: Pick<ClassifierFile, "drop_below" | "threshold" | "trained_at"> & { path: string; trees: number };
@@ -172,12 +172,14 @@ const weightOf = (r: Pick<LabelRow, "source" | "weight">, humanWeight: number) =
 
 export class Trainer {
   #db: DB;
+  #ws: string;
   #triage: Triage;
   #o: TrainOptions;
   #running: Promise<TrainReport> | null = null;
 
-  constructor(db: DB, triage: Triage, opts: TrainOptions) {
+  constructor(db: DB, triage: Triage, opts: TrainOptions, workspace = DEFAULT_WORKSPACE) {
     this.#db = db;
+    this.#ws = workspace;
     this.#triage = triage;
     this.#o = opts;
   }
@@ -187,17 +189,22 @@ export class Trainer {
   }
 
   /** Labels added since the last training run (any outcome). */
-  newLabels(): number {
-    const last = this.#db.prepare("SELECT max(created_at) AS t FROM models WHERE status <> 'skipped'").get() as { t: number | null };
-    return (this.#db.prepare("SELECT count(*) AS n FROM labels WHERE created_at > ? AND featurizer_version = ?").get(last.t ?? 0, this.#triage.featurizer.version) as { n: number }).n;
+  async newLabels(): Promise<number> {
+    const last = (await one<{ t: number | null }>(this.#db, "SELECT max(created_at) AS t FROM models WHERE workspace_id = $1 AND status <> 'skipped'", [this.#ws]))!;
+    const { n } = (await one<{ n: number }>(
+      this.#db,
+      "SELECT count(*) AS n FROM labels WHERE workspace_id = $1 AND created_at > $2 AND featurizer_version = $3",
+      [this.#ws, last.t ?? 0, this.#triage.featurizer.version],
+    ))!;
+    return n;
   }
 
   /** Train if enough new labels arrived since the last run. Used by the scheduler. */
   async maybeTrain(): Promise<TrainReport | null> {
-    if (this.#running || this.newLabels() < this.#o.minLabels) return null;
+    if (this.#running || (await this.newLabels()) < this.#o.minLabels) return null;
     // A candidate in shadow is still collecting evidence: a scheduled run would replace it
     // before it could ever be promoted. A run by hand (`train`) still may.
-    if (this.#db.prepare("SELECT 1 FROM models WHERE status = 'shadow' LIMIT 1").get()) return null;
+    if (await one(this.#db, "SELECT 1 FROM models WHERE workspace_id = $1 AND status = 'shadow' LIMIT 1", [this.#ws])) return null;
     return this.train();
   }
 
@@ -212,12 +219,12 @@ export class Trainer {
     // Train for the feature version the active model runs with: that is what the labels hold.
     const version = this.#triage.featurizer.version;
     const id = "mdl_" + new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "_" + randomBytes(3).toString("hex");
-    const rows = this.#db
-      .prepare(
-        `SELECT event_id, y, source, features, received_at, template, provenance, weight, created_at, severity, ctx_rate, ctx_service_errors
-         FROM labels WHERE featurizer_version = ? ORDER BY received_at, event_id`,
-      )
-      .all(version) as unknown as LabelRow[];
+    const rows = await all<LabelRow>(
+      this.#db,
+      `SELECT event_id, y, source, features, received_at, template, provenance, weight, created_at, severity, ctx_rate, ctx_service_errors
+       FROM labels WHERE workspace_id = $1 AND featurizer_version = $2 ORDER BY received_at, event_id`,
+      [this.#ws, version],
+    );
     const positives = rows.filter((r) => r.y).length;
     const { fit, calibrate, accept } = splitLabels(rows, this.#o.incidentWindowMs);
     const labels = { total: rows.length, positives, human: rows.filter((r) => r.source === "human").length, fit: fit.length, calibrate: calibrate.length, accept: accept.length };
@@ -253,7 +260,7 @@ export class Trainer {
 
       const file = JSON.parse(fs.readFileSync(out, "utf8")) as ClassifierFile;
       const active = this.#triage.classifier;
-      const recent = this.#recentFeatures();
+      const recent = await this.#recentFeatures();
       const limited = limitThreshold(new Classifier(file), active, recent);
       if (limited.adjusted) {
         file.drop_below = limited.dropBelow;
@@ -303,17 +310,17 @@ export class Trainer {
         recent: { events: recent.length, active: limited.active, candidate: limited.candidate, adjusted: limited.adjusted },
         ms: Date.now() - started,
       };
-      if (report.status === "promoted") this.#promote(out);
+      if (report.status === "promoted") await this.#promote(out);
       if (report.status === "shadow") {
         // A shadow run is judged on its own scores only, never on a replaced one's.
-        this.#db.prepare("UPDATE models SET status = 'rejected' WHERE status = 'shadow'").run();
-        this.#clearShadowScores();
+        await this.#db.query("UPDATE models SET status = 'rejected' WHERE workspace_id = $1 AND status = 'shadow'", [this.#ws]);
+        await this.#clearShadowScores();
         const shadowPath = path.join(modelsDir, "shadow.json");
         fs.copyFileSync(out, shadowPath + ".tmp");
         fs.renameSync(shadowPath + ".tmp", shadowPath);
         this.#triage.loadShadow(shadowPath);
       }
-      return this.#record(report, out);
+      return await this.#record(report, out);
     } catch (err) {
       return this.#record({ id, status: "failed", reason: errMsg(err), labels, ms: Date.now() - started }, null);
     } finally {
@@ -321,27 +328,28 @@ export class Trainer {
     }
   }
 
-  #promote(file: string): void {
+  async #promote(file: string): Promise<void> {
     const activePath = path.join(this.#o.dataDir, "models", "active.json");
     fs.copyFileSync(file, activePath + ".tmp");
     fs.renameSync(activePath + ".tmp", activePath);
-    this.#triage.load(activePath);
+    await this.#triage.load(activePath);
   }
 
   /** What a candidate in shadow would change: the events it would newly drop, and how they were judged. */
-  shadowEvidence(trainedAt: string) {
-    const r = this.#db
-      .prepare(
-        `SELECT
+  async shadowEvidence(trainedAt: string) {
+    const r = (await one<Record<string, number | null>>(
+      this.#db,
+      `SELECT
            sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' THEN 1 ELSE 0 END) AS newly,
            sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL AND coalesce(l.provenance, '') <> 'follower' THEN 1 ELSE 0 END) AS judged,
            sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.y = 1 THEN 1 ELSE 0 END) AS relevant,
            sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL AND coalesce(l.provenance, '') <> 'follower' THEN 1 ELSE 0 END) AS shared_audited,
            sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.y = 1 THEN 1 ELSE 0 END) AS shared_relevant,
            count(*) AS scored
-         FROM events e LEFT JOIN labels l ON l.event_id = e.id WHERE e.shadow_model = ?`,
-      )
-      .get(trainedAt) as Record<string, number | null>;
+         FROM events e LEFT JOIN labels l ON l.workspace_id = e.workspace_id AND l.event_id = e.id
+         WHERE e.workspace_id = $1 AND e.shadow_model = $2`,
+      [this.#ws, trainedAt],
+    ))!;
     const n = (k: string) => Number(r[k] ?? 0);
     return {
       scored: n("scored"),
@@ -366,13 +374,15 @@ export class Trainer {
    * have been judged, none relevant: promotion on evidence, not on elapsed time. Without
    * enough evidence it keeps running, up to `shadowMaxMs`, then is rejected.
    */
-  checkShadow(now = Date.now()): TrainReport | null {
-    const row = this.#db.prepare("SELECT id, created_at, path, report FROM models WHERE status = 'shadow' ORDER BY created_at DESC LIMIT 1").get() as
-      | { id: string; created_at: number; path: string; report: string }
-      | undefined;
+  async checkShadow(now = Date.now()): Promise<TrainReport | null> {
+    const row = await one<{ id: string; created_at: number; path: string; report: string }>(
+      this.#db,
+      "SELECT id, created_at, path, report FROM models WHERE workspace_id = $1 AND status = 'shadow' ORDER BY created_at DESC LIMIT 1",
+      [this.#ws],
+    );
     if (!row) return null;
     const report = JSON.parse(row.report) as TrainReport;
-    const ev = this.shadowEvidence(report.model?.trained_at ?? "");
+    const ev = await this.shadowEvidence(report.model?.trained_at ?? "");
     const age = now - row.created_at;
     const min = this.#o.shadowMinEvidence ?? 200;
     let ok: boolean;
@@ -391,37 +401,45 @@ export class Trainer {
     report.status = ok ? "promoted" : "rejected";
     report.shadow = ev;
     if (ok) {
-      this.#db.prepare("UPDATE models SET status = 'retired' WHERE status = 'active'").run();
-      this.#promote(row.path);
+      await this.#db.query("UPDATE models SET status = 'retired' WHERE workspace_id = $1 AND status = 'active'", [this.#ws]);
+      await this.#promote(row.path);
     }
     this.#triage.clearShadow();
-    this.#clearShadowScores();
+    await this.#clearShadowScores();
     fs.rmSync(path.join(this.#o.dataDir, "models", "shadow.json"), { force: true });
-    this.#db.prepare("UPDATE models SET status = ?, report = ? WHERE id = ?").run(ok ? "active" : "rejected", JSON.stringify(report), row.id);
+    await this.#db.query("UPDATE models SET status = $1, report = $2 WHERE id = $3", [ok ? "active" : "rejected", JSON.stringify(report), row.id]);
     log.info(`shadow model ${report.status}`, { model: row.id, reason: report.reason });
     return report;
   }
 
-  #clearShadowScores(): void {
-    this.#db.prepare("UPDATE events SET shadow_score = NULL, shadow_route = NULL, shadow_model = NULL WHERE shadow_model IS NOT NULL OR shadow_route IS NOT NULL").run();
+  async #clearShadowScores(): Promise<void> {
+    await this.#db.query(
+      "UPDATE events SET shadow_score = NULL, shadow_route = NULL, shadow_model = NULL WHERE workspace_id = $1 AND (shadow_model IS NOT NULL OR shadow_route IS NOT NULL)",
+      [this.#ws],
+    );
   }
 
   /** Feature vectors of the most recent events still in retention, newest first. */
-  #recentFeatures(limit = 50_000): Float32Array[] {
-    const rows = this.#db
-      .prepare("SELECT features FROM events WHERE features IS NOT NULL AND fv = ? ORDER BY id DESC LIMIT ?")
-      .all(this.#triage.featurizer.version, limit) as unknown as { features: Uint8Array }[];
+  async #recentFeatures(limit = 50_000): Promise<Float32Array[]> {
+    const rows = await all<{ features: Uint8Array }>(
+      this.#db,
+      "SELECT features FROM events WHERE workspace_id = $1 AND features IS NOT NULL AND fv = $2 ORDER BY id DESC LIMIT $3",
+      [this.#ws, this.#triage.featurizer.version, limit],
+    );
     return rows.map((r) => decodeFeatures(r.features));
   }
 
-  #record(report: TrainReport, file: string | null): TrainReport {
+  async #record(report: TrainReport, file: string | null): Promise<TrainReport> {
     const status = report.status === "promoted" ? "active" : report.status;
     const now = Date.now();
-    if (report.status === "promoted") this.#db.prepare("UPDATE models SET status = 'retired' WHERE status = 'active'").run();
-    if (report.status === "shadow") this.#db.prepare("UPDATE models SET status = 'rejected' WHERE status = 'shadow'").run();
-    this.#db
-      .prepare("INSERT INTO models (id, created_at, path, status, labels, report) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(report.id, now, file ?? "", status, report.labels?.total ?? 0, JSON.stringify(report));
+    await tx(this.#db, async (c) => {
+      if (report.status === "promoted") await c.query("UPDATE models SET status = 'retired' WHERE workspace_id = $1 AND status = 'active'", [this.#ws]);
+      if (report.status === "shadow") await c.query("UPDATE models SET status = 'rejected' WHERE workspace_id = $1 AND status = 'shadow'", [this.#ws]);
+      await c.query(
+        "INSERT INTO models (id, workspace_id, created_at, path, status, labels, report) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [report.id, this.#ws, now, file ?? "", status, report.labels?.total ?? 0, JSON.stringify(report)],
+      );
+    });
     (report.status === "failed" ? log.warn : log.info)(`training ${report.status}`, { model: report.id, reason: report.reason });
     return report;
   }

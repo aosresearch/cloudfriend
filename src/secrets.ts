@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { DB } from "./db.ts";
+import { all, DEFAULT_WORKSPACE, one, run, tx, type DB, type Queryable } from "./db.ts";
 
 export interface SecretInfo {
   id: string;
@@ -59,20 +59,41 @@ export const SOURCE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** Every ingest secret starts with this, so a leaked one is easy to recognize. */
 const PREFIX = "cloudfriend_";
 
+/** The secret a request presented, and the workspace its events belong to. */
+export interface SecretMatch {
+  id: string;
+  workspace_id: string;
+}
+
 export class Secrets {
   #db: DB;
-  #byHash;
-  #touch;
+  #ws: string;
 
-  constructor(db: DB) {
+  constructor(db: DB, workspace = DEFAULT_WORKSPACE) {
     this.#db = db;
-    this.#byHash = db.prepare("SELECT id, source FROM secrets WHERE hash = ? AND revoked_at IS NULL");
-    this.#touch = db.prepare("UPDATE secrets SET last_used_at = ? WHERE id = ?");
+    this.#ws = workspace;
   }
 
-  create(name: string, source: string | null = null): CreatedSecret {
+  async create(name: string, source: string | null = null): Promise<CreatedSecret> {
+    return this.#insert(this.#db, name, source);
+  }
+
+  /**
+   * Create the workspace's first secret, unless it has one already. The workspace row is
+   * locked meanwhile, so two processes booting at once don't both create one.
+   */
+  async createFirst(name: string): Promise<CreatedSecret | null> {
+    return tx(this.#db, async (c) => {
+      await c.query("SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE", [this.#ws]);
+      if (await one(c, "SELECT 1 FROM secrets WHERE workspace_id = $1 LIMIT 1", [this.#ws])) return null;
+      return this.#insert(c, name, null);
+    });
+  }
+
+  async #insert(q: Queryable, name: string, source: string | null): Promise<CreatedSecret> {
     name = name.trim();
     if (!name || name.length > 128) throw new Error("name must be 1-128 characters");
+    if (name.includes("\0")) throw new Error("name must not contain NUL");
     if (source !== null && !SOURCE_NAME.test(source)) throw new Error("source must match " + SOURCE_NAME);
     const secret = PREFIX + randomBytes(32).toString("base64url");
     const row: SecretRow = {
@@ -84,42 +105,50 @@ export class Secrets {
       last_used_at: null,
       revoked_at: null,
     };
-    this.#db
-      .prepare("INSERT INTO secrets (id, name, source, hash, prefix, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(row.id, row.name, row.source, hashSecret(secret), row.prefix, row.created_at);
+    await q.query(
+      "INSERT INTO secrets (id, workspace_id, name, source, hash, prefix, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      [row.id, this.#ws, row.name, row.source, hashSecret(secret), row.prefix, row.created_at],
+    );
     return { ...toInfo(row), secret };
   }
 
-  list(): SecretInfo[] {
-    const rows = this.#db
-      .prepare("SELECT id, name, source, prefix, created_at, last_used_at, revoked_at FROM secrets ORDER BY created_at")
-      .all() as unknown as SecretRow[];
+  async list(): Promise<SecretInfo[]> {
+    const rows = await all<SecretRow>(
+      this.#db,
+      "SELECT id, name, source, prefix, created_at, last_used_at, revoked_at FROM secrets WHERE workspace_id = $1 ORDER BY created_at, id",
+      [this.#ws],
+    );
     return rows.map(toInfo);
   }
 
   /** Returns false if no active secret has this id. */
-  revoke(id: string): boolean {
-    const res = this.#db
-      .prepare("UPDATE secrets SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-      .run(Date.now(), id);
-    return res.changes > 0;
+  async revoke(id: string): Promise<boolean> {
+    return (await run(this.#db, "UPDATE secrets SET revoked_at = $1 WHERE id = $2 AND workspace_id = $3 AND revoked_at IS NULL", [Date.now(), id, this.#ws])) > 0;
   }
 
-  count(): number {
-    return (this.#db.prepare("SELECT count(*) AS n FROM secrets").get() as { n: number }).n;
+  async count(): Promise<number> {
+    return (await one<{ n: number }>(this.#db, "SELECT count(*) AS n FROM secrets WHERE workspace_id = $1", [this.#ws]))!.n;
   }
 
-  /** Check a presented secret against a source. Returns the secret id, or null. */
-  check(secret: string, source: string): string | null {
+  /**
+   * Check a presented secret against a source. Returns the secret and its workspace, or null.
+   * The hash is unique across workspaces, so the secret alone says where its events go.
+   */
+  async check(secret: string, source: string): Promise<SecretMatch | null> {
     if (!secret.startsWith(PREFIX)) return null;
-    const row = this.#byHash.get(hashSecret(secret)) as { id: string; source: string | null } | undefined;
+    const row = await one<{ id: string; workspace_id: string; source: string | null }>(
+      this.#db,
+      "SELECT id, workspace_id, source FROM secrets WHERE hash = $1 AND revoked_at IS NULL",
+      [hashSecret(secret)],
+    );
     if (!row) return null;
     if (row.source !== null && row.source !== source) return null;
-    return row.id;
+    return { id: row.id, workspace_id: row.workspace_id };
   }
 
-  /** Record use. Called from inside the intake commit, so it costs no extra fsync. */
-  touch(ids: Iterable<string>, at: number): void {
-    for (const id of ids) this.#touch.run(at, id);
+  /** Record use. Called from inside the intake commit, so it costs no extra round of fsync. */
+  static async touch(c: Queryable, ids: Iterable<string>, at: number): Promise<void> {
+    // Sorted, so concurrent commits lock the rows in the same order.
+    await c.query("UPDATE secrets SET last_used_at = $1 WHERE id = ANY($2::text[])", [at, [...new Set(ids)].sort()]);
   }
 }

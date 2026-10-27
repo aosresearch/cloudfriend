@@ -16,7 +16,7 @@ import { Trainer } from "./training.ts";
 import { BUILTIN_MODEL, Triage } from "./triage/runtime.ts";
 import { BUILTIN_SCENARIOS, loadScenarios, runSuite } from "./triage/scenarios.ts";
 import { loadConfig } from "./config.ts";
-import { dbPath, openDb } from "./db.ts";
+import { all, DEFAULT_WORKSPACE, openDb, type DB } from "./db.ts";
 import { errMsg } from "./log.ts";
 import { Secrets } from "./secrets.ts";
 
@@ -34,7 +34,8 @@ const USAGE = `Usage:
                                                       {"source","data","received_at","escalate"}
   cloudfriend labels stats                            count labels by source and verdict
 
-The database is $CLOUDFRIEND_DATA_DIR/cloudfriend.db (default ./data/cloudfriend.db).`;
+The database is $CLOUDFRIEND_DATABASE_URL (or $DATABASE_URL); model files are under
+$CLOUDFRIEND_DATA_DIR/models (default ./data/models).`;
 
 export async function cli(argv: string[]): Promise<number> {
   const { positionals, values } = parseArgs({
@@ -65,7 +66,7 @@ export async function cli(argv: string[]): Promise<number> {
   }
 
   const config = loadConfig();
-  const db = openDb(dbPath(config.dataDir), { synchronous: config.synchronous });
+  const db = await openDb(config.databaseUrl, { max: 2 });
   if (cmd !== "secrets") {
     try {
       return await mlCommand(cmd, sub, arg, values, config, db);
@@ -73,15 +74,15 @@ export async function cli(argv: string[]): Promise<number> {
       console.error(`error: ${errMsg(err)}`);
       return 1;
     } finally {
-      db.close();
+      await db.end();
     }
   }
-  const secrets = new Secrets(db);
+  const secrets = new Secrets(db, DEFAULT_WORKSPACE);
   try {
     switch (sub) {
       case "create": {
         if (!arg) throw new Error("usage: cloudfriend secrets create <name> [--source <source>]");
-        const s = secrets.create(arg, values.source ?? null);
+        const s = await secrets.create(arg, values.source ?? null);
         if (values.json) console.log(JSON.stringify(s));
         else {
           console.log(`Created secret ${s.id} (${s.name}${s.source ? `, source ${s.source} only` : ", any source"}).`);
@@ -91,7 +92,7 @@ export async function cli(argv: string[]): Promise<number> {
         return 0;
       }
       case "list": {
-        const list = secrets.list();
+        const list = await secrets.list();
         if (values.json) console.log(JSON.stringify(list));
         else if (!list.length) console.log("No secrets.");
         else {
@@ -109,7 +110,7 @@ export async function cli(argv: string[]): Promise<number> {
       }
       case "revoke": {
         if (!arg) throw new Error("usage: cloudfriend secrets revoke <id>");
-        if (!secrets.revoke(arg)) throw new Error(`no active secret with id ${arg}`);
+        if (!(await secrets.revoke(arg))) throw new Error(`no active secret with id ${arg}`);
         console.log(`Revoked ${arg}.`);
         return 0;
       }
@@ -121,7 +122,7 @@ export async function cli(argv: string[]): Promise<number> {
     console.error(`error: ${errMsg(err)}`);
     return 1;
   } finally {
-    db.close();
+    await db.end();
   }
 }
 
@@ -131,12 +132,13 @@ async function mlCommand(
   arg: string | undefined,
   values: { json?: boolean; "dry-run"?: boolean; model?: string },
   config: ReturnType<typeof loadConfig>,
-  db: ReturnType<typeof openDb>,
+  db: DB,
 ): Promise<number> {
+  const ws = DEFAULT_WORKSPACE;
   const out = (v: unknown) => console.log(JSON.stringify(v, null, values.json ? undefined : 2));
-  const triage = new Triage(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
+  const triage = await Triage.open(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true }, ws);
   const active = path.join(config.dataDir, "models", "active.json");
-  for (const f of [values.model, config.modelPath, active, BUILTIN_MODEL]) if (f && fs.existsSync(f) && triage.load(f)) break;
+  for (const f of [values.model, config.modelPath, active, BUILTIN_MODEL]) if (f && fs.existsSync(f) && (await triage.load(f))) break;
   if (cmd === "labels" && sub === "import") {
     if (!arg) throw new Error("usage: cloudfriend labels import <file.ndjson>");
     const items = fs
@@ -149,11 +151,11 @@ async function mlCommand(
         return it;
       });
     // Featurized with the version the model in use runs with, so the next training run can use them.
-    console.log(`Imported ${importLabels(db, items, triage.featurizer.version)} labels.`);
+    console.log(`Imported ${await importLabels(db, ws, items, triage.featurizer.version)} labels.`);
     return 0;
   }
   if (cmd === "labels") {
-    out(db.prepare("SELECT source, CASE y WHEN 1 THEN 'escalate' ELSE 'ignore' END AS verdict, count(*) AS n FROM labels GROUP BY 1, 2").all());
+    out(await all(db, "SELECT source, CASE y WHEN 1 THEN 'escalate' ELSE 'ignore' END AS verdict, count(*) AS n FROM labels WHERE workspace_id = $1 GROUP BY 1, 2", [ws]));
     return 0;
   }
   if (cmd === "regression") {
@@ -166,7 +168,11 @@ async function mlCommand(
     return r.passed ? 0 : 1;
   }
   if (cmd === "model") {
-    const history = db.prepare("SELECT id, created_at, status, labels, report FROM models ORDER BY created_at DESC LIMIT 10").all() as { report: string; status: string }[];
+    const history = await all<{ report: string; status: string }>(
+      db,
+      "SELECT id, created_at, status, labels, report FROM models WHERE workspace_id = $1 ORDER BY created_at DESC, id DESC LIMIT 10",
+      [ws],
+    );
     const f = triage.classifier?.file;
     out({
       active: f ? { path: triage.modelPath, trained_at: f.trained_at, note: f.note, drop_below: f.drop_below, threshold: f.threshold, trees: triage.classifier!.gbdt.numTrees } : null,
@@ -191,7 +197,7 @@ async function mlCommand(
     knownTtlMs: config.knownTtlMs,
     escalatedMemoryMs: config.escalatedMemoryMs,
     suppressionTtlMs: config.suppressionTtlMs,
-  });
+  }, ws);
   const report = await trainer.train({ dryRun: values["dry-run"] });
   out(report);
   return report.status === "failed" ? 1 : 0;

@@ -1,7 +1,8 @@
-import { tx, type DB } from "./db.ts";
-import type { Secrets } from "./secrets.ts";
+import { one, tx, type DB } from "./db.ts";
+import { Secrets } from "./secrets.ts";
 
 export interface IntakeRow {
+  workspace_id: string;
   source: string;
   received_at: number;
   body: Uint8Array;
@@ -16,29 +17,39 @@ interface Pending {
 
 export class QueueFullError extends Error {}
 
+const INSERT = `INSERT INTO queue (workspace_id, source, received_at, body)
+  SELECT w, s, t, b FROM unnest($1::text[], $2::text[], $3::bigint[], $4::bytea[]) WITH ORDINALITY AS r(w, s, t, b, n) ORDER BY n`;
+
 /**
- * Group-commit writer. Requests that arrive within one commit window are inserted in a
- * single transaction, so one fsync covers the whole batch. Each `append` resolves only
- * after the commit that included its row, which is when the caller may reply 202.
+ * Group-commit writer. Requests that arrive within one commit window are inserted with one
+ * multi-row INSERT in one transaction, so one commit (one WAL flush) covers the whole batch.
+ * Each `append` resolves only after the commit that included its row, which is when the
+ * caller may reply 202. A batch is committed or rejected as a whole.
  */
 export class Intake {
   #db: DB;
-  #secrets: Secrets;
   #windowMs: number;
   #maxQueue: number;
-  #insert;
   #pending: Pending[] = [];
   #timer: NodeJS.Timeout | null = null;
+  /** Commits under way, so shutdown can wait for them. */
+  #commits = new Set<Promise<void>>();
+  /** Rows in a commit that hasn't finished yet. They count toward the queue limit. */
+  #writing = 0;
   /** Rows with status 'new'. Kept in memory so backpressure costs nothing per request. */
   #backlog: number;
 
-  constructor(db: DB, secrets: Secrets, opts: { windowMs: number; maxQueue: number }) {
+  private constructor(db: DB, backlog: number, opts: { windowMs: number; maxQueue: number }) {
     this.#db = db;
-    this.#secrets = secrets;
     this.#windowMs = opts.windowMs;
     this.#maxQueue = opts.maxQueue;
-    this.#insert = db.prepare("INSERT INTO queue (source, received_at, body) VALUES (?, ?, ?)");
-    this.#backlog = (db.prepare("SELECT count(*) AS n FROM queue WHERE status = 'new'").get() as { n: number }).n;
+    this.#backlog = backlog;
+  }
+
+  /** Starts from the number of rows still waiting to be parsed. */
+  static async open(db: DB, opts: { windowMs: number; maxQueue: number }): Promise<Intake> {
+    const { n } = (await one<{ n: number }>(db, "SELECT count(*) AS n FROM queue WHERE status = 'new'"))!;
+    return new Intake(db, n, opts);
   }
 
   get backlog(): number {
@@ -51,30 +62,41 @@ export class Intake {
   }
 
   append(row: IntakeRow): Promise<void> {
-    if (this.#backlog + this.#pending.length >= this.#maxQueue) {
+    if (this.#backlog + this.#writing + this.#pending.length >= this.#maxQueue) {
       return Promise.reject(new QueueFullError("queue is full"));
     }
     return new Promise<void>((resolve, reject) => {
       this.#pending.push({ row, resolve, reject });
-      this.#timer ??= setTimeout(() => this.flush(), this.#windowMs);
+      this.#timer ??= setTimeout(() => void this.flush(), this.#windowMs);
     });
   }
 
-  /** Commit everything collected so far. Also called on shutdown. */
-  flush(): void {
+  /** Commit everything collected so far, and wait for commits already under way. Also called on shutdown. */
+  async flush(): Promise<void> {
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = null;
     const batch = this.#pending.splice(0);
-    if (!batch.length) return;
+    if (batch.length) {
+      const p: Promise<void> = this.#commit(batch).finally(() => this.#commits.delete(p));
+      this.#commits.add(p);
+    }
+    await Promise.all(this.#commits);
+  }
+
+  async #commit(batch: Pending[]): Promise<void> {
+    this.#writing += batch.length;
     try {
-      tx(this.#db, () => {
-        for (const { row } of batch) this.#insert.run(row.source, row.received_at, row.body);
-        this.#secrets.touch(new Set(batch.map((p) => p.row.secret_id)), batch.at(-1)!.row.received_at);
+      const rows = batch.map((p) => p.row);
+      await tx(this.#db, async (c) => {
+        await c.query(INSERT, [rows.map((r) => r.workspace_id), rows.map((r) => r.source), rows.map((r) => r.received_at), rows.map((r) => r.body)]);
+        await Secrets.touch(c, rows.map((r) => r.secret_id), rows.at(-1)!.received_at);
       });
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       for (const p of batch) p.reject(e);
       return;
+    } finally {
+      this.#writing -= batch.length;
     }
     this.#backlog += batch.length;
     for (const p of batch) p.resolve();

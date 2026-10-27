@@ -1,9 +1,9 @@
 import type { Hono } from "hono";
 import { loadAdapters, type Adapters } from "./adapters.ts";
 import type { Config } from "./config.ts";
-import { dbPath, openDb, type DB } from "./db.ts";
+import { DEFAULT_WORKSPACE, openDb, type DB } from "./db.ts";
 import { Intake } from "./intake.ts";
-import { log } from "./log.ts";
+import { errMsg, log } from "./log.ts";
 import { Secrets } from "./secrets.ts";
 import { createApp } from "./server.ts";
 import { Trainer } from "./training.ts";
@@ -56,15 +56,16 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
     actions.set(name, action);
   }
 
-  const db = openDb(dbPath(config.dataDir), { synchronous: config.synchronous });
-  const secrets = new Secrets(db);
-  const bootSecret = secrets.count() === 0 ? secrets.create("default").secret : null;
-  const intake = new Intake(db, secrets, { windowMs: config.commitWindowMs, maxQueue: config.maxQueue });
+  const db = await openDb(config.databaseUrl, { max: config.dbPool });
+  const workspace = DEFAULT_WORKSPACE;
+  const secrets = new Secrets(db, workspace);
+  const bootSecret = (await secrets.createFirst("default"))?.secret ?? null;
+  const intake = await Intake.open(db, { windowMs: config.commitWindowMs, maxQueue: config.maxQueue });
 
   let triage: Triage | null = null;
   let trainer: Trainer | null = null;
   if (config.triage) {
-    triage = new Triage(db, {
+    triage = await Triage.open(db, {
       auditRate: config.auditRate,
       verdictTtlMs: config.verdictTtlMs,
       perTemplate: config.perTemplate,
@@ -73,11 +74,11 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       escalatedMemoryMs: config.escalatedMemoryMs,
       suppressionTtlMs: config.suppressionTtlMs,
       hasJev: decider !== null,
-    });
+    }, workspace);
     // The first model that loads: an explicit file, the last promoted one, the built-in one.
     const active = path.join(config.dataDir, "models", "active.json");
     for (const file of [config.modelPath, active, BUILTIN_MODEL]) {
-      if (file && fs.existsSync(file) && triage.load(file)) break;
+      if (file && fs.existsSync(file) && (await triage.load(file))) break;
     }
     if (!triage.classifier) log.warn("no classifier loaded; every event goes to the decider until one is trained");
     trainer = new Trainer(db, triage, {
@@ -97,12 +98,13 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       knownTtlMs: config.knownTtlMs,
       escalatedMemoryMs: config.escalatedMemoryMs,
       suppressionTtlMs: config.suppressionTtlMs,
-    });
+    }, workspace);
     const shadowPath = path.join(config.dataDir, "models", "shadow.json");
     if (fs.existsSync(shadowPath)) triage.loadShadow(shadowPath);
   }
   const worker = new Worker({
     db,
+    workspace,
     intake,
     sources: adapters.sources,
     decider,
@@ -119,6 +121,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
   });
   const app = createApp({
     db,
+    workspace,
     intake,
     secrets,
     sources: adapters.sources,
@@ -134,10 +137,17 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
   const startRetraining = () => {
     if (triage && !config.modelPath) {
       const active = path.join(config.dataDir, "models", "active.json");
+      let reloading = false;
       reloadTimer = setInterval(() => {
-        triage!.reloadIfChanged(active);
-        triage!.reloadShadowIfChanged(path.join(config.dataDir, "models", "shadow.json"));
-        trainer?.checkShadow();
+        if (reloading) return;
+        reloading = true;
+        void (async () => {
+          await triage!.reloadIfChanged(active);
+          triage!.reloadShadowIfChanged(path.join(config.dataDir, "models", "shadow.json"));
+          await trainer?.checkShadow();
+        })()
+          .catch((err) => log.warn("model reload failed", { error: errMsg(err) }))
+          .finally(() => (reloading = false));
       }, 30_000);
       reloadTimer.unref();
     }
@@ -162,8 +172,8 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       if (retrainTimer) clearInterval(retrainTimer);
       if (reloadTimer) clearInterval(reloadTimer);
       await Promise.all([worker.stop(graceMs), new Promise((r) => setTimeout(r, drainMs))]);
-      intake.flush();
-      db.close();
+      await intake.flush();
+      await db.end();
     },
   };
 }

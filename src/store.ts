@@ -1,4 +1,4 @@
-import type { DB } from "./db.ts";
+import { all, one, type Queryable } from "./db.ts";
 import type { Flag, CloudfriendEvent, Severity } from "./types.ts";
 
 export interface EventRow {
@@ -19,16 +19,18 @@ export interface FlagRow {
   created_at: number;
   reason: string;
   severity: string;
-  event_ids: string;
+  /** jsonb: comes back parsed. */
+  event_ids: string[];
   decider: string;
   status?: string | null;
   updated_at?: number | null;
   event_count?: number | null;
-  users?: string | null;
+  users?: string[] | null;
   note?: string | null;
 }
 
 export const EVENT_COLUMNS = "id, source, received_at, data, external_id, type, group_key, user_key, score, route";
+export const FLAG_COLUMNS = "id, created_at, reason, severity, event_ids, decider, status, updated_at, event_count, users, note";
 
 export function toEvent(r: EventRow): CloudfriendEvent {
   const e: CloudfriendEvent = {
@@ -51,24 +53,22 @@ export function toFlag(r: FlagRow): Flag {
     id: r.id,
     reason: r.reason,
     severity: r.severity as Severity,
-    event_ids: JSON.parse(r.event_ids),
+    event_ids: r.event_ids,
     created_at: new Date(r.created_at).toISOString(),
     decider: r.decider,
     status: r.status ?? "open",
-    event_count: r.event_count ?? JSON.parse(r.event_ids).length,
-    users: r.users ? JSON.parse(r.users) : [],
+    event_count: r.event_count ?? r.event_ids.length,
+    users: r.users ?? [],
     updated_at: new Date(r.updated_at ?? r.created_at).toISOString(),
     note: r.note ?? null,
   };
 }
 
 /** Events by id, in id order. Ids that have aged out are silently missing. */
-export function eventsByIds(db: DB, ids: string[], limit = 50): CloudfriendEvent[] {
-  const nums = ids.map(Number).filter(Number.isInteger).slice(0, limit);
+export async function eventsByIds(db: Queryable, ws: string, ids: string[], limit = 50): Promise<CloudfriendEvent[]> {
+  const nums = ids.map(Number).filter(Number.isSafeInteger).slice(0, limit);
   if (!nums.length) return [];
-  const rows = db
-    .prepare(`SELECT ${EVENT_COLUMNS} FROM events WHERE id IN (${nums.map(() => "?").join(",")}) ORDER BY id`)
-    .all(...nums) as unknown as EventRow[];
+  const rows = await all<EventRow>(db, `SELECT ${EVENT_COLUMNS} FROM events WHERE workspace_id = $1 AND id = ANY($2::bigint[]) ORDER BY id`, [ws, nums]);
   return rows.map(toEvent);
 }
 
@@ -87,25 +87,38 @@ export interface EventQuery {
   limit: number;
 }
 
-/** Newest first. Page with `before` = the last id of the previous page. */
-export function listEvents(db: DB, q: EventQuery): CloudfriendEvent[] {
-  const where: string[] = [];
-  const args: (string | number)[] = [];
-  const add = (sql: string, v: string | number | undefined) => {
-    if (v === undefined) return;
-    where.push(sql);
-    args.push(v);
+/** Builds a `WHERE` clause with numbered parameters, starting from the workspace. */
+function where(ws: string) {
+  const clauses = ["workspace_id = $1"];
+  const args: unknown[] = [ws];
+  const param = (v: unknown) => (args.push(v), `$${args.length}`);
+  return {
+    args,
+    param,
+    clause: (sql: string) => void clauses.push(sql),
+    /** Adds `sql(placeholder)` unless the value is undefined. */
+    add(sql: (p: string) => string, v: unknown) {
+      if (v !== undefined) clauses.push(sql(param(v)));
+    },
+    get sql() {
+      return "WHERE " + clauses.join(" AND ");
+    },
   };
-  add("source = ?", q.source);
-  add("type = ?", q.type);
-  add("group_key = ?", q.group_key);
-  add("user_key = ?", q.user);
-  add("route = ?", q.route);
-  add("received_at >= ?", q.since);
-  add("received_at < ?", q.until);
-  add("id < ?", q.before);
-  const sql = `SELECT ${EVENT_COLUMNS} FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`;
-  return (db.prepare(sql).all(...args, q.limit) as unknown as EventRow[]).map(toEvent);
+}
+
+/** Newest first. Page with `before` = the last id of the previous page. */
+export async function listEvents(db: Queryable, ws: string, q: EventQuery): Promise<CloudfriendEvent[]> {
+  const w = where(ws);
+  w.add((p) => `source = ${p}`, q.source);
+  w.add((p) => `type = ${p}`, q.type);
+  w.add((p) => `group_key = ${p}`, q.group_key);
+  w.add((p) => `user_key = ${p}`, q.user);
+  w.add((p) => `route = ${p}`, q.route);
+  w.add((p) => `received_at >= ${p}`, q.since);
+  w.add((p) => `received_at < ${p}`, q.until);
+  w.add((p) => `id < ${p}`, q.before);
+  const sql = `SELECT ${EVENT_COLUMNS} FROM events ${w.sql} ORDER BY id DESC LIMIT ${w.param(q.limit)}`;
+  return (await all<EventRow>(db, sql, w.args)).map(toEvent);
 }
 
 export interface FlagQuery {
@@ -118,23 +131,23 @@ export interface FlagQuery {
   limit: number;
 }
 
-export function listFlags(db: DB, q: FlagQuery): Flag[] {
-  const where: string[] = [];
-  const args: (string | number)[] = [];
-  if (q.since !== undefined) (where.push("created_at >= ?"), args.push(q.since));
-  if (q.until !== undefined) (where.push("created_at < ?"), args.push(q.until));
-  if (q.severity !== undefined) (where.push("severity = ?"), args.push(q.severity));
-  if (q.status?.length) (where.push(`coalesce(status, 'open') IN (${q.status.map(() => "?").join(",")})`), args.push(...q.status));
+export async function listFlags(db: Queryable, ws: string, q: FlagQuery): Promise<Flag[]> {
+  const w = where(ws);
+  w.add((p) => `created_at >= ${p}`, q.since);
+  w.add((p) => `created_at < ${p}`, q.until);
+  w.add((p) => `severity = ${p}`, q.severity);
+  if (q.status?.length) w.add((p) => `status = ANY(${p}::text[])`, q.status);
   if (q.before) {
-    where.push("(created_at < ? OR (created_at = ? AND id < ?))");
-    args.push(q.before.created_at, q.before.created_at, q.before.id);
+    const t = w.param(q.before.created_at);
+    w.clause(`(created_at < ${t} OR (created_at = ${t} AND id < ${w.param(q.before.id)}))`);
   }
-  const sql = `SELECT * FROM flags ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY created_at DESC, id DESC LIMIT ?`;
-  return (db.prepare(sql).all(...args, q.limit) as unknown as FlagRow[]).map(toFlag);
+  const sql = `SELECT ${FLAG_COLUMNS} FROM flags ${w.sql} ORDER BY created_at DESC, id DESC LIMIT ${w.param(q.limit)}`;
+  return (await all<FlagRow>(db, sql, w.args)).map(toFlag);
 }
 
-export function getFlagRow(db: DB, id: string): FlagRow | undefined {
-  return db.prepare("SELECT * FROM flags WHERE id = ?").get(id) as unknown as FlagRow | undefined;
+/** `forUpdate` locks the row until the transaction `db` belongs to ends. */
+export async function getFlagRow(db: Queryable, ws: string, id: string, forUpdate = false): Promise<FlagRow | undefined> {
+  return one<FlagRow>(db, `SELECT ${FLAG_COLUMNS} FROM flags WHERE workspace_id = $1 AND id = $2${forUpdate ? " FOR UPDATE" : ""}`, [ws, id]);
 }
 
 export interface DeliveryInfo {
@@ -145,22 +158,24 @@ export interface DeliveryInfo {
   updated_at: string;
 }
 
-export function deliveriesFor(db: DB, flagId: string): DeliveryInfo[] {
-  const rows = db
-    .prepare("SELECT action, status, attempts, last_error, updated_at FROM deliveries WHERE flag_id = ? ORDER BY action")
-    .all(flagId) as unknown as (Omit<DeliveryInfo, "updated_at"> & { updated_at: number })[];
+export async function deliveriesFor(db: Queryable, ws: string, flagId: string): Promise<DeliveryInfo[]> {
+  const rows = await all<Omit<DeliveryInfo, "updated_at"> & { updated_at: number }>(
+    db,
+    "SELECT action, status, attempts, last_error, updated_at FROM deliveries WHERE workspace_id = $1 AND flag_id = $2 ORDER BY action",
+    [ws, flagId],
+  );
   return rows.map((r) => ({ ...r, updated_at: new Date(r.updated_at).toISOString() }));
 }
 
 const SEVERITY_RANK = "CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END";
 
 /** The escalation queue: flags still waiting on a person, most severe first, then newest. */
-export function queue(db: DB, statuses: string[], limit: number): Flag[] {
-  const rows = db
-    .prepare(
-      `SELECT * FROM flags WHERE coalesce(status, 'open') IN (${statuses.map(() => "?").join(",")})
-       ORDER BY ${SEVERITY_RANK} DESC, coalesce(updated_at, created_at) DESC LIMIT ?`,
-    )
-    .all(...statuses, limit) as unknown as FlagRow[];
+export async function queue(db: Queryable, ws: string, statuses: string[], limit: number): Promise<Flag[]> {
+  const rows = await all<FlagRow>(
+    db,
+    `SELECT ${FLAG_COLUMNS} FROM flags WHERE workspace_id = $1 AND status = ANY($2::text[])
+     ORDER BY ${SEVERITY_RANK} DESC, coalesce(updated_at, created_at) DESC LIMIT $3`,
+    [ws, statuses, limit],
+  );
   return rows.map(toFlag);
 }

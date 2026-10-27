@@ -3,13 +3,16 @@ import path from "node:path";
 export interface Config {
   port: number;
   host: string;
+  /** Where trained model files live. Everything else is in Postgres. */
   dataDir: string;
+  /** Postgres connection string: CLOUDFRIEND_DATABASE_URL, else DATABASE_URL. */
+  databaseUrl: string;
+  /** Connections in the pool. */
+  dbPool: number;
   /** Empty string disables the admin API. */
   adminKey: string;
   /** Flush ingest writes every this many ms (group commit window). */
   commitWindowMs: number;
-  /** `FULL` survives power loss; `NORMAL` only survives a crashed process. */
-  synchronous: "FULL" | "NORMAL";
   /** Reply 503 once this many requests are queued but not yet parsed. */
   maxQueue: number;
   /** Reject request bodies above this size with 413. */
@@ -102,15 +105,18 @@ function list(raw: string | undefined): string[] | null {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const sync = (env.CLOUDFRIEND_SYNCHRONOUS ?? "FULL").toUpperCase();
-  if (sync !== "FULL" && sync !== "NORMAL") throw new Error("CLOUDFRIEND_SYNCHRONOUS must be FULL or NORMAL");
+  const databaseUrl = env.CLOUDFRIEND_DATABASE_URL || env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("CLOUDFRIEND_DATABASE_URL is not set: cloudfriend stores everything in Postgres (e.g. postgres://user:password@host:5432/cloudfriend). DATABASE_URL works too.");
+  }
   return {
     port: int(env, "PORT", 8080, 0),
     host: env.HOST || "0.0.0.0",
     dataDir: path.resolve(env.CLOUDFRIEND_DATA_DIR || "./data"),
+    databaseUrl,
+    dbPool: int(env, "CLOUDFRIEND_DB_POOL", 10),
     adminKey: env.CLOUDFRIEND_ADMIN_KEY ?? "",
     commitWindowMs: duration(env, "CLOUDFRIEND_COMMIT_WINDOW", "2ms"),
-    synchronous: sync,
     maxQueue: int(env, "CLOUDFRIEND_MAX_QUEUE", 1_000_000),
     maxBodyBytes: int(env, "CLOUDFRIEND_MAX_BODY_BYTES", 1_048_576),
     batchSize: int(env, "CLOUDFRIEND_BATCH_SIZE", 100),
