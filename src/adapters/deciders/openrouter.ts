@@ -151,6 +151,19 @@ export interface Completion extends Decision {
 export const apiKey = (env: NodeJS.ProcessEnv, d: Pick<ChatDefaults, "keyVar">) =>
   (d.keyVar && env[d.keyVar]) || env.OPENROUTER_API_KEY || "";
 
+/** Sampling and format settings of every call. Part of the benchmark cache key (ml/jev.ts). */
+export const REQUEST_PARAMS = { temperature: 0, max_tokens: 4000, response_format: { type: "json_object" } } as const;
+/** The reply format SYSTEM_PROMPT asks for: 2 = flags plus a judgment per event. */
+export const RESPONSE_SCHEMA_VERSION = 2;
+
+/** Exactly what a call sends: the model asked for, the effective system prompt, the user prompt. */
+export function chatRequest(events: CloudfriendEvent[], env: NodeJS.ProcessEnv, d: ChatDefaults, openFlags: DeciderContext["openFlags"] = []) {
+  const instructions = env.CLOUDFRIEND_DECIDER_INSTRUCTIONS?.trim();
+  const system = instructions ? `${SYSTEM_PROMPT}\n\nContext from the operator:\n${instructions}` : SYSTEM_PROMPT;
+  const model = (d.modelVar && env[d.modelVar]) || env.OPENROUTER_MODEL || d.model;
+  return { model, system, prompt: buildPrompt(events, env, openFlags), params: REQUEST_PARAMS };
+}
+
 /** One chat completion over a batch of events. Throws on any failure so the batch is retried. */
 export async function complete(
   events: CloudfriendEvent[],
@@ -160,10 +173,7 @@ export async function complete(
   openFlags: DeciderContext["openFlags"] = [],
 ): Promise<Completion> {
   const base = (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-  const instructions = env.CLOUDFRIEND_DECIDER_INSTRUCTIONS?.trim();
-  const system = instructions ? `${SYSTEM_PROMPT}\n\nContext from the operator:\n${instructions}` : SYSTEM_PROMPT;
-  const model = (d.modelVar && env[d.modelVar]) || env.OPENROUTER_MODEL || d.model;
-  const prompt = buildPrompt(events, env, openFlags);
+  const { model, system, prompt } = chatRequest(events, env, d, openFlags);
   const res = await fetch(`${base}/chat/completions`, {
     method: "POST",
     signal: AbortSignal.any([signal, AbortSignal.timeout(180_000)]),
@@ -174,9 +184,7 @@ export async function complete(
     },
     body: JSON.stringify({
       model,
-      temperature: 0,
-      max_tokens: 4000,
-      response_format: { type: "json_object" },
+      ...REQUEST_PARAMS,
       usage: { include: true },
       messages: [
         { role: "system", content: system },

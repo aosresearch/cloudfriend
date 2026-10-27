@@ -9,7 +9,17 @@
 // means the dataset's weak label (docs/benchmarks.md): these numbers are weak.
 //
 //   node ml/evaluate.ts --data data/prepared/re3 --model models/base.json --split eval \
-//     [--jev] [--budget 10] [--decider oracle] [--out results/eval-re3.json] [--labels-out labels.csv]
+//     [--decider oracle] [--on-miss stop|censor] [--out results/eval-re3.json] [--labels-out labels.csv]
+//
+// Offline by default: Jev's answers come only from recorded calls (--cache, ml/jev.ts), and
+// nothing that could make a request is constructed. `--live --budget <usd>` is the only way to
+// call Jev; an API key in the environment never does. A batch with no valid recording either
+// stops the run (`--on-miss stop`, the default) or is censored (`--on-miss censor`): it gives
+// no labels and no credit, and an incident touching one is reported as censored, never as
+// detected or dismissed. Alerts the classifier raises when live Jev is unavailable are counted
+// as `fallback`, never as Jev's detections. `--on-miss fallback` treats a missing recording
+// the way the live run that made the recordings treated a failed call (Jev unavailable: the
+// classifier's fallback, not credited, nothing learned), to check a replay against that run.
 //
 // The cascade runs as the server does (src/triage/sim.ts): batches go out when due, Jev's
 // answers take effect only after their recorded latency, and its prompt carries the same
@@ -41,11 +51,15 @@ const { values: args } = parseArgs({
     data: { type: "string", multiple: true },
     model: { type: "string" },
     split: { type: "string", default: "eval" },
+    offline: { type: "boolean", default: false },
+    live: { type: "boolean", default: false },
+    "on-miss": { type: "string", default: "stop" },
+    // Removed: live calls need --live and --budget.
     jev: { type: "boolean", default: false },
     // "jev" (cached or live calls) or "oracle": answers from the dataset's weak labels, with a
     // 3 s latency, for free runs that still let suppression be earned (sizing, stage-1 recall).
     decider: { type: "string", default: "jev" },
-    budget: { type: "string", default: "10" },
+    budget: { type: "string" },
     cache: { type: "string", default: "data/jev-cache" },
     out: { type: "string" },
     cases: { type: "string" },
@@ -84,7 +98,11 @@ type StrategyName = "cascade" | "classifier" | "keyword";
 const STRATEGIES = args.strategies!.split(",") as StrategyName[];
 const classifier = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as ClassifierFile);
 const m = classifier.file;
-const jev = new Jev(args.jev!, Number(args.budget), args.cache!);
+if (args.jev) throw new Error("--jev is gone: replays are offline; pass --live --budget <usd> to call Jev");
+if (args.live && args.offline) throw new Error("--live and --offline exclude each other");
+if (!["stop", "censor", "fallback"].includes(args["on-miss"]!)) throw new Error("--on-miss is stop, censor or fallback");
+const usesJev = STRATEGIES.includes("cascade") && args.decider === "jev";
+const jev = usesJev ? new Jev({ mode: args.live ? "live" : "offline", budget: args.budget === undefined ? undefined : Number(args.budget), dir: args.cache! }) : null;
 const N = (k: keyof typeof args) => Number(args[k]);
 const routing = {
   verdictTtlMs: N("verdict-ttl"),
@@ -219,6 +237,8 @@ async function runCase(dir: string, c: Case) {
   const escalatedKinds = { events: 0, by_score: 0 };
   const safety: { id: string; reached: boolean; route: string }[] = [];
   const reachedAt = new Map<string, number>();
+  const censored = new Set<string>();
+  const unanswered = new Set<string>();
 
   const sims = new Map<StrategyName, CascadeSim>();
   for (const name of STRATEGIES) {
@@ -259,18 +279,37 @@ async function runCase(dir: string, c: Case) {
                     triage: { score: item.score ?? 0, similar, context: featurizer.context(item.template, Math.max(start, e.t)) ?? undefined },
                   };
                 });
-                const res = await jev.ask(events, openFlags.map((f) => ({ id: f.id, reason: f.reason, severity: f.severity })));
-                if (res && judgmentsOut !== null) {
+                const res = await jev!.ask(events, openFlags.map((f) => ({ id: f.id, reason: f.reason, severity: f.severity })));
+                if (res.kind === "unavailable") return null;
+                if (res.kind === "miss" || res.kind === "invalid") {
+                  const what = `${res.kind}${res.kind === "invalid" ? ` (${res.reason})` : ""} for a call at ${new Date(start).toISOString()} in ${c.id}`;
+                  if (args["on-miss"] === "stop") {
+                    console.error(`replay stopped: no valid recording: ${what}. --on-miss censor reports it as censored; --live --budget calls Jev.`);
+                    process.exit(3);
+                  }
+                  return args["on-miss"] === "fallback" ? null : "censored";
+                }
+                if (judgmentsOut !== null) {
                   const byItem = new Map(asked.map((a) => [a.item.id, a.item]));
                   let rows = "";
-                  for (const j of res.judgments ?? []) {
+                  for (const j of res.decision.judgments ?? []) {
                     const e = info.get(j.event_id)!;
                     const it = byItem.get(j.event_id)!;
                     rows += [`${c.id}:${j.event_id}`, c.id, new Date(e.t).toISOString(), e.source, serviceOf(e.data), messageOf(e.data), it.route, (it.score ?? 0).toFixed(4), positives.has(j.event_id) ? 1 : 0, j.relevance].map(csvCell).join(",") + "\n";
                   }
                   fs.writeSync(judgmentsOut, rows);
                 }
-                return res ? { decision: { flags: res.flags, judgments: res.judgments }, latencyMs: res.call.latency_ms } : null;
+                return { decision: res.decision, latencyMs: res.call.latency_ms };
+              }
+            : undefined,
+          censored: cascade
+            ? (ids) => {
+                for (const id of ids) censored.add(id);
+              }
+            : undefined,
+          unanswered: cascade
+            ? (ids) => {
+                for (const id of ids) unanswered.add(id);
               }
             : undefined,
           reached: cascade
@@ -361,18 +400,18 @@ async function runCase(dir: string, c: Case) {
   for (const s of safety) s.reached = reachedAt.has(s.id);
 
   const perStrategy: Record<string, unknown> = {};
-  for (const [name, s] of sims) perStrategy[name] = summarize(c, name, s, events, positives, windows);
+  for (const [name, s] of sims) perStrategy[name] = summarize(c, name, s, events, positives, windows, name === "cascade" ? censored : new Set(), name === "cascade" ? unanswered : new Set());
   const cs = perStrategy.cascade as ReturnType<typeof summarize> | undefined;
   console.log(
     `${c.id.padEnd(36)} events=${events} pos=${positives.size} ` +
       (cs ? `to_jev=${(cs.share_to_jev * 100).toFixed(2)}% alerts=${cs.flags} ` + incidentLine(cs) : "") +
-      ` | jev $${jev.spent.toFixed(3)} calls=${jev.calls} cached=${jev.cachedCalls}`,
+      (jev ? ` | jev $${jev.spent.toFixed(3)} ${Object.entries(jev.outcomes).map(([k, v]) => `${k}=${v}`).join(" ")}` : ""),
   );
   return { case: c, events, positives: positives.size, labels, escalated_kinds: escalatedKinds, safety, perStrategy, end };
 }
 
 function incidentLine(s: ReturnType<typeof summarize>) {
-  return s.incidents.map((i) => (i.detected ? "D" : i.withheld ? "W" : i.dismissed ? "X" : "-")).join("") + ` pre=${s.flags_before_fault ?? "-"}`;
+  return s.incidents.map((i) => (i.censored ? "C" : i.detected ? "D" : i.withheld ? "W" : i.unanswered ? "U" : i.dismissed ? "X" : "-")).join("") + ` pre=${s.flags_before_fault ?? "-"}`;
 }
 
 /** Forget events no strategy can still need: older than the batch window and not in a flag. */
@@ -394,17 +433,20 @@ function incidentsOf(c: Case, windows: [number, number][] | null) {
     .map((i) => ({ id: i.id, kind: i.kind, start: i.start_ms, service: i.service }));
 }
 
-function summarize(c: Case, name: StrategyName, s: CascadeSim, events: number, positives: Map<string, Positive>, windows: [number, number][] | null) {
+function summarize(c: Case, name: StrategyName, s: CascadeSim, events: number, positives: Map<string, Positive>, windows: [number, number][] | null, censored: Set<string>, unanswered: Set<string>) {
   const isPos = (id: string) => positives.has(id);
   const flagIds = (f: SimFlag) => [...f.events, ...f.additions.flatMap((a) => a.ids)];
-  // When each flag first contained an event of each incident.
+  // When each flag first contained an event of each incident. The classifier's alerts while
+  // live Jev was unavailable are kept apart: they are not Jev's detections.
   const alertAt = new Map<string, number>();
+  const fallbackAt = new Map<string, number>();
   for (const f of s.flags) {
+    const at = name === "cascade" && f.via === "fallback" ? fallbackAt : alertAt;
     const mark = (ids: string[], t: number) => {
       for (const id of ids) {
         const p = positives.get(id);
         if (!p) continue;
-        for (const inc of p.incidents.length ? p.incidents : [c.id]) if (!alertAt.has(inc) || alertAt.get(inc)! > t) alertAt.set(inc, t);
+        for (const inc of p.incidents.length ? p.incidents : [c.id]) if (!at.has(inc) || at.get(inc)! > t) at.set(inc, t);
       }
     };
     mark(f.events, f.created);
@@ -413,7 +455,11 @@ function summarize(c: Case, name: StrategyName, s: CascadeSim, events: number, p
   const incidents = incidentsOf(c, windows).map((inc) => {
     const ps = [...positives.values()].filter((p) => (p.incidents.length ? p.incidents.includes(inc.id) : c.inject_ms !== undefined));
     const reached = ps.filter((p) => p.reached !== null);
-    const alert = alertAt.get(inc.id);
+    // Any of its events in a batch without a valid answer: what Jev would have said is unknown.
+    const isCensored = ps.some((p) => censored.has(p.id));
+    const alert = isCensored ? undefined : alertAt.get(inc.id);
+    // Its events reached Jev only in calls that got no answer (live Jev unavailable): not Jev's miss.
+    const isUnanswered = !isCensored && reached.length > 0 && alert === undefined && reached.every((p) => unanswered.has(p.id));
     return {
       id: inc.id,
       kind: inc.kind,
@@ -421,9 +467,12 @@ function summarize(c: Case, name: StrategyName, s: CascadeSim, events: number, p
       positives: ps.length,
       reached: reached.length,
       detectable: ps.length > 0,
-      withheld: name === "cascade" && ps.length > 0 && reached.length === 0,
-      dismissed: name === "cascade" && reached.length > 0 && alert === undefined,
+      censored: isCensored,
+      withheld: name === "cascade" && !isCensored && ps.length > 0 && reached.length === 0,
+      unanswered: name === "cascade" && isUnanswered,
+      dismissed: name === "cascade" && !isCensored && !isUnanswered && reached.length > 0 && alert === undefined,
       detected: alert !== undefined,
+      fallback_alert: fallbackAt.has(inc.id),
       ttd_s: alert !== undefined ? (alert - inc.start) / 1000 : null,
       first_reached_s: reached.length ? (Math.min(...reached.map((p) => p.reached!)) - inc.start) / 1000 : null,
     };
@@ -442,6 +491,8 @@ function summarize(c: Case, name: StrategyName, s: CascadeSim, events: number, p
     jev_calls: s.calls,
     share_to_jev: s.asked / Math.max(events, 1),
     jev_unavailable: s.unavailable,
+    jev_censored: s.censored,
+    fallback_flags: s.flags.filter((f) => f.via === "fallback").length,
     flags: s.flags.length,
     flags_with_incident_event: alertsWithIncident,
     flags_without_incident_event: s.flags.length - alertsWithIncident,
@@ -484,7 +535,10 @@ const aggregate: Record<string, unknown> = {};
 for (const s of STRATEGIES) {
   const rs = all.map((r) => ({ r, x: r.perStrategy[s] as ReturnType<typeof summarize> }));
   const events = rs.reduce((a, { x }) => a + x.events, 0);
-  const incidents = rs.flatMap(({ r, x }) => x.incidents.filter((i) => i.detectable).map((i) => ({ ...i, group: r.case.chain ? i.kind : groupOf(r.case.id) })));
+  // Censored incidents (a batch without a valid recorded answer) are counted apart and left
+  // out of every rate: what Jev would have said about them is unknown.
+  const all_ = rs.flatMap(({ r, x }) => x.incidents.filter((i) => i.detectable).map((i) => ({ ...i, group: r.case.chain ? i.kind : groupOf(r.case.id) })));
+  const incidents = all_.filter((i) => !i.censored);
   const detected = incidents.filter((i) => i.detected).length;
   const withheld = incidents.filter((i) => i.withheld).length;
   const dismissed = incidents.filter((i) => i.dismissed).length;
@@ -508,6 +562,12 @@ for (const s of STRATEGIES) {
     flags_without_incident_event: rs.reduce((a, { x }) => a + x.flags_without_incident_event, 0),
     flags_before_fault: rs.reduce((a, { x }) => a + (x.flags_before_fault ?? 0), 0),
     incidents: incidents.length,
+    censored_incidents: all_.length - incidents.length,
+    censored_events: rs.reduce((a, { x }) => a + x.jev_censored, 0),
+    fallback_flags: rs.reduce((a, { x }) => a + x.fallback_flags, 0),
+    // Incidents only the classifier's fallback alerted on: not counted as detected.
+    fallback_only: incidents.filter((i) => !i.detected && i.fallback_alert).length,
+    unanswered: rate(incidents.filter((i) => i.unanswered).length, incidents.length),
     detected: rate(detected, incidents.length),
     detected_ci95_by_group: bootstrap(groups, (gs) => gs.flat().filter((i) => i.detected).length / Math.max(gs.flat().length, 1)),
     ...(s === "cascade"
@@ -534,12 +594,11 @@ const summary = {
   split: args.split,
   settings: { ...simBase, ...routing, decider: args.decider, audit_rate: N("audit-rate"), novel_guard: args["novel-guard"] !== "off", windows: args.windows ?? null },
   labels: "weak (dataset heuristics): see docs/benchmarks.md",
-  jev: {
-    live: args.jev,
+  jev: jev && {
+    mode: jev.mode,
+    on_miss: args["on-miss"],
     model: process.env.JEV_MODEL || JEV.model,
-    calls: jev.calls,
-    cached_calls: jev.cachedCalls,
-    skipped_calls: jev.skipped,
+    outcomes: jev.outcomes,
     spent_usd: jev.spent,
     prompt_tokens: jev.promptTokens,
     completion_tokens: jev.completionTokens,

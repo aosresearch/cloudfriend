@@ -46,9 +46,15 @@ export interface DecideResult {
 export interface SimHooks {
   /**
    * Ask the decider about these examples. `null` means it is unavailable: the classifier's
-   * own threshold decides those events, and nothing is learned.
+   * own threshold decides those events (flags `via: "fallback"`), and nothing is learned.
+   * `"censored"` means there is no answer to use (a replay without a recording of this
+   * call): the batch decides nothing, teaches nothing, and its events don't count as reached.
    */
-  decide?(asked: Plan["ask"], openFlags: SimFlag[], start: number): Promise<DecideResult | null>;
+  decide?(asked: Plan["ask"], openFlags: SimFlag[], start: number): Promise<DecideResult | "censored" | null>;
+  /** A censored batch's events (examples and their followers). */
+  censored?(ids: string[], t: number): void;
+  /** Events in a batch the decider was unavailable for: they reached it, but got no answer. */
+  unanswered?(ids: string[], t: number): void;
   /** Override the route, for baselines (keyword rule, everything to the decider). */
   route?(e: SimEvent, route: FullRoute): FullRoute;
   /** An answer took effect. */
@@ -80,6 +86,8 @@ export class CascadeSim {
   asked = 0;
   calls = 0;
   unavailable = 0;
+  /** Events in batches whose answer was censored (see SimHooks.decide). */
+  censored = 0;
   readonly state: RoutingState;
   #o: Required<Omit<SimOptions, "route">> & { route: SimOptions["route"] };
   #hooks: SimHooks;
@@ -153,6 +161,18 @@ export class CascadeSim {
       const slot = this.#slots.indexOf(Math.min(...this.#slots));
       const start = Math.max(now, this.#slots[slot]!);
       const res = this.#hooks.decide ? await this.#hooks.decide(plan.ask, this.#openFlags(start), start) : null;
+      const askedIds = plan.ask.map((a) => a.item.id);
+      const followerIds = plan.ask.flatMap((a) => (plan.followers.get(a.item.id) ?? []).map((f) => f.id));
+      if (res === "censored") {
+        // No answer: nothing reached anyone, and the cached verdicts of the rest still apply.
+        answered = false;
+        this.#slots[slot] = start;
+        this.censored += askedIds.length + followerIds.length;
+        this.#hooks.censored?.([...askedIds, ...followerIds], start);
+        const out = applyVerdicts(plan, { flags: [] });
+        this.#effects.push({ at, apply: () => this.#apply(batch, plan, out, at, false) });
+        return;
+      }
       at = start + (res?.latencyMs ?? 0);
       this.#slots[slot] = at;
       if (res) decision = res.decision;
@@ -162,9 +182,8 @@ export class CascadeSim {
         const hot = plan.ask.filter(({ item }) => (item.score ?? 0) >= this.#o.route.threshold).map(({ item }) => item.id);
         if (hot.length) decision = { flags: [{ reason: "classifier fallback", severity: "medium", event_ids: hot }] };
       }
-      const askedIds = plan.ask.map((a) => a.item.id);
-      const followerIds = plan.ask.flatMap((a) => (plan.followers.get(a.item.id) ?? []).map((f) => f.id));
       this.#hooks.reached?.(askedIds, "asked", start);
+      if (!answered) this.#hooks.unanswered?.([...askedIds, ...followerIds], start);
       if (followerIds.length) this.#hooks.reached?.(followerIds, "follower", start);
     }
     const out = applyVerdicts(plan, decision);

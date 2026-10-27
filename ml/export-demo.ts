@@ -12,6 +12,9 @@
 // the window, the routing state learns from the dataset's labels instead (no Jev calls), so
 // the system isn't brand new when the window starts. The page plays these back; nothing in it
 // is invented.
+//
+// Offline by default: a call without a valid recording stops the export. `--live --budget <usd>`
+// is the only way to call Jev; an API key in the environment never does.
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -31,7 +34,8 @@ const { values: args } = parseArgs({
     out: { type: "string" },
     scenario: { type: "string", multiple: true },
     cache: { type: "string", default: "data/jev-cache" },
-    budget: { type: "string", default: "2" },
+    live: { type: "boolean", default: false },
+    budget: { type: "string" },
     "audit-rate": { type: "string", default: "0.002" },
     "max-shown": { type: "string", default: "1200" },
   },
@@ -43,7 +47,7 @@ if (!args.model || !args.out || !args.scenario?.length) {
 
 const model = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as ClassifierFile);
 const mf = model.file;
-const jev = new Jev(Boolean(process.env.JEV_API_KEY || process.env.OPENROUTER_API_KEY), Number(args.budget), args.cache!);
+const jev = new Jev({ mode: args.live ? "live" : "offline", budget: args.budget === undefined ? undefined : Number(args.budget), dir: args.cache! });
 const WAIT = 10_000;
 const routing = { verdictTtlMs: 15 * 60_000, escalatedTtlMs: 7 * DAY, escalatedMemoryMs: 90 * DAY, suppressionTtlMs: 30 * DAY };
 
@@ -105,10 +109,15 @@ async function exportScenario(spec: string) {
           const e = byId.get(item.id)!;
           return { id: item.id, source: e.source, received_at: new Date(e.t).toISOString(), data: e.data, triage: { score: item.score ?? 0, similar, context: featurizer.context(item.template, Math.max(start, e.t)) ?? undefined } };
         });
-        const res = await jev.ask(events, openFlags.map((f) => ({ id: f.id, reason: f.reason, severity: f.severity })));
-        const drafts: FlagDraft[] = res?.flags ?? [];
+        const ans = await jev.ask(events, openFlags.map((f) => ({ id: f.id, reason: f.reason, severity: f.severity })));
+        if (ans.kind === "miss" || ans.kind === "invalid") {
+          console.error(`export stopped: no valid recording for a call at ${new Date(start).toISOString()} in ${name} (${ans.kind}). --live --budget calls Jev.`);
+          process.exit(3);
+        }
+        const res = ans.kind === "unavailable" ? null : ans;
+        const drafts: FlagDraft[] = res?.decision.flags ?? [];
         const judged: Record<string, number> = {};
-        for (const j of res?.judgments ?? []) judged[j.relevance] = (judged[j.relevance] ?? 0) + 1;
+        for (const j of res?.decision.judgments ?? []) judged[j.relevance] = (judged[j.relevance] ?? 0) + 1;
         const call = {
           t: start,
           model: res?.call.model ?? "unavailable",
@@ -123,7 +132,7 @@ async function exportScenario(spec: string) {
         totals.asked += events.length;
         totals.calls++;
         totals.cost += call.cost;
-        return res ? { decision: { flags: res.flags, judgments: res.judgments }, latencyMs: res.call.latency_ms } : null;
+        return res ? { decision: res.decision, latencyMs: res.call.latency_ms } : null;
       },
     },
   );
