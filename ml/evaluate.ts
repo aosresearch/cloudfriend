@@ -144,9 +144,14 @@ const serviceOf = (data: unknown) => {
   return String(d?.service ?? d?.container_name ?? "");
 };
 
-/** Must-reach ids of a labelled safety set (benchmarks/safety-set), as `<case>:<event index>`. */
+/**
+ * Must-reach ids, as `<case>:<event index>`: a labelled safety set (a directory like
+ * benchmarks/safety-set, its `must_reach` rows), or a file of ids, one per line.
+ */
 const safetyIds = new Set<string>();
-if (args.safety) {
+if (args.safety && fs.statSync(args.safety).isFile()) {
+  for (const l of fs.readFileSync(args.safety, "utf8").split(/\r?\n/)) if (l.trim()) safetyIds.add(l.trim());
+} else if (args.safety) {
   const [header, ...lines] = fs.readFileSync(path.join(args.safety, "candidates.csv"), "utf8").split(/\r?\n/).filter(Boolean);
   const cols = parseCsvLine(header!);
   for (const l of lines) {
