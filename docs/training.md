@@ -12,7 +12,7 @@ flowchart LR
   people["people:<br/>confirmed, false positive,<br/>missed"] --> labels
   history["imported history"] --> labels
   labels --> train["ml/train.py<br/>LightGBM, on top of<br/>the built-in model"]
-  train --> gate{"gate:<br/>recall on the accept split?<br/>safety set?<br/>Jev share on live traffic?"}
+  train --> gate{"gate:<br/>recall on the accept split?<br/>regression scenarios?<br/>Jev share on live traffic?"}
   gate -->|pass| shadow["shadow<br/>(scores live events,<br/>acts on none)"]
   shadow -->|"dropped nothing<br/>judged relevant"| active["active model<br/>(hot-swapped)"]
   gate -->|fail| keep["keep current model"]
@@ -61,18 +61,22 @@ cloudfriend labels import incidents.ndjson
 
 `cloudfriend train` (in the container: `docker exec <container> cloudfriend train`), `POST /model/train`, or the schedule all do the same thing:
 
-1. **Split.** Labels from the current featurizer version are split by time into three parts: **fit** (oldest 60%), **calibrate** (next 20%) and **accept** (newest 20%). Labels of one template within `CLOUDFRIEND_INCIDENT_WINDOW` (30 minutes) stay together, so one incident never lands in two parts. Splitting by time asks the right question: does a model trained on the past do well on what came next? A run needs at least 30 labels, with escalations and non-escalations in every part. Otherwise it is recorded as `skipped`.
+1. **Split.** Labels from the current featurizer version are split by time into three parts: **fit** (oldest 60%), **calibrate** (next 20%) and **accept** (newest 20%). A run of labels of one template with gaps under `CLOUDFRIEND_INCIDENT_WINDOW` (30 minutes) is one incident and stays in one part. It is capped at four windows, so a template that never goes quiet doesn't swallow the split. Splitting by time asks the right question: does a model trained on the past do well on what came next? A run needs at least 30 labels, with escalations and non-escalations in every part. Otherwise it is recorded as `skipped`.
 2. **Train.** `ml/train.py` boosts up to 200 new trees on top of the built-in model (`models/base.lgb.txt`) on the fit part, with each label's weight. Early stopping and thresholds use the calibrate part only. A few hundred of your labels refine the built-in model rather than replace it. The thresholds:
    - `drop_below`: the highest score that still sends `CLOUDFRIEND_RECALL_TARGET` (99.5%) of the calibrate part's escalations to Jev.
    - `threshold`: the score with the best F1, used when there is no Jev.
 3. **Limit.** Labels only exist for events Jev saw, so a threshold fitted on them can be far too bold for the traffic Jev never sees. Both models score the 50,000 most recent events. If the candidate would send less than half the share of events the active model sends to Jev, its `drop_below` is lowered until it sends exactly half. Thresholds therefore move one step per run, and audit samples check each step.
 4. **Gate.** The accept part is used here and nowhere else. These are hard requirements, not a comparison with the active model:
-   - the candidate sends at least the recall target (99.5%) of the accept part's escalations to Jev, with no slack. An escalation counts as sent if the candidate scores it at or above `drop_below`, or if the escalated-template rule (route `known`) would have sent it anyway: an earlier label of its template, within `CLOUDFRIEND_ESCALATED_TTL`, was an escalation, and no person has said otherwise since. Only labels from before the event count, as the server would have had them. The report gives the recall by score alone too (`recall_by_score`), and
-
-   - if a safety set is configured (`CLOUDFRIEND_SAFETY_SET`, see below), it sends every one of its `must_reach` events to Jev.
+   - the candidate sends at least the recall target (99.5%) of the accept part's escalations to Jev, with no slack. An escalation counts as sent if the candidate scores it at or above `drop_below`, or if the routing rules would have sent it anyway: its template was escalated (protected, or due for review), or its kind hadn't earned suppression. The rules are replayed from the labels in the order they were made, so only verdicts that existed when the event arrived count: a burst that arrived before Jev answered gets no credit from that answer. The report gives the recall by score alone too (`recall_by_score`), as a diagnostic;
+   - every regression scenario passes (see below): each of its must-reach events reaches Jev through the complete pipeline.
 
    Only a candidate that meets both is compared on workload: it must not send a larger share of events to Jev than the active model, unless the active model itself fails the requirements.
-5. **Shadow.** A candidate that passes runs in shadow for `CLOUDFRIEND_SHADOW_PERIOD` (24 hours). It scores every live event next to the active model, but its scores change nothing. At the end it is promoted only if it would have dropped none of the events that Jev or a person judged relevant in that time. For each event the server records the route the shadow model would have taken, so events that the `novel` or `known` rule would have sent to Jev anyway count as reached. Otherwise it is rejected. `GET /model` shows the model in shadow. Set the period to `off` to promote at once.
+5. **Shadow.** A candidate that passes runs in shadow. It scores every live event next to the active model, and the server records the route it would have taken, but its routes change nothing. What matters is what it would **newly drop**: events the active model sends to Jev and the candidate wouldn't. These are its savings and its risk, and since the active model sends them to Jev, each one gets a judgment.
+   - It is rejected as soon as one of them is judged relevant, by Jev or a person.
+   - It is promoted only after `CLOUDFRIEND_SHADOW_PERIOD` (24 hours, a minimum, not proof), and only once at least `CLOUDFRIEND_SHADOW_MIN_EVIDENCE` (200) of them have been judged, none relevant. The report gives the exact upper bound on the share of relevant ones: zero in 200 means at most 1.5%, at 95%.
+   - Without that much evidence it keeps running, up to `CLOUDFRIEND_SHADOW_MAX` (7 days), then is rejected. The active model keeps routing all along, and labels keep accumulating for the next run.
+
+   Audit samples that both models drop are counted too: they are the two models' shared blind spot, which no comparison between them can see. `GET /model` shows the evidence so far, and `GET /model/shadow/review` lists the newly dropped events a person should look at: those judged relevant, and those nobody judged (Jev was uncertain, or they only stood behind an example). A person's verdict on them, through the feedback endpoints, counts like Jev's. Jev is not ground truth. A scheduled run never replaces a candidate still in shadow. Set the period to `off` to promote at once.
 6. **Promote.** The model is written to `/data/models/active.json` and swapped in without a restart. A running server also picks up a model promoted by `cloudfriend train` in another process within 30 seconds.
 
 Every run is recorded with its report: label counts, both models' metrics, and the share of recent events each would send to Jev.
@@ -87,18 +91,46 @@ curl -H "Authorization: Bearer $CLOUDFRIEND_ADMIN_KEY" localhost:8080/model
 {
   "id": "mdl_20261026203009_b7d1ba",
   "status": "shadow",
-  "reason": "recall 100.0% (target 99.5%); Jev would see 32.6% of events vs 45.6%; running in shadow before promotion",
-  "labels": { "total": 1712, "positives": 1186, "human": 1186, "fit": 1027, "calibrate": 342, "accept": 343 },
+  "reason": "recall 100.0% (target 99.5%; 95.8% by score alone, regression scenarios 39/39 (37 by score alone)); Jev would see 65.0% of events vs 100.0%; running in shadow before promotion",
+  "labels": { "total": 250, "positives": 144, "human": 0, "fit": 150, "calibrate": 60, "accept": 40 },
+  "regression": { "passed": true, "scenarios": 13, "must_reach": 39, "reached": 39, "reached_by_score": 37, "failures": [] },
   "safety": null,
   "recent": { "events": 50000, "active": 0.0144, "candidate": 0.0129, "adjusted": false }
 }
 ```
 
+## Regression scenarios
+
+Recall on the accept part only covers events that reached Jev, one at a time. The dangerous situations are sequences: something routine turning into an error, a handled error becoming an outage, a problem coming back after its protection expired, all of it across a restart. Resetting history before each test would make every event look new, and the test would pass without testing anything. So the gate also runs **regression scenarios**: event sequences, with the history that comes before them, through the complete pipeline. That means the real featurizer, the candidate model, the routing rules, the verdict cache and the batching, in simulated time (`src/triage/sim.ts`), with the decider's answers scripted. Every event a scenario marks `must_reach` has to reach the decider.
+
+The built-in pack (`regression/`) is written with real RCAEval messages:
+
+| Scenario | The situation |
+| --- | --- |
+| `new-error` | a genuinely new error, after half an hour of routine traffic that has earned suppression |
+| `benign-to-error` | the same message, judged routine at info/200, comes back at error/500 |
+| `benign-to-error-within-cache` | the same, seconds later, while the "no" is still cached (the previous review's reproduction) |
+| `isolated-to-sustained` | a handled error once every ten minutes (judged benign) becomes 60 a minute; Jev must get another look while it is sustained |
+| `returning-after-expiry` | a problem escalated on day 0, quiet for a week, back on day 8; also with earned suppression off, where only the review on expiry saves it |
+| `missed-escalation-reported` | a person says a suppressed kind mattered; the next one must reach Jev |
+| `*-after-restart` | each of these with a restart just before the event that matters |
+
+The suite has teeth: with the rules switched off, a model that drops everything fails the new-error, benign-to-error, sustained, returning and missed-escalation scenarios. On its first run it found a real gap. A cached "no" given while an error ran at 10 a minute held until 5 times that rate, so a failure settling at 40 a minute stayed hidden for the cache's 15 minutes. A cached "no" now ends at twice the rate.
+
+Add your own: put scenario files in a directory and set `CLOUDFRIEND_REGRESSION_SUITE`. The format is described in `src/triage/scenarios.ts`. `cloudfriend regression [--model file]` runs the suite by hand, and reports how many must-reach events the score alone would have sent, as a diagnostic.
+
 ## The safety set
 
-Recall on the accept part only covers events that reached Jev. Nothing checks the events no model has ever sent to Jev, which are exactly the ones a too-bold model would lose. The safety set fills that gap: a few hundred events chosen because a classifier is likely to get them wrong, labelled by people, and used **only** at the gate, never for training.
+`benchmarks/safety-set/` holds about 300 events picked from the held-out benchmark data by `ml/safety-candidates.ts`, because a classifier is likely to get them wrong, for people to label. Its README explains how. Two things use it once labelled:
 
-`benchmarks/safety-set/` holds the candidates for the built-in model, picked from the held-out benchmark data by `ml/safety-candidates.ts`. Its README explains how to label them. Point `CLOUDFRIEND_SAFETY_SET` at a directory with a labelled `candidates.csv` and the matching `candidates.features.csv`, and every candidate must send all of its `must_reach` rows to Jev. Your own safety set can be built the same way from your own streams.
+- `ml/evaluate.ts --safety benchmarks/safety-set` replays each case and reports which `must_reach` events reached Jev through the full cascade, in their real context. That is the benchmark version of a regression scenario.
+- The trainer, with `CLOUDFRIEND_SAFETY_SET`, reports how many `must_reach` events the candidate's score alone would send to Jev. This is a diagnostic, not a requirement: it sees isolated feature vectors, not the routing rules, which also decide what reaches Jev.
+
+## Two evaluations, two questions
+
+The regression scenarios and the safety set are curated: they answer "did we break a known must-catch situation?". They can't say how often important things are missed in representative traffic, because handpicked or repeated cases don't satisfy the sampling assumptions a miss rate needs. That needs an independent sample, measured per incident ([Benchmarks](./benchmarks.md)), and its numbers are estimates with bounds, not guarantees. Zero misses in 300 independent incidents still leaves a miss rate of up to 1% at 95% confidence; it takes about 600 to bring that bound under 0.5%. So 99.5% is a target the training loop measures against, not a certification.
+
+Two failure rates are kept apart throughout. An important event can be **withheld**: stage 1 never sent it to Jev. Or it can be **dismissed**: Jev saw it and didn't alert. Earned suppression, the review on expiry and the shadow checks address the first. The second is about Jev's own accuracy, which needs independent evidence: people labelling a sample of Jev's judgments.
 
 ## What retraining does to stage-1 false positives
 
@@ -145,8 +177,11 @@ Training needs Python 3 with LightGBM and numpy, which the image includes. Outsi
 | `CLOUDFRIEND_RETRAIN_MIN_LABELS` | `200` | New labels needed before a scheduled run. |
 | `CLOUDFRIEND_HUMAN_LABEL_WEIGHT` | `5` | Weight of a person's label relative to Jev's. |
 | `CLOUDFRIEND_RECALL_TARGET` | `0.995` | Share of the accept part's escalations a candidate must still send to Jev. Also sets `drop_below` on the calibrate part. |
-| `CLOUDFRIEND_SAFETY_SET` | | Directory with a labelled safety set. Every `must_reach` event must reach Jev. |
-| `CLOUDFRIEND_SHADOW_PERIOD` | `24h` | How long a candidate runs in shadow before it is promoted or rejected. `off` promotes at once. |
+| `CLOUDFRIEND_REGRESSION_SUITE` | | Directory of your own regression scenarios, run with the built-in ones at every gate. |
+| `CLOUDFRIEND_SAFETY_SET` | | Directory with a labelled safety set. Its score-only result is reported, as a diagnostic. |
+| `CLOUDFRIEND_SHADOW_MIN_EVIDENCE` | `200` | Judged events a candidate would newly drop, none relevant, before it is promoted. |
+| `CLOUDFRIEND_SHADOW_MAX` | `7d` | How long a candidate may collect that evidence before it is rejected. |
+| `CLOUDFRIEND_SHADOW_PERIOD` | `24h` | The least time a candidate runs in shadow. `off` promotes at once. |
 | `CLOUDFRIEND_INCIDENT_WINDOW` | `30m` | Labels of one template within this window stay in the same split. |
 | `CLOUDFRIEND_PYTHON` | `python3` | Interpreter for `ml/train.py`. |
 

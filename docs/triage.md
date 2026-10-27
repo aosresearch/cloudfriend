@@ -15,8 +15,8 @@ Each Jev verdict also becomes a training label for the classifier. As the classi
 flowchart LR
   ev(["events"]) --> feat["Featurizer<br/>template, rates,<br/>novelty"]
   feat --> clf{"LightGBM<br/>score"}
-  clf -->|"below drop_below"| drop["dropped<br/>(no cost)"]
-  clf -->|"never-seen error,<br/>or a kind escalated before"| jev
+  clf -->|"below drop_below,<br/>kind judged benign before"| drop["dropped<br/>(no cost)"]
+  clf -->|"never-seen error, a kind not yet<br/>judged benign, or escalated before"| jev
   clf -->|"1% audit sample"| jev
   clf -->|"uncertain"| group["group by template,<br/>reuse recent verdicts"]
   group -->|"≤3 examples<br/>per template"| jev{{"Jev"}}
@@ -56,15 +56,35 @@ The model gives each event a probability that it should be escalated, and the ev
 
 | Route | When | What happens |
 | --- | --- | --- |
-| `drop` | score below the model's `drop_below` | Done. Not escalated, never sent anywhere. |
+| `drop` | score below the model's `drop_below`, and its kind has earned suppression (below) | Done. Not escalated, never sent anywhere. |
 | `jev` | score at or above `drop_below` | Goes to Jev in the next batch. |
+| `review` | score below `drop_below`, but its kind hasn't earned suppression, or its kind was escalated more than `CLOUDFRIEND_ESCALATED_TTL` ago | Goes to Jev. One example per kind is shown; the rest follow its verdict. |
 | `novel` | error-like (error level, error words or a 5xx) and its template has never been seen, whatever its score | Goes to Jev once. Later events of the template are scored normally. Turn off with `CLOUDFRIEND_NOVEL_ERRORS=off`. |
-| `known` | an event of its template was judged relevant by Jev, or escalated by a person, in the last `CLOUDFRIEND_ESCALATED_TTL` (7 days), whatever its score | Goes to Jev, where a cached verdict usually adds it to the open flag. The classifier can never drop the next instance of something that was escalated. A person marking the flag `false_positive` ends this for its templates. |
+| `known` | an event of its template was judged relevant by Jev, or escalated by a person, in the last `CLOUDFRIEND_ESCALATED_TTL` (7 days), whatever its score | Goes to Jev, where a cached verdict usually adds it to the open flag. The classifier can never drop the next instance of something that was escalated. A person marking the flag `false_positive` ends this for its templates. After the 7 days, the next event of the template is reviewed instead (route `review`), see below. |
 | `audit` | a random `CLOUDFRIEND_AUDIT_RATE` (1%) of what would be dropped | Goes to Jev, so its answers measure what the classifier misses. Audits aren't urgent: they ride along with the next batch, or go on their own after `CLOUDFRIEND_AUDIT_WAIT` (5 minutes). |
 | `auto` | score at or above `escalate_above` | Escalated without asking Jev. Off in the shipped model (`escalate_above` is above 1). |
 | `classifier` | no Jev configured, score at or above the model's `threshold` | Escalated on the classifier alone. |
 
 `drop_below` is chosen when the model is trained: the highest score that still sends 99.5% of the known escalations to Jev (`CLOUDFRIEND_RECALL_TARGET`).
+
+### Suppression is earned
+
+A low score alone doesn't let the classifier drop an event. Its kind, meaning its template at its severity, must have **earned suppression**: Jev or a person judged an event of that kind benign within `CLOUDFRIEND_SUPPRESSION_TTL` (30 days), and the situation hasn't changed materially since. A change means either of these:
+
+- the template is more than 5 times as frequent as when it was judged;
+- its service has at least 10 errors in the last 10 minutes and more than 5 times as many as then.
+
+Until then, the event goes to Jev (route `review`). So the first event of every new kind of traffic is looked at once, a kind stops being dropped when it starts happening much more often, and an error-level version of a routine info line is a new kind. The classifier's job is to recognise traffic that has been judged safe to exclude, not to reproduce Jev's reasoning.
+
+A relevant judgment, or a person's escalation, revokes a kind's suppression until it is judged benign again. Suppression also expires after 30 days, and the next event gets a fresh look. A decider that doesn't judge events (an old-style one that only returns flags) never earns suppression, so the classifier never drops on its behalf. `CLOUDFRIEND_SUPPRESSION_TTL=off` turns this off and lets the classifier drop anything below `drop_below`, as before.
+
+The first look costs Jev calls. With a long-running server it happens once per kind, but in the benchmarks' 25-minute cases every kind is new, and Jev read about 2.6 times as many events (see [Benchmarks](./benchmarks.md)).
+
+### Expired protection means review, not drop
+
+An escalated template is protected for `CLOUDFRIEND_ESCALATED_TTL` (7 days): every event of it goes to Jev. After that, for up to `CLOUDFRIEND_ESCALATED_MEMORY` (90 days), its next event goes to Jev once, on route `review`. If Jev judges it relevant, the protection is renewed; if benign, it is retired. Silence never ends it. So a problem that comes back on day 8 meets a fresh review, not a classifier that has forgotten it.
+
+Both survive a restart. Labels store the severity and context they were judged in, and the server rebuilds earned suppression and escalations from them on startup.
 
 `GET /stats` shows how many events took each route, and `GET /events?route=jev` lists them. Every event in the API has its `score` and `route`.
 
@@ -76,10 +96,11 @@ Events that pass the classifier wait for a batch, as before: 100 events, or 10 s
 
    A cached "no" is used more carefully than a "yes", since a wrong one hides a problem:
    - it is stored only when Jev judged every example of that template and severity benign, never from silence;
-   - it is ignored once the template's rate in the last minute is more than 5 times its rate when Jev ruled, since a burst is new information;
-   - `audit`, `novel` and `known` events skip it and always reach Jev;
+   - it ends once the template's rate in the last minute is twice its rate when Jev ruled, and at least 5 more a minute. A growing failure gets a fresh look at each doubling, which costs a few calls per burst;
+   - it doesn't apply to an event the classifier scores far above the events it was given for, more than 2 in log-odds, since the classifier sees a change;
+   - `audit`, `novel`, `known` and `review` events skip it and always reach Jev;
    - a person reporting a missed event (`POST /events/:id/feedback {"escalate": true}`) clears it.
-2. **Examples.** At most `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` (3) events per template are sent. Each carries counts from the featurizer's history, which includes events the classifier dropped: how often the template occurred in the last minute, 10 minutes and hour, its usual rate per hour, when it was first seen, and its service's recent errors. The rest of the template's events take the examples' verdict.
+2. **Examples.** At most `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` (3) events per template are sent, and one for a kind sent only for review. Each carries counts from the featurizer's history, which includes events the classifier dropped: how often the template occurred in the last minute, 10 minutes and hour, its usual rate per hour, when it was first seen, and its service's recent errors. The rest of the template's events take the examples' verdict.
 
 A burst of 2,000 identical errors therefore costs one Jev call, not twenty. In the benchmarks this cut Jev's reading to about 1 line in 2,000 (see [Benchmarks](./benchmarks.md)).
 
@@ -128,5 +149,7 @@ Flags are the queue. Each has a `status`:
 | `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send never-seen error templates to Jev once. |
 | `CLOUDFRIEND_ESCALATED_TTL` | `7d` | How long a template that was escalated keeps going to Jev whatever its score. `off` disables. |
+| `CLOUDFRIEND_ESCALATED_MEMORY` | `90d` | After that, how long its next event still gets a review instead of being dropped. |
+| `CLOUDFRIEND_SUPPRESSION_TTL` | `30d` | How long a benign judgment lets the classifier drop its kind. `off` lets it drop without one. |
 | `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template, at one severity, is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |

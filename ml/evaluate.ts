@@ -65,6 +65,12 @@ const { values: args } = parseArgs({
     safety: { type: "string" },
     // Write the cascade's Jev labels as a training CSV (the server's training loop, offline).
     "labels-out": { type: "string" },
+    // Write every judgment the decider made (with its event) and a uniform sample of dropped
+    // events, for people to review (ml/review-samples.ts). --compare-model keeps only drops
+    // that model would make too: the two models' shared blind spot.
+    "samples-out": { type: "string" },
+    "drops-per-case": { type: "string", default: "40" },
+    "compare-model": { type: "string" },
   },
 });
 if (!args.data?.length || !args.model) {
@@ -88,6 +94,28 @@ const simBase = { batchSize: N("batch-size"), batchWaitMs: N("batch-wait"), audi
 const labelsOut = args["labels-out"] ? fs.openSync(args["labels-out"], "w") : null;
 if (labelsOut) fs.writeSync(labelsOut, ["case", "t", "y", "w", ...FEATURE_NAMES].join(",") + "\n");
 const fmt = (v: number) => (Number.isNaN(v) ? "" : Number.isInteger(v) ? String(v) : v.toPrecision(6));
+const compare = args["compare-model"] ? new Classifier(JSON.parse(fs.readFileSync(args["compare-model"], "utf8")) as ClassifierFile) : null;
+const csvCell = (v: unknown) => {
+  const t = String(v ?? "");
+  return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+};
+let judgmentsOut: number | null = null;
+let dropsOut: number | null = null;
+if (args["samples-out"]) {
+  fs.mkdirSync(args["samples-out"], { recursive: true });
+  judgmentsOut = fs.openSync(path.join(args["samples-out"], "judgments.csv"), "w");
+  fs.writeSync(judgmentsOut, "id,case,time,source,service,message,route,score,weak_label,jev\n");
+  dropsOut = fs.openSync(path.join(args["samples-out"], "drops.csv"), "w");
+  fs.writeSync(dropsOut, "id,case,time,source,service,message,score,compare_score,weak_label\n");
+}
+const messageOf = (data: unknown) => {
+  const d = data as Record<string, unknown>;
+  return String(d?.message ?? d?.msg ?? JSON.stringify(data)).replace(/\s+/g, " ").slice(0, 300);
+};
+const serviceOf = (data: unknown) => {
+  const d = data as Record<string, unknown>;
+  return String(d?.service ?? d?.container_name ?? "");
+};
 
 /** Must-reach ids of a labelled safety set (benchmarks/safety-set), as `<case>:<event index>`. */
 const safetyIds = new Set<string>();
@@ -228,6 +256,16 @@ async function runCase(dir: string, c: Case) {
                   };
                 });
                 const res = await jev.ask(events, openFlags.map((f) => ({ id: f.id, reason: f.reason, severity: f.severity })));
+                if (res && judgmentsOut !== null) {
+                  const byItem = new Map(asked.map((a) => [a.item.id, a.item]));
+                  let rows = "";
+                  for (const j of res.judgments ?? []) {
+                    const e = info.get(j.event_id)!;
+                    const it = byItem.get(j.event_id)!;
+                    rows += [`${c.id}:${j.event_id}`, c.id, new Date(e.t).toISOString(), e.source, serviceOf(e.data), messageOf(e.data), it.route, (it.score ?? 0).toFixed(4), positives.has(j.event_id) ? 1 : 0, j.relevance].map(csvCell).join(",") + "\n";
+                  }
+                  fs.writeSync(judgmentsOut, rows);
+                }
                 return res ? { decision: { flags: res.flags, judgments: res.judgments }, latencyMs: res.call.latency_ms } : null;
               }
             : undefined,
@@ -255,6 +293,9 @@ async function runCase(dir: string, c: Case) {
     );
   }
   const keywordHit = new Set<string>();
+  const drops: string[] = [];
+  let dropSeen = 0;
+  const dropRand = seeded(`${c.id}:drops`);
   const routes = new Map<string, FullRoute>();
   let n = 0;
   let events = 0;
@@ -285,6 +326,20 @@ async function runCase(dir: string, c: Case) {
         const r = await s.push(sim);
         if (name === "cascade") routes.set(id, r);
       }
+      // Reservoir sample of what the cascade dropped (and the other model would drop too).
+      if (dropsOut !== null && routes.get(id) === "drop") {
+        const other = compare ? compare.score(f.values) : null;
+        if (!compare || other! < compare.file.drop_below) {
+          dropSeen++;
+          const row = [`${c.id}:${id}`, c.id, new Date(e.t).toISOString(), e.source, f.service, f.text.replace(/\s+/g, " ").slice(0, 300), score.toFixed(4), other === null ? "" : other.toFixed(4), e.y].map(csvCell).join(",");
+          const k = Number(args["drops-per-case"]);
+          if (drops.length < k) drops.push(row);
+          else {
+            const j = Math.floor(dropRand() * dropSeen);
+            if (j < k) drops[j] = row;
+          }
+        }
+      }
       if (safetyIds.has(`${c.id}:${id}`)) safety.push({ id, reached: false, route: routes.get(id) ?? "?" });
       if (info.size > 200_000) prune(info, [...sims.values()], e.t);
     }
@@ -298,6 +353,7 @@ async function runCase(dir: string, c: Case) {
   let end = last;
   for (const s of sims.values()) end = Math.max(end, await s.finish(last + N("batch-wait")));
   for (const p of positives.values()) if ((tplCount.get(p.template) ?? 0) <= 2) p.situation = "single";
+  if (dropsOut !== null && drops.length) fs.writeSync(dropsOut, drops.join("\n") + "\n");
   for (const s of safety) s.reached = reachedAt.has(s.id);
 
   const perStrategy: Record<string, unknown> = {};

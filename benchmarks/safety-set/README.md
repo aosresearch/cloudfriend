@@ -1,6 +1,9 @@
 # Safety set
 
-Events a classifier is likely to get wrong, for people to label. Once labelled, the trainer uses the `must_reach` rows as a hard check: a new model is promoted only if it sends every one of them to Jev (`CLOUDFRIEND_SAFETY_SET`, see `docs/training.md`). They are never used for training, so the check stays honest.
+Events a classifier is likely to get wrong, for people to label. They are never used for training, so what they measure stays honest. Once labelled:
+
+- `ml/evaluate.ts --safety benchmarks/safety-set` replays each case through the full cascade (classifier, routing rules, verdict cache, batching) and reports which `must_reach` events reached Jev, in the context they really arrived in.
+- The trainer, given `CLOUDFRIEND_SAFETY_SET`, reports how many `must_reach` events a candidate's score alone would send to Jev. That is a diagnostic: the routing rules decide too, and the hard must-catch check is the regression scenarios (`regression/`, see `docs/training.md`).
 
 `ml/safety-candidates.ts` picked the rows from the **eval split** of the benchmarks (20 held-out RCAEval RE3 cases and GAIA Aug 11–14). It made no Jev calls and used no model output except to find dropped events. The labels from the datasets were not used to decide anything except the `rare_symptom` and `dropped_positive` strata, and they are not shown.
 
