@@ -1,0 +1,101 @@
+re3-ob-emailservice_f2-1             events=71220 pos=296 to_jev=0.94% alerts=3 D pre=2 | jev $2.354 calls=453 cached=0
+re3-ob-cartservice_f1-1              events=65424 pos=1184 to_jev=6.24% alerts=8 D pre=6 | jev $4.001 calls=672 cached=0
+re3-tt-ts-auth-service_f2-1          events=45238 pos=9 to_jev=81.97% alerts=1 D pre=0 | jev $4.038 calls=676 cached=0
+re3-ss-orders_f4-1                   events=51906 pos=200 to_jev=74.36% alerts=23 D pre=21 | jev $4.038 calls=676 cached=0
+re3-ob-emailservice_f4-1             events=70509 pos=304 to_jev=1.50% alerts=6 D pre=4 | jev $4.049 calls=677 cached=0
+re3-ss-front-end_f1-1                events=85513 pos=719 to_jev=35.44% alerts=70 D pre=64 | jev $4.049 calls=677 cached=0
+re3-ss-carts_f1-1                    events=84665 pos=1621 to_jev=47.95% alerts=52 D pre=48 | jev $4.049 calls=677 cached=0
+re3-ss-orders_f1-1                   events=79207 pos=4073 to_jev=72.15% alerts=38 D pre=33 | jev $4.049 calls=677 cached=0
+re3-tt-ts-route-service_f1-1         events=71657 pos=122 to_jev=81.61% alerts=7 D pre=0 | jev $4.049 calls=677 cached=0
+re3-tt-ts-route-service_f3_1-1       events=68521 pos=138 to_jev=81.01% alerts=6 D pre=0 | jev $4.049 calls=677 cached=0
+{
+ "aggregate": {
+  "cascade": {
+   "events": 693860,
+   "asked_jev": 323529,
+   "jev_calls": 28737,
+   "share_to_jev": 0.46627417634681345,
+   "flags": 214,
+   "flags_without_incident_event": 176,
+   "flags_before_fault": 178,
+   "incidents": 10,
+   "detected": {
+    "k": 10,
+    "n": 10,
+    "rate": 1,
+    "upper95": 1
+   },
+   "detected_ci95_by_group": [
+    1,
+    1
+   ],
+   "withheld": {
+    "k": 0,
+    "n": 10,
+    "rate": 0,
+    "upper95": 0.25886555089305224
+   },
+   "dismissed": {
+    "k": 0,
+    "n": 10,
+    "rate": 0,
+    "upper95": 0.25886555089305224
+   },
+   "positives_reached": {
+    "k": 8665,
+    "n": 8666,
+    "lower95": 0.9994527071399532
+   },
+   "situations": {
+    "single": {
+     "positives": 81,
+     "withheld": 0
+    },
+    "recurring": {
+     "positives": 940,
+     "withheld": 0
+    },
+    "new": {
+     "positives": 41,
+     "withheld": 0
+    },
+    "sustained": {
+     "positives": 6380,
+     "withheld": 0
+    },
+    "transition": {
+     "positives": 1224,
+     "withheld": 1
+    }
+   },
+   "median_ttd_s": 20.729,
+   "median_first_reached_s": 15.844
+  }
+ },
+ "escalated_kinds": {
+  "events": 41537,
+  "by_score": 4631
+ },
+ "jev": {
+  "live": true,
+  "model": "typesafe/jev-router",
+  "calls": 677,
+  "cached_calls": 0,
+  "skipped_calls": 28060,
+  "spent_usd": 4.048736949999999,
+  "prompt_tokens": 66399797,
+  "completion_tokens": 376656,
+  "median_latency_ms": 3042,
+  "routed_to": {
+   "meta/muse-spark-1.2": 214,
+   "google/gemini-3.8-flash": 381,
+   "anthropic/claude-opus-5.5": 24,
+   "anthropic/claude-sonnet-5.5": 23,
+   "x-ai/grok-4.7": 3,
+   "openai/gpt-6.1-sol": 15,
+   "openai/gpt-6-astra": 15,
+   "meta/muse-spark-1.3": 1,
+   "stepfun/step-5-preview": 1
+  }
+ }
+}

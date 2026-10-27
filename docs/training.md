@@ -144,7 +144,7 @@ A **stage-1 false positive** is an event the classifier passes on to Jev, where 
 
 The test also shows why the rule matters. The built-in model learned from the benchmarks that a template repeating for a long time is routine, and a few hundred labels collected over minutes don't overturn that for counts beyond any they contain. So the retrained model ranks the payments above the warnings, but can score later payments below its threshold. The rule still sends them to Jev, and the gate counts that, since it is what the server does.
 
-On benchmark data we measured the same effect, with the pipeline as it was before the review described in [Benchmarks](./benchmarks.md#what-changed-after-review). We started from a classifier trained only on GAIA, collected about 12,000 Jev verdicts while replaying RCAEval cases, and retrained on them. We then looked at three faults whose cases were left out of training:
+On benchmark data we measured the same effect, with the pipeline as it was before the review (see [Benchmarks](./benchmarks.md#earlier-results-2026-10-26)). We started from a classifier trained only on GAIA, collected about 12,000 Jev verdicts while replaying RCAEval cases, and retrained on them. We then looked at three faults whose cases were left out of training:
 
 | On held-out faults | Before retraining | After |
 | --- | --- | --- |
@@ -152,6 +152,8 @@ On benchmark data we measured the same effect, with the pipeline as it was befor
 | Jev's escalations | 74 sent to Jev | 68 sent to Jev |
 
 The second row needs care. 65 of the 74 escalations had reached Jev because the old classifier scored them above its threshold; the retrained classifier still sends all 65, and recovers 3 more. The 6 it drops had only reached Jev by the 1% audit sample or the never-seen-error rule, never by score. Two caveats weaken the first row too. Under the old reply format, every event Jev didn't cite in a flag counted as a "no", so some of the 547 "false positives" may be events Jev simply didn't mention. And these are three faults from one dataset. The experiment will be repeated with the new reply format, in which Jev judges every event.
+
+This round's version of the experiment, with the new reply format, causal replay and per-incident results, is in [Benchmarks](./benchmarks.md#training-on-jevs-labels). Its conclusion is more modest. With 10,000 of Jev's labels from four cases, the built-in model moved toward Jev's view of what matters (Jev treats errors that were already there as relevant), and by the weak labels it got worse, so it isn't shipped. Whether it is better or worse needs people's labels, not the datasets'.
 
 ### What Jev said yes to keeps reaching Jev
 
