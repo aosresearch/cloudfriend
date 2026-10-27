@@ -148,6 +148,13 @@ export interface ActionAdapter {
   /** Return false to stay disabled, e.g. when its URL isn't configured. */
   enabled?(env: NodeJS.ProcessEnv): boolean;
   run(flag: Flag, ctx: ActionContext): Promise<boolean | void>;
+  /**
+   * Check a destination's settings before they are saved: return the config to store, or throw
+   * with a message a person can act on. Without it, the config is stored as given.
+   */
+  validate?(config: Record<string, unknown>, ctx: { env: NodeJS.ProcessEnv }): Promise<Record<string, unknown>>;
+  /** Send a clearly labelled test message. Throw on failure, with a status-only message. */
+  test?(ctx: Omit<ActionContext, "events">): Promise<void>;
 }
 
 export interface ActionContext {
@@ -155,6 +162,11 @@ export interface ActionContext {
   events: CloudfriendEvent[];
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
+  /**
+   * The destination's settings (destinations.config), e.g. { url, signing_secret }. Absent when
+   * the action runs from environment variables, as in v0.
+   */
+  config?: Record<string, unknown>;
 }
 
 // Identity helpers so adapter files get type checking without importing interfaces by name.
