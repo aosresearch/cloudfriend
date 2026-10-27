@@ -508,6 +508,11 @@ for (const s of STRATEGIES) {
     ...(s === "cascade"
       ? {
           withheld: rate(withheld, incidents.length),
+          // Incidents that left only a trace in the logs (1-3 labelled events) apart from the rest.
+          withheld_by_size: {
+            "1-3": rate(incidents.filter((i) => i.positives <= 3 && i.withheld).length, incidents.filter((i) => i.positives <= 3).length),
+            "4+": rate(incidents.filter((i) => i.positives > 3 && i.withheld).length, incidents.filter((i) => i.positives > 3).length),
+          },
           dismissed: rate(dismissed, incidents.length),
           positives_reached: { k: reachedPos, n: positives, lower95: lowerBound(reachedPos, positives) },
           situations,
