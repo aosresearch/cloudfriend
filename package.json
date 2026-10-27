@@ -23,6 +23,7 @@
   "dependencies": {
     "@hono/node-server": "2.1.5",
     "hono": "4.13.14",
+    "oauth4webapi": "3.8.8",
     "pg": "8.23.1"
   },
   "devDependencies": {
