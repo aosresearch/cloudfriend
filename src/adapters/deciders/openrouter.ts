@@ -65,13 +65,21 @@ export function buildPrompt(events: CloudfriendEvent[], env: NodeJS.ProcessEnv, 
 
 const RELEVANCE = new Set(["relevant", "benign", "uncertain"]);
 
+/** An event index as the model wrote it: an integer, or a string of digits. Nothing else. */
+function eventIndex(v: unknown, n: number): number | null {
+  const i = typeof v === "number" ? v : typeof v === "string" && /^\s*\d+\s*$/.test(v) ? Number(v) : NaN;
+  return Number.isInteger(i) && i >= 0 && i < n ? i : null;
+}
+
 /**
  * Read a reply in the current format ({judgments, alerts}) or the v0 one ({flags}). Invalid
  * entries are dropped; an event without a valid judgment simply has none.
  */
 export function parseDecision(content: string, events: CloudfriendEvent[], openFlagIds: Set<string> = new Set()): Decision {
   const parsed = parseJson(content);
-  const alerts = Array.isArray(parsed?.alerts) ? parsed.alerts : Array.isArray(parsed?.flags) ? parsed.flags : null;
+  const hasJudgments = Array.isArray(parsed?.judgments);
+  // Judgments without alerts mean "nothing to alert on"; neither means the reply is unusable.
+  const alerts = Array.isArray(parsed?.alerts) ? parsed.alerts : Array.isArray(parsed?.flags) ? parsed.flags : hasJudgments ? [] : null;
   if (!alerts) throw new Error("model reply has no alerts array");
   const flags = toDrafts(alerts, events);
   alerts.forEach((a: any, i: number) => {
@@ -82,13 +90,13 @@ export function parseDecision(content: string, events: CloudfriendEvent[], openF
   const judgments: Judgment[] = [];
   const seen = new Set<number>();
   for (const j of Array.isArray(parsed?.judgments) ? parsed.judgments : []) {
-    const n = Number(j?.event);
-    const r = String(j?.relevance ?? "").toLowerCase();
-    if (!Number.isInteger(n) || n < 0 || n >= events.length || !RELEVANCE.has(r) || seen.has(n)) continue;
+    const n = eventIndex(j?.event, events.length);
+    const r = typeof j?.relevance === "string" ? j.relevance.trim().toLowerCase() : "";
+    if (n === null || !RELEVANCE.has(r) || seen.has(n)) continue;
     seen.add(n);
     judgments.push({ event_id: events[n]!.id, relevance: r as Judgment["relevance"] });
   }
-  return { flags: flags.map(({ __index, ...f }) => f), judgments: Array.isArray(parsed?.judgments) ? judgments : undefined };
+  return { flags: flags.map(({ __index, ...f }) => f), judgments: hasJudgments ? judgments : undefined };
 }
 
 function parseJson(content: string): any {
@@ -103,7 +111,7 @@ function toDrafts(items: unknown[], events: CloudfriendEvent[]): (FlagDraft & { 
   items.forEach((f: any, i) => {
     if (!f || typeof f.reason !== "string" || !f.reason.trim()) return;
     const idx: unknown[] = Array.isArray(f.events) ? f.events : Array.isArray(f.event_ids) ? f.event_ids : [];
-    const ids = [...new Set(idx.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < events.length))].map((n) => events[n]!.id);
+    const ids = [...new Set(idx.map((v) => eventIndex(v, events.length)).filter((n): n is number => n !== null))].map((n) => events[n]!.id);
     if (!ids.length) return;
     const sev = String(f.severity ?? "").toLowerCase();
     out.push({

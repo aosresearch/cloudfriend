@@ -5,7 +5,8 @@
 //              escalated, no cost, unless it is an error-like event of a kind never seen
 //              before, which Jev always sees once. A small random share of the rest is still
 //              sent to Jev as an audit, which is how missed escalations (false negatives) get found.
-//              A template Jev or a person escalated recently also always goes to Jev.
+//              A template Jev or a person escalated recently also always goes to Jev, and so
+//              does anything whose kind hasn't earned suppression yet (routing.ts).
 //   2. plan    the events headed for Jev are grouped by template. Templates Jev ruled on in
 //              the last `ttl` reuse that verdict. Otherwise at most `perTemplate` examples
 //              per template go to Jev, and the rest follow their example's verdict.
@@ -14,7 +15,7 @@
 import type { Route } from "./classifier.ts";
 import type { Decision, FlagDraft, Severity } from "../types.ts";
 
-export type FullRoute = Route | "audit" | "novel" | "known" | "classifier";
+export type FullRoute = Route | "audit" | "novel" | "known" | "review" | "classifier";
 
 export interface RouteOptions {
   dropBelow: number;
@@ -32,16 +33,19 @@ export interface RouteOptions {
 /**
  * Where one scored event goes. With no classifier (score null) everything goes to Jev.
  * `novel`: an error-like event of a never-seen template. `known`: a template Jev or a person
- * escalated recently. Both reach Jev whatever the score, so the classifier can never drop
- * the next instance of something that was escalated.
+ * escalated recently. `review`: an event the classifier may not drop yet, because its kind
+ * hasn't earned suppression or its protection expired (see routing.ts). All three reach Jev
+ * whatever the score, so the classifier can never drop the next instance of something that
+ * was escalated.
  */
-export function routeEvent(score: number | null, o: RouteOptions, novel = false, known = false): FullRoute {
+export function routeEvent(score: number | null, o: RouteOptions, novel = false, known = false, review = false): FullRoute {
   if (score === null) return o.hasJev ? "jev" : "drop";
   if (!o.hasJev) return score >= o.threshold ? "classifier" : "drop";
   if (score >= o.escalateAbove) return "auto";
   if (score >= o.dropBelow) return "jev";
   if (known) return "known";
   if (novel && o.novelGuard !== false) return "novel";
+  if (review) return "review";
   return o.auditRate > 0 && (o.rand ?? Math.random)() < o.auditRate ? "audit" : "drop";
 }
 
@@ -54,6 +58,8 @@ export interface Pending {
   severity?: string;
   /** How many of this template arrived in the last minute (all of them, dropped included). */
   rate?: number;
+  /** Errors from the template's service in the last 10 minutes. */
+  serviceErrors?: number;
 }
 
 /** The unit a verdict is about: the same message at the same severity. */
@@ -132,7 +138,7 @@ export interface Plan {
 }
 
 /** Routes that exist to get a second look: a cached "no" must not answer for them. */
-const BYPASS_NEGATIVE = new Set<FullRoute>(["audit", "novel", "known"]);
+const BYPASS_NEGATIVE = new Set<FullRoute>(["audit", "novel", "known", "review"]);
 
 export function planBatch(items: Pending[], cache: VerdictCache, now: number, perTemplate = 3): Plan {
   const plan: Plan = { ask: [], followers: new Map(), cached: [], direct: new Map() };
@@ -192,9 +198,11 @@ export interface Outcome {
    * Verdicts to cache, by verdict key: escalate with an index into `flags` or an existing flag
    * id, or a "no" when every example of the key was explicitly judged benign.
    */
-  verdicts: Map<string, { escalate: boolean; flag?: number | string }>;
+  verdicts: Map<string, { escalate: boolean; flag?: number | string; judged?: boolean }>;
   /** Templates with an event judged relevant: they keep reaching Jev (route known). */
   relevant: Set<string>;
+  /** Verdict keys with an example judged relevant: no longer suppressed (routing.ts). */
+  relevantKeys: Set<string>;
 }
 
 /**
@@ -204,7 +212,7 @@ export interface Outcome {
  */
 export function applyVerdicts(plan: Plan, answer: FlagDraft[] | Decision, maxFollowerLabels = 10): Outcome {
   const decision = Array.isArray(answer) ? { flags: answer } : answer;
-  const out: Outcome = { flags: [], attach: new Map(), labels: [], verdicts: new Map(), relevant: new Set() };
+  const out: Outcome = { flags: [], attach: new Map(), labels: [], verdicts: new Map(), relevant: new Set(), relevantKeys: new Set() };
   const byId = new Map(plan.ask.map((a) => [a.item.id, a.item]));
   const cited = new Set<string>();
   const attach = (flagId: string, ids: string[]) => out.attach.set(flagId, [...(out.attach.get(flagId) ?? []), ...ids]);
@@ -239,11 +247,14 @@ export function applyVerdicts(plan: Plan, answer: FlagDraft[] | Decision, maxFol
     benignByKey.set(key, (benignByKey.get(key) ?? true) && rel === "benign");
     if (rel !== "relevant" && rel !== "benign") continue; // uncertain or silent: no label
     const y = rel === "relevant" ? 1 : 0;
-    if (y) out.relevant.add(item.template);
+    if (y) {
+      out.relevant.add(item.template);
+      out.relevantKeys.add(key);
+    }
     out.labels.push({ id: item.id, y, route: item.route, follower: false });
     for (const f of (plan.followers.get(item.id) ?? []).slice(0, maxFollowerLabels)) out.labels.push({ id: f.id, y, route: f.route, follower: true });
   }
-  for (const [key, allBenign] of benignByKey) if (allBenign && !out.verdicts.has(key)) out.verdicts.set(key, { escalate: false });
+  for (const [key, allBenign] of benignByKey) if (allBenign && !out.verdicts.has(key)) out.verdicts.set(key, { escalate: false, judged: true });
   for (const { item, verdict } of plan.cached) {
     if (verdict.escalate && verdict.flagId) attach(verdict.flagId, [item.id]);
   }
@@ -274,6 +285,7 @@ export function labelProvenance(l: Pick<Label, "route" | "follower">, auditRate:
       return { provenance: "audit", weight: auditRate > 0 ? Math.min(1 / auditRate, 10) : 1 };
     case "novel":
     case "known":
+    case "review":
       return { provenance: l.route, weight: 1 };
     default:
       return { provenance: "threshold", weight: 1 };

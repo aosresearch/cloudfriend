@@ -29,6 +29,8 @@ import type { DB } from "./db.ts";
 import { errMsg, log } from "./log.ts";
 import { Classifier, type ClassifierFile } from "./triage/classifier.ts";
 import { FEATURE_NAMES, FEATURIZER_VERSION } from "./triage/features.ts";
+import { verdictKey } from "./triage/cascade.ts";
+import { RoutingState, type RoutingOptions } from "./triage/routing.ts";
 import { BUILTIN_MODEL, decodeFeatures, type Triage } from "./triage/runtime.ts";
 
 export const TRAIN_SCRIPT = path.join(import.meta.dirname, "..", "ml", "train.py");
@@ -50,6 +52,9 @@ export interface TrainOptions {
   incidentWindowMs?: number;
   /** CLOUDFRIEND_ESCALATED_TTL: how long an escalated template goes to Jev whatever its score. */
   knownTtlMs?: number;
+  escalatedMemoryMs?: number;
+  /** CLOUDFRIEND_SUPPRESSION_TTL: 0 means the classifier may drop without an earned benign judgment. */
+  suppressionTtlMs?: number;
 }
 
 /** One retrain may cut the share of live events sent to Jev to no less than this fraction. */
@@ -89,30 +94,49 @@ export interface LabelRow {
   template: string | null;
   provenance: string | null;
   weight: number | null;
+  /** When the label was made: when its verdict could first affect routing. */
+  created_at?: number;
+  severity?: string | null;
+  ctx_rate?: number | null;
+  ctx_service_errors?: number | null;
 }
 
-/** An incident: the same template within 30 minutes (CLOUDFRIEND_INCIDENT_WINDOW). Splits never cut through one. */
+/** An incident: labels of one template less than 30 minutes apart (CLOUDFRIEND_INCIDENT_WINDOW). */
 export const INCIDENT_WINDOW_MS = 30 * 60_000;
+/** A template that never goes quiet still starts a new incident after this many windows. */
+const MAX_INCIDENT_WINDOWS = 4;
 
 /**
  * Split labels by time into fit / calibrate / accept (60/20/20 by count), keeping each
- * incident (template x 30-minute window) whole, in the part where it began.
+ * incident whole, in the part where it began. An incident is a run of labels of one template
+ * with gaps under `windowMs`, capped at four windows so a template that never goes quiet
+ * doesn't swallow the split.
  */
 export function splitLabels<T extends Pick<LabelRow, "received_at" | "template" | "event_id">>(
   rows: T[],
   windowMs = INCIDENT_WINDOW_MS,
 ): { fit: T[]; calibrate: T[]; accept: T[] } {
   const sorted = [...rows].sort((a, b) => a.received_at - b.received_at || a.event_id - b.event_id);
-  const groups = new Map<string, T[]>();
+  const groups: T[][] = [];
+  const open = new Map<string, { g: T[]; start: number; last: number }>();
   for (const r of sorted) {
-    const key = r.template ? `${r.template}@${Math.floor(r.received_at / windowMs)}` : `event:${r.event_id}`;
-    const g = groups.get(key);
-    if (g) g.push(r);
-    else groups.set(key, [r]);
+    if (!r.template) {
+      groups.push([r]);
+      continue;
+    }
+    const cur = open.get(r.template);
+    if (cur && r.received_at - cur.last < windowMs && r.received_at - cur.start < windowMs * MAX_INCIDENT_WINDOWS) {
+      cur.g.push(r);
+      cur.last = r.received_at;
+    } else {
+      const g = [r];
+      groups.push(g);
+      open.set(r.template, { g, start: r.received_at, last: r.received_at });
+    }
   }
   const out = { fit: [] as T[], calibrate: [] as T[], accept: [] as T[] };
   let seen = 0;
-  for (const g of groups.values()) {
+  for (const g of groups) {
     const part = seen < sorted.length * 0.6 ? out.fit : seen < sorted.length * 0.8 ? out.calibrate : out.accept;
     part.push(...g);
     seen += g.length;
@@ -148,6 +172,9 @@ export class Trainer {
   /** Train if enough new labels arrived since the last run. Used by the scheduler. */
   async maybeTrain(): Promise<TrainReport | null> {
     if (this.#running || this.newLabels() < this.#o.minLabels) return null;
+    // A candidate in shadow is still collecting evidence: a scheduled run would replace it
+    // before it could ever be promoted. A run by hand (`train`) still may.
+    if (this.#db.prepare("SELECT 1 FROM models WHERE status = 'shadow' LIMIT 1").get()) return null;
     return this.train();
   }
 
@@ -162,7 +189,8 @@ export class Trainer {
     const id = "mdl_" + new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "_" + randomBytes(3).toString("hex");
     const rows = this.#db
       .prepare(
-        "SELECT event_id, y, source, features, received_at, template, provenance, weight FROM labels WHERE featurizer_version = ? ORDER BY received_at, event_id",
+        `SELECT event_id, y, source, features, received_at, template, provenance, weight, created_at, severity, ctx_rate, ctx_service_errors
+         FROM labels WHERE featurizer_version = ? ORDER BY received_at, event_id`,
       )
       .all(FEATURIZER_VERSION) as unknown as LabelRow[];
     const positives = rows.filter((r) => r.y).length;
@@ -207,7 +235,11 @@ export class Trainer {
         fs.writeFileSync(out, JSON.stringify(file));
       }
       const candidate = new Classifier(file);
-      const known = knownAtTheTime(rows, accept, this.#o.knownTtlMs ?? 0);
+      const known = rulesAtTheTime(rows, accept, {
+        escalatedTtlMs: this.#o.knownTtlMs ?? 0,
+        escalatedMemoryMs: this.#o.escalatedMemoryMs,
+        suppressionTtlMs: this.#o.suppressionTtlMs ?? 0,
+      });
       const cMetrics = evaluate(candidate, accept, this.#o.humanWeight, known);
       const aMetrics = active ? evaluate(active, accept, this.#o.humanWeight, known) : null;
       const safety = loadSafetySet(this.#o.safetySet ?? null);
@@ -447,26 +479,38 @@ export function evaluate(
 }
 
 /**
- * For each row of `part`: would the escalated-template rule (route `known`) have sent it to
- * Jev whatever its score? True when an earlier label of its template was an escalation within
- * `ttlMs`, and no person has since marked that template as not worth escalating. Uses only
- * labels from before the row, as the runtime would have had them.
+ * For each row of `part`: would the routing rules (routing.ts) have sent it to Jev whatever
+ * its score, when it arrived? That is: its template was protected or due for review after an
+ * escalation, or its kind had not earned suppression in that context. Labels take effect when
+ * they were made (`created_at`), not when their event arrived, as in the server: a burst
+ * that arrived before Jev answered gets no credit from that answer.
  */
-export function knownAtTheTime(
-  all: Pick<LabelRow, "event_id" | "y" | "source" | "received_at" | "template">[],
+export function rulesAtTheTime(
+  all: Pick<LabelRow, "event_id" | "y" | "source" | "received_at" | "template" | "provenance" | "created_at" | "severity" | "ctx_rate" | "ctx_service_errors">[],
   part: Pick<LabelRow, "event_id">[],
-  ttlMs: number,
+  o: Pick<RoutingOptions, "escalatedTtlMs" | "escalatedMemoryMs" | "suppressionTtlMs">,
 ): boolean[] {
-  if (ttlMs <= 0) return part.map(() => false);
-  const sorted = [...all].sort((a, b) => a.received_at - b.received_at || a.event_id - b.event_id);
-  const escalated = new Map<string, number>();
+  const state = new RoutingState({ verdictTtlMs: 0, ...o });
+  const wanted = new Set(part.map((r) => r.event_id));
+  type Step = { t: number; order: number; r: (typeof all)[number] };
+  const steps: Step[] = [];
+  for (const r of all) {
+    if (wanted.has(r.event_id)) steps.push({ t: r.received_at, order: 0, r });
+    steps.push({ t: r.created_at ?? r.received_at, order: 1, r });
+  }
+  // At equal times the event is routed before the label made from it takes effect.
+  steps.sort((a, b) => a.t - b.t || a.order - b.order || a.r.event_id - b.r.event_id);
   const at = new Map<number, boolean>();
-  for (const r of sorted) {
+  for (const { t, order, r } of steps) {
     if (!r.template) continue;
-    const last = escalated.get(r.template);
-    at.set(r.event_id, last !== undefined && r.received_at - last <= ttlMs);
-    if (r.y) escalated.set(r.template, r.received_at);
-    else if (r.source === "human") escalated.delete(r.template);
+    if (order === 0) {
+      const severity = r.severity ?? undefined;
+      const p = state.escalated.status(r.template, t);
+      const earned = state.ledger.earned(verdictKey({ template: r.template, severity }), t, r.ctx_rate ?? 0, r.ctx_service_errors ?? 0);
+      at.set(r.event_id, p !== null || !earned);
+    } else {
+      state.rebuild([{ template: r.template, severity: r.severity ?? null, y: r.y, source: r.source, provenance: r.provenance, at: t, rate: r.ctx_rate ?? null, serviceErrors: r.ctx_service_errors ?? null }]);
+    }
   }
   return part.map((r) => at.get(r.event_id) ?? false);
 }

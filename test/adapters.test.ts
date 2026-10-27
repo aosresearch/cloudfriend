@@ -116,6 +116,31 @@ describe("openrouter decider", () => {
     assert.equal(d.flags[2]!.update, undefined, "an update to a flag that isn't open becomes a new alert");
   });
 
+  it("only takes real indices: no null, empty or true for event 0 or 1", () => {
+    const d = parseDecision(
+      JSON.stringify({
+        judgments: [
+          { event: null, relevance: "benign" },
+          { event: "", relevance: "benign" },
+          { event: true, relevance: "benign" },
+          { event: 1.5, relevance: "benign" },
+          { event: "1", relevance: "relevant" },
+        ],
+        alerts: [{ reason: "x", severity: "low", events: [null, false, "0"] }],
+      }),
+      events,
+    );
+    assert.deepEqual(d.judgments, [{ event_id: "11", relevance: "relevant" }]);
+    assert.deepEqual(d.flags[0]!.event_ids, ["10"]);
+  });
+
+  it("reads judgments without an alerts key as nothing to alert on", () => {
+    const d = parseDecision(JSON.stringify({ judgments: [{ event: 0, relevance: "benign" }] }), events);
+    assert.deepEqual(d.flags, []);
+    assert.equal(d.judgments!.length, 1);
+    assert.throws(() => parseDecision(JSON.stringify({ verdict: "fine" }), events), /no alerts/);
+  });
+
   it("shows the decider counts, not the classifier's score", () => {
     const p = buildPrompt(
       [{ ...events[0]!, triage: { score: 0.97, similar: 4, context: { seen_total: 120, last_1m: 3, last_10m: 30, last_hour: 90, usual_per_hour: 2, first_seen_min_ago: 600 } } }],

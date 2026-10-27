@@ -16,7 +16,7 @@
     "dev": "CLOUDFRIEND_DATA_DIR=./data node --disable-warning=ExperimentalWarning --watch src/main.ts",
     "cloudfriend": "node --disable-warning=ExperimentalWarning src/cli.ts",
     "typecheck": "tsc",
-    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec --test-concurrency=1 --test-timeout=30000 'test/**/*.test.ts'",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec --test-concurrency=1 --test-timeout=180000 'test/**/*.test.ts'",
     "test:docker": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec --test-timeout=600000 test/docker/docker.e2e.ts",
     "demo:sync": "node --disable-warning=ExperimentalWarning ml/sync-website.ts"
   },

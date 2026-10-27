@@ -81,10 +81,11 @@ export class Worker {
         "UPDATE flags SET event_ids = ?, event_count = coalesce(event_count, 0) + ?, updated_at = ? WHERE id = ?",
       ),
       insertLabel: db.prepare(
-        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, weight, decision_id)
-         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, template, ?, ?, ? FROM events WHERE id = ? AND features IS NOT NULL
+        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, weight, decision_id, severity, ctx_rate, ctx_service_errors)
+         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, template, ?, ?, ?, severity, ?, ? FROM events WHERE id = ? AND features IS NOT NULL
          ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, created_at = excluded.created_at, provenance = excluded.provenance,
-           weight = excluded.weight, decision_id = excluded.decision_id WHERE labels.source <> 'human'`,
+           weight = excluded.weight, decision_id = excluded.decision_id, ctx_rate = excluded.ctx_rate, ctx_service_errors = excluded.ctx_service_errors
+           WHERE labels.source <> 'human'`,
       ),
       insertDecisionRecord: db.prepare(
         "INSERT INTO decisions (id, created_at, decider, model, prompt, response, event_ids) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -107,6 +108,11 @@ export class Worker {
       ),
       cleanEvents: db.prepare(
         `DELETE FROM events WHERE id IN (SELECT id FROM events WHERE received_at < ? AND decided = 1 ORDER BY received_at LIMIT ${CLEANUP_CHUNK})`,
+      ),
+      // A decision's prompt and reply quote event data: they go with the events. The row stays,
+      // so labels still say which call (model, events) they came from.
+      cleanDecisions: db.prepare(
+        `UPDATE decisions SET prompt = NULL, response = NULL WHERE id IN (SELECT id FROM decisions WHERE created_at < ? AND (prompt IS NOT NULL OR response IS NOT NULL) LIMIT ${CLEANUP_CHUNK})`,
       ),
     };
   }
@@ -311,9 +317,10 @@ export class Worker {
     const items: Pending[] = rows.map((r) => {
       let route = (r.route ?? "jev") as Pending["route"];
       // Routed to Jev while one was configured, but there is none now: the classifier decides.
-      if (!decider && (route === "jev" || route === "audit" || route === "novel" || route === "known" || route === "auto")) route = (r.score ?? 0) >= threshold ? "classifier" : "drop";
+      if (!decider && (route === "jev" || route === "audit" || route === "novel" || route === "known" || route === "review" || route === "auto")) route = (r.score ?? 0) >= threshold ? "classifier" : "drop";
       const template = r.template ?? `${r.source}|`;
-      return { id: String(r.id), template, score: r.score ?? null, route, severity: r.severity ?? undefined, rate: triage.featurizer.context(template)?.last_1m };
+      const ctx = triage.featurizer.context(template);
+      return { id: String(r.id), template, score: r.score ?? null, route, severity: r.severity ?? undefined, rate: ctx?.last_1m, serviceErrors: ctx?.service_errors_10m };
     });
     // A cached "escalate" verdict only holds while its flag is still in the queue.
     for (const it of items) {
@@ -355,16 +362,14 @@ export class Worker {
     }
     this.counters.cached += plan.cached.length;
     for (const g of plan.direct.values()) this.counters.direct += g.length;
+    // An alert may only continue a flag that is still open now, after the call: one deleted or
+    // closed meanwhile (or an id the decider made up) gets a new flag instead.
+    for (const f of decision.flags) if (f.update && !this.#flagOpen(f.update)) delete f.update;
     const out = applyVerdicts(plan, decision);
-    const flagIds = this.#storeOutcome(decider?.name ?? "classifier", ids, out, rows.map((r) => [String(r.id), r.user_key ?? null]), decisionId, triage);
-    const rateOf = new Map(items.map((it) => [verdictKey(it), it.rate]));
-    out.verdicts.forEach((v, key) => {
-      const flagId = typeof v.flag === "number" ? flagIds[v.flag] : v.flag;
-      triage.cache.set(key, v.escalate, now, flagId, rateOf.get(key));
-    });
-    // What Jev escalated or judged relevant keeps reaching Jev, even where the classifier would drop it.
-    for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) triage.escalated.add(t, now);
-    for (const t of out.relevant) triage.escalated.add(t, now);
+    const flagIds = this.#storeOutcome(decider?.name ?? "classifier", ids, out, rows.map((r) => [String(r.id), r.user_key ?? null]), decisionId, triage, items);
+    // Verdict cache, escalation memory and earned suppression: what Jev judged relevant keeps
+    // reaching it, and what it judged benign may now be dropped by the classifier.
+    triage.routing.learn(items, out, now, flagIds);
     log.info("batch decided", {
       events: ids.length,
       asked: plan.ask.length,
@@ -381,7 +386,8 @@ export class Worker {
     return row?.status === "open" || row?.status === "acknowledged";
   }
 
-  #storeOutcome(decider: string, ids: number[], out: Outcome, users: [string, string | null][], decisionId: string | null, triage: Triage): string[] {
+  #storeOutcome(decider: string, ids: number[], out: Outcome, users: [string, string | null][], decisionId: string | null, triage: Triage, items: Pending[] = []): string[] {
+    const ctxOf = new Map(items.map((it) => [it.id, it]));
     const now = Date.now();
     const actions = [...this.#o.actions.keys()];
     const userOf = new Map(users);
@@ -405,7 +411,8 @@ export class Worker {
       }
       for (const l of out.labels) {
         const p = labelProvenance(l, triage.opts.auditRate);
-        this.#stmts.insertLabel.run(l.y, now, p.provenance, p.weight, decisionId, Number(l.id));
+        const c = ctxOf.get(l.id);
+        this.#stmts.insertLabel.run(l.y, now, p.provenance, p.weight, decisionId, c?.rate ?? null, c?.serviceErrors ?? null, Number(l.id));
       }
       for (const id of ids) this.#stmts.markDecided.run(id);
     });
@@ -502,7 +509,14 @@ export class Worker {
       if (n < CLEANUP_CHUNK || this.#stopped) break;
       await yieldToLoop();
     }
-    if (queue || events) log.info("cleanup", { requests_deleted: queue, events_deleted: events });
+    let decisions = 0;
+    for (;;) {
+      const n = Number(this.#stmts.cleanDecisions.run(cutoff).changes);
+      decisions += n;
+      if (n < CLEANUP_CHUNK || this.#stopped) break;
+      await yieldToLoop();
+    }
+    if (queue || events || decisions) log.info("cleanup", { requests_deleted: queue, events_deleted: events, decision_texts_cleared: decisions });
     return { queue, events };
   }
 }

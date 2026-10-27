@@ -160,6 +160,11 @@ const COLUMNS: [table: string, column: string, decl: string][] = [
   // taken (audits aside): `drop` means it would not have reached Jev.
   ["events", "shadow_score", "REAL"],
   ["events", "shadow_route", "TEXT"],
+  // Severity and context of a label's event when it was judged, so earned suppression and
+  // escalation memory can be rebuilt exactly after a restart (routing.ts).
+  ["labels", "severity", "TEXT"],
+  ["labels", "ctx_rate", "REAL"],
+  ["labels", "ctx_service_errors", "REAL"],
 ];
 
 function migrate(db: DB): void {

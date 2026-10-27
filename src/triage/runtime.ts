@@ -4,9 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import type { DB } from "../db.ts";
 import { errMsg, log } from "../log.ts";
-import { EscalatedTemplates, routeEvent, severityBucket, VerdictCache, type FullRoute } from "./cascade.ts";
+import { severityBucket, type FullRoute, type RouteOptions } from "./cascade.ts";
 import { Classifier, type ClassifierFile } from "./classifier.ts";
 import { extractEntities, Featurizer, FEATURIZER_VERSION, type FeaturizerSnapshot } from "./features.ts";
+import { RoutingState, type LabelFact } from "./routing.ts";
 
 export const BUILTIN_MODEL = path.join(import.meta.dirname, "..", "..", "models", "base.json");
 
@@ -21,6 +22,10 @@ export interface TriageOptions {
   novelGuard: boolean;
   /** How long a template Jev or a person escalated keeps going to Jev whatever its score. 0 = off. */
   knownTtlMs?: number;
+  /** After that, until this long, its next event goes to Jev once for review. */
+  escalatedMemoryMs?: number;
+  /** How long a benign judgment lets the classifier drop its kind of event. 0 = no earned suppression. */
+  suppressionTtlMs?: number;
   /** The decider is there to ask; false means the classifier decides alone. */
   hasJev: boolean;
 }
@@ -33,14 +38,17 @@ export interface Scored {
   route: FullRoute;
   template: string;
   severity: string;
+  /** Context the event was routed with: its template's 1-minute rate, its service's 10-minute errors. */
+  rate?: number;
+  serviceErrors?: number;
   features: Uint8Array;
   user: string | null;
 }
 
 export class Triage {
   readonly featurizer = new Featurizer();
-  readonly cache: VerdictCache;
-  readonly escalated: EscalatedTemplates;
+  /** Verdict cache, escalation memory and earned suppression (routing.ts). */
+  readonly routing: RoutingState;
   readonly opts: TriageOptions;
   classifier: Classifier | null = null;
   modelPath: string | null = null;
@@ -52,9 +60,13 @@ export class Triage {
   constructor(db: DB, opts: TriageOptions) {
     this.#db = db;
     this.opts = opts;
-    this.cache = new VerdictCache(opts.verdictTtlMs);
-    this.escalated = new EscalatedTemplates(opts.knownTtlMs ?? 7 * 86_400_000);
-    this.#loadEscalated(db);
+    this.routing = new RoutingState({
+      verdictTtlMs: opts.verdictTtlMs,
+      escalatedTtlMs: opts.knownTtlMs ?? 7 * 86_400_000,
+      escalatedMemoryMs: opts.escalatedMemoryMs,
+      suppressionTtlMs: opts.suppressionTtlMs ?? 0,
+    });
+    this.#rebuildRouting(db);
     const row = db.prepare("SELECT value FROM kv WHERE key = 'featurizer'").get() as { value: string } | undefined;
     if (row) {
       try {
@@ -131,52 +143,57 @@ export class Triage {
     const f = this.featurizer.featurize({ source, received_at: receivedAt, data });
     const score = this.classifier ? this.classifier.score(f.values) : null;
     const c = this.classifier?.file;
-    const known = this.escalated.has(f.template.slice(0, 300), Date.now());
-    const route = routeEvent(score, {
-      dropBelow: c?.drop_below ?? 0,
-      escalateAbove: c?.escalate_above ?? 2,
-      threshold: c?.threshold ?? 0.5,
+    const now = Date.now();
+    const template = f.template.slice(0, 300);
+    const severity = severityBucket(f.level, f.status);
+    const ctx = this.featurizer.context(f.template);
+    const facts = { template, severity, novel: f.novel, rate: ctx?.last_1m, serviceErrors: ctx?.service_errors_10m };
+    const opts = (m: ClassifierFile | undefined, auditRate: number): RouteOptions => ({
+      dropBelow: m?.drop_below ?? 0,
+      escalateAbove: m?.escalate_above ?? 2,
+      threshold: m?.threshold ?? 0.5,
       hasJev: this.opts.hasJev,
-      auditRate: this.opts.auditRate,
+      auditRate,
       novelGuard: this.opts.novelGuard,
       rand,
-    }, f.novel, known);
+    });
+    const route = this.routing.route(score, opts(c, this.opts.auditRate), facts, now);
     const shadowScore = this.shadow ? this.shadow.score(f.values) : null;
-    const s = this.shadow?.file;
-    const shadowRoute = s
-      ? routeEvent(shadowScore, { dropBelow: s.drop_below, escalateAbove: s.escalate_above, threshold: s.threshold, hasJev: this.opts.hasJev, auditRate: 0, novelGuard: this.opts.novelGuard }, f.novel, known)
-      : null;
+    const shadowRoute = this.shadow ? this.routing.route(shadowScore, opts(this.shadow.file, 0), facts, now) : null;
     return {
       score,
       shadowScore,
       shadowRoute,
       route,
-      template: f.template.slice(0, 300),
-      severity: severityBucket(f.level, f.status),
+      template,
+      severity,
+      rate: ctx?.last_1m,
+      serviceErrors: ctx?.service_errors_10m,
       features: encodeFeatures(f.values),
       user: extractEntities(data, f.text).user?.slice(0, 128) ?? null,
     };
   }
 
-  /**
-   * Templates whose latest label says "escalate", within the window. A person's label wins
-   * over Jev's: a template a person marked as a false positive is not loaded.
-   */
-  #loadEscalated(db: DB): void {
-    if (!this.escalated.ttlMs) return;
-    const since = Date.now() - this.escalated.ttlMs;
+  /** Rebuild escalations and earned suppression from the labels table, so a restart forgets nothing. */
+  #rebuildRouting(db: DB): void {
+    const since = Date.now() - this.routing.horizonMs;
     const rows = db
       .prepare(
-        `SELECT template, y, source, created_at FROM labels WHERE template IS NOT NULL AND created_at >= ?
-         ORDER BY template, (source = 'human') DESC, created_at DESC`,
+        `SELECT template, severity, y, source, provenance, created_at AS at, ctx_rate AS rate, ctx_service_errors AS serviceErrors
+         FROM labels WHERE template IS NOT NULL AND created_at >= ? ORDER BY created_at, event_id`,
       )
-      .all(since) as { template: string; y: number; created_at: number }[];
-    let last = "";
-    for (const r of rows) {
-      if (r.template === last) continue;
-      last = r.template;
-      if (r.y) this.escalated.add(r.template, r.created_at);
-    }
+      .all(since) as unknown as LabelFact[];
+    this.routing.rebuild(rows);
+  }
+
+  /** The verdict cache (routing.ts), for callers that only need it. */
+  get cache() {
+    return this.routing.cache;
+  }
+
+  /** Escalated templates (routing.ts), for callers that only need them. */
+  get escalated() {
+    return this.routing.escalated;
   }
 
   saveState(): void {

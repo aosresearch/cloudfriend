@@ -149,10 +149,20 @@ export function toEpochMs(v: unknown): number {
   return NaN;
 }
 
+/** A timestamp in the data further than this from the arrival time is not trusted. */
+export const MAX_CLOCK_SKEW_MS = 3_600_000;
+
+/**
+ * When the event happened: the timestamp in its data, unless that is more than an hour from
+ * when it arrived (a wrong clock or a local time read as UTC), else the arrival time. One bad
+ * timestamp must not move the featurizer's clock and make every rate look like zero.
+ */
 export function eventTime(e: FeatureInput): number {
+  const received = typeof e.received_at === "number" ? e.received_at : Date.parse(e.received_at);
   const fromData = toEpochMs(findKey(e.data, TIME_KEYS, 1));
-  if (!Number.isNaN(fromData)) return fromData;
-  return typeof e.received_at === "number" ? e.received_at : Date.parse(e.received_at);
+  if (Number.isNaN(fromData)) return received;
+  if (!Number.isNaN(received) && Math.abs(fromData - received) > MAX_CLOCK_SKEW_MS) return received;
+  return fromData;
 }
 
 // --- templates ----------------------------------------------------------------------
@@ -306,6 +316,8 @@ export interface FeaturizerSnapshot {
   templates: (string | number)[][];
   services: (string | number)[][];
   global: number[];
+  /** The latest event time seen, so `context()` after a restart measures from it. */
+  now?: number;
 }
 
 /**
@@ -364,7 +376,8 @@ export class Featurizer {
     const errorish =
       level >= 3 || status >= 500 || kws[0]! + kws[1]! + kws[2]! + kws[3]! + kws[4]! + kws[6]! + kws[7]! + kws[8]! > 0;
     const masked = maskMessage(text);
-    const template = `${e.source}|${service}|${masked}`;
+    // The same 300-character cap as storage, so the server can look a stored template up.
+    const template = `${e.source}|${service}|${masked}`.slice(0, 300);
 
     // Template history. Remember when each was last seen before decay() moves `last` to now.
     let tpl = this.#templates.get(template);
@@ -494,6 +507,7 @@ export class Featurizer {
       templates: [...this.#templates].map(([k, v]) => [k, v.count, v.first, ...rate(v.rate)]),
       services: [...this.#services].map(([k, v]) => [k, v.count, v.first, v.templates, ...rate(v.all), ...rate(v.errors), ...rate(v.newTemplates)]),
       global: [...rate(this.#all), ...rate(this.#allErrors), ...rate(this.#allNewTemplates)],
+      now: this.#now,
     };
   }
 
@@ -511,6 +525,8 @@ export class Featurizer {
     this.#all = rate(snap.global, 0);
     this.#allErrors = rate(snap.global, 4);
     this.#allNewTemplates = rate(snap.global, 8);
+    // Older snapshots have no clock: the latest time any rate was updated is the same thing.
+    this.#now = snap.now ?? Math.max(0, this.#all.last);
     return true;
   }
 

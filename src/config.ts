@@ -36,6 +36,8 @@ export interface Config {
   perTemplate: number;
   novelGuard: boolean;
   knownTtlMs: number;
+  escalatedMemoryMs: number;
+  suppressionTtlMs: number;
   /** 0 turns scheduled retraining off. */
   retrainIntervalMs: number;
   retrainMinLabels: number;
@@ -125,6 +127,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     perTemplate: int(env, "CLOUDFRIEND_EXAMPLES_PER_TEMPLATE", 3),
     novelGuard: bool(env, "CLOUDFRIEND_NOVEL_ERRORS", true),
     knownTtlMs: /^(off|0)$/i.test(env.CLOUDFRIEND_ESCALATED_TTL ?? "") ? 0 : duration(env, "CLOUDFRIEND_ESCALATED_TTL", "7d"),
+    escalatedMemoryMs: duration(env, "CLOUDFRIEND_ESCALATED_MEMORY", "90d"),
+    suppressionTtlMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SUPPRESSION_TTL ?? "") ? 0 : duration(env, "CLOUDFRIEND_SUPPRESSION_TTL", "30d"),
     retrainIntervalMs: /^(off|0)$/i.test(env.CLOUDFRIEND_RETRAIN_INTERVAL ?? "") ? 0 : duration(env, "CLOUDFRIEND_RETRAIN_INTERVAL", "24h"),
     retrainMinLabels: int(env, "CLOUDFRIEND_RETRAIN_MIN_LABELS", 200),
     shadowPeriodMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SHADOW_PERIOD ?? "") ? 0 : duration(env, "CLOUDFRIEND_SHADOW_PERIOD", "24h"),

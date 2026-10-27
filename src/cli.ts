@@ -169,6 +169,8 @@ async function mlCommand(
     safetySet: config.safetySet,
     incidentWindowMs: config.incidentWindowMs,
     knownTtlMs: config.knownTtlMs,
+    escalatedMemoryMs: config.escalatedMemoryMs,
+    suppressionTtlMs: config.suppressionTtlMs,
   });
   const report = await trainer.train({ dryRun: values["dry-run"] });
   out(report);

@@ -14,14 +14,21 @@ moves, and access-permission-denied faults. The simulated "QR code expired" logi
 are left in as normal behaviour: they happen every few minutes by design.
 
 Event labels (weak): a line is positive when it falls inside an incident window (plus 5
-minutes), reads like an error, and its template is clearly more frequent than outside
-incidents. Everything else is negative, so `positives` is small and the interesting number
-is how many escalations happen on the quiet days.
+minutes), reads like an error, and its template is clearly more frequent there than at
+baseline. The baseline is the train days (1-8) outside every incident window, so the eval
+days never inform their own labels. A line inside several overlapping windows is judged
+against each of them, and a positive lists the incidents it belongs to (`inc`). Everything
+else is negative, so `positives` is small and the interesting number is how many
+escalations happen on the quiet days.
+
+Labelling is a separate pass over the written streams: `--relabel` reruns it alone on an
+existing output directory, without reading the raw logs again.
 
 Split: by day. Days 1-8 train, 9-10 valid, 11-14 eval. All days form one chain: the
 featurizer's history carries over from one day to the next, as it would in production.
 """
 import argparse
+import bisect
 import collections
 import csv
 import datetime as dt
@@ -34,6 +41,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 from common import elevated, is_errorish, template, write_stream  # noqa: E402
+
+TRAIN_DAYS = 8
 
 csv.field_size_limit(10**9)
 GRACE_MS = 5 * 60_000
@@ -107,14 +116,121 @@ def parse_run(path):
     return incidents, run_events
 
 
+class Windows:
+    """Incident windows (start to end plus grace), with every window containing a time."""
+
+    def __init__(self, incidents):
+        self.w = sorted((i["start_ms"], i["end_ms"] + GRACE_MS, i["id"]) for i in incidents)
+        self.starts = [s for s, _, _ in self.w]
+        self.longest = max((e - s for s, e, _ in self.w), default=0)
+
+    def at(self, t):
+        hi = bisect.bisect_right(self.starts, t)
+        lo = bisect.bisect_left(self.starts, t - self.longest)
+        return [iid for s, e, iid in self.w[lo:hi] if s <= t <= e]
+
+
+def label(out_dir, cases):
+    """Weak labels for written streams: two passes, counting then rewriting."""
+    incidents = [i for c in cases for i in c["incidents"]]
+    windows = Windows(incidents)
+    by_id = {i["id"]: i for i in incidents}
+    durations = {i["id"]: (i["end_ms"] + GRACE_MS - i["start_ms"]) / 1000 for i in incidents}
+    train = [c for c in cases if c["split"] == "train"]
+    lo, hi = min(c["start_ms"] for c in train), max(c["end_ms"] for c in train)
+    # Baseline seconds: the train days outside every window (overlaps merged).
+    covered, cur_s, cur_e = 0, None, None
+    for s, e, _ in windows.w:
+        s, e = max(s, lo), min(e, hi)
+        if e <= s:
+            continue
+        if cur_e is None or s > cur_e:
+            if cur_e is not None:
+                covered += cur_e - cur_s
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    if cur_e is not None:
+        covered += cur_e - cur_s
+    base_secs = (hi - lo - covered) / 1000
+
+    base = collections.Counter()  # (source, service, template) on train days, outside windows
+    during = collections.Counter()  # (incident, source, service, template)
+    for c in cases:
+        for e in read_stream(out_dir, c["id"]):
+            msg = e["data"]["message"]
+            if not is_errorish(msg):
+                continue
+            k = (e["source"], e["data"]["service"], template(msg))
+            ids = windows.at(e["t"])
+            for iid in ids:
+                during[(iid,) + k] += 1
+            if not ids and c["split"] == "train":
+                base[k] += 1
+        print(f"  counted {c['id']}", flush=True)
+
+    hits = collections.Counter()
+    for c in cases:
+        events = []
+        for e in read_stream(out_dir, c["id"]):
+            e.pop("inc", None)
+            e["y"] = 0
+            msg = e["data"]["message"]
+            if is_errorish(msg):
+                k = (e["source"], e["data"]["service"], template(msg))
+                inc = [iid for iid in windows.at(e["t"]) if elevated(during[(iid,) + k], durations[iid], base[k], base_secs)]
+                if inc:
+                    e["y"] = 1
+                    e["inc"] = inc
+                    hits.update(inc)
+            events.append(e)
+        cnt, pos = write_stream(stream_path(out_dir, c["id"]), events)
+        c["events"], c["positives"] = cnt, pos
+        for inc in c["incidents"]:
+            inc["positives"] = hits[inc["id"]]
+            inc["overlaps"] = [x for x in windows.at(inc["start_ms"]) if x != inc["id"]]
+        print(f"{c['id']} {c['split']:5s} events={cnt:8d} positives={pos:6d} incidents={len(c['incidents'])}", flush=True)
+    silent = [i for i in incidents if not hits[i["id"]]]
+    overlapping = [i for i in incidents if any(x != i["id"] for x in windows.at(i["start_ms"]))]
+    print(f"{len(incidents)} incidents; {len(overlapping)} start inside another's window; {len(silent)} have no positive event", flush=True)
+    for i in overlapping:
+        print(f"  overlapping: {i['id']} ({hits[i['id']]} positives)", flush=True)
+    return cases
+
+
+def stream_path(out_dir, case_id):
+    return os.path.join(out_dir, "streams", f"{case_id}.ndjson.gz")
+
+
+def read_stream(out_dir, case_id):
+    with gzip.open(stream_path(out_dir, case_id), "rt", encoding="utf-8") as f:
+        for line in f:
+            yield json.loads(line)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", required=True)
+    ap.add_argument("--run")
     ap.add_argument("--start", default="2021-08-01")
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--relabel", action="store_true", help="only recompute the labels of an existing --out")
     args = ap.parse_args()
+    cases_file = os.path.join(args.out, "cases.json")
+    if args.relabel:
+        with open(cases_file) as f:
+            cases = json.load(f)
+    else:
+        if not args.run:
+            ap.error("--run is required unless --relabel")
+        cases = convert(args)
+    label(args.out, cases)
+    with open(cases_file, "w") as f:
+        json.dump(cases, f, indent=1)
 
+
+def convert(args):
+    """Raw logs -> one stream per day (unlabelled) and the case list."""
     day0 = dt.date.fromisoformat(args.start)
     days = [(day0 + dt.timedelta(days=i)).isoformat() for i in range(args.days)]
     lo = ms(days[0] + " 00:00:00")
@@ -122,37 +238,15 @@ def main():
     incidents, run_events = parse_run(args.run)
     incidents = [i for i in incidents if lo <= i["start_ms"] < hi]
     print(f"{len(incidents)} incidents:", dict(collections.Counter(i["kind"] for i in incidents)), flush=True)
-    windows = [(i["start_ms"], i["end_ms"] + GRACE_MS, i["id"]) for i in incidents]
-
-    def incident_at(t):
-        for s, e, iid in windows:
-            if s <= t <= e:
-                return iid
-        return None
 
     tmp_dir = os.path.join(args.out, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp = {d: gzip.open(os.path.join(tmp_dir, d + ".ndjson.gz"), "wt", encoding="utf-8", compresslevel=1) for d in days}
-    base = collections.Counter()  # (source, service, template) outside incidents
-    during = collections.Counter()  # (incident, source, service, template)
-    incident_secs = sum((e - s) / 1000 for s, e, _ in windows)
-    base_secs = args.days * 86_400 - incident_secs
 
     def add(e):
         d = dt.datetime.fromtimestamp(e["t"] / 1000, dt.timezone.utc).date().isoformat()
-        if d not in tmp:
-            return
-        msg = e["data"]["message"]
-        if is_errorish(msg):
-            k = (e["source"], e["data"]["service"], template(msg))
-            iid = incident_at(e["t"])
-            if iid:
-                during[(iid,) + k] += 1
-            else:
-                base[k] += 1
-            e["_k"] = list(k)
-            e["_i"] = iid
-        tmp[d].write(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n")
+        if d in tmp:
+            tmp[d].write(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     for e in run_events:
         add(e)
@@ -180,35 +274,26 @@ def main():
     for f in tmp.values():
         f.close()
 
-    durations = {iid: (e - s) / 1000 for s, e, iid in windows}
     cases = []
     for i, d in enumerate(days):
         events = []
         with gzip.open(os.path.join(tmp_dir, d + ".ndjson.gz"), "rt", encoding="utf-8") as f:
             for line in f:
                 e = json.loads(line)
-                k = e.pop("_k", None)
-                iid = e.pop("_i", None)
-                y = 0
-                if k and iid:
-                    k = tuple(k)
-                    y = int(elevated(during[(iid,) + k], durations[iid], base[k], base_secs))
-                e["y"] = y
+                e["y"] = 0
                 events.append(e)
-        cnt, pos = write_stream(os.path.join(args.out, "streams", f"gaia-{d}.ndjson.gz"), events)
+        write_stream(stream_path(args.out, f"gaia-{d}"), events)
         start = lo + i * 86_400_000
-        split = "train" if i < 8 else "valid" if i < 10 else "eval"
+        split = "train" if i < TRAIN_DAYS else "valid" if i < 10 else "eval"
         day_incidents = [x for x in incidents if start <= x["start_ms"] < start + 86_400_000]
         cases.append({
             "id": f"gaia-{d}", "dataset": "gaia", "split": split, "chain": "gaia",
             "start_ms": start, "end_ms": start + 86_400_000, "incidents": day_incidents,
-            "events": cnt, "positives": pos,
+            "events": 0, "positives": 0,
         })
-        print(f"gaia-{d} {split:5s} events={cnt:8d} positives={pos:6d} incidents={len(day_incidents)}", flush=True)
         os.remove(os.path.join(tmp_dir, d + ".ndjson.gz"))
     os.rmdir(tmp_dir)
-    with open(os.path.join(args.out, "cases.json"), "w") as f:
-        json.dump(cases, f, indent=1)
+    return cases
 
 
 if __name__ == "__main__":

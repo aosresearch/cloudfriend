@@ -15,8 +15,8 @@ import { encodeFeatures, type Triage } from "./triage/runtime.ts";
 export type FlagVerdict = "confirmed" | "false_positive";
 
 const UPSERT_HUMAN = `
-  INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template, provenance, weight)
-  SELECT id, ?, 'human', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, ?, template, 'human', NULL FROM events WHERE id = ? AND features IS NOT NULL
+  INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template, provenance, weight, severity)
+  SELECT id, ?, 'human', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, ?, template, 'human', NULL, severity FROM events WHERE id = ? AND features IS NOT NULL
   ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, source = 'human', note = excluded.note, created_at = excluded.created_at,
     provenance = 'human', weight = NULL, decision_id = NULL`;
 
@@ -27,6 +27,27 @@ const kindsOf = (db: DB, ids: number[]) =>
         .prepare(`SELECT DISTINCT template, severity FROM events WHERE id IN (${ids.map(() => "?").join(",")}) AND template IS NOT NULL`)
         .all(...ids) as { template: string; severity: string | null }[])
     : [];
+
+/**
+ * Apply a person's verdict on a kind of event to routing (routing.ts) at once, before any
+ * retraining. "Escalate" protects the template, revokes its earned suppression and clears any
+ * cached "no"; "don't" retires the protection and earns suppression in the current context.
+ */
+function humanVerdict(triage: Triage, k: { template: string; severity: string | null }, escalate: boolean, now: number, cacheNo: boolean): void {
+  const key = verdictKey({ template: k.template, severity: k.severity ?? undefined });
+  const r = triage.routing;
+  if (escalate) {
+    r.cache.deleteTemplate(k.template);
+    r.escalated.add(k.template, now);
+    r.ledger.relevantTemplate(k.template, now);
+    r.ledger.relevant(key, now);
+    return;
+  }
+  const ctx = triage.featurizer.context(k.template);
+  if (cacheNo) r.cache.set(key, false, now);
+  r.escalated.retire(k.template);
+  r.ledger.benign(key, now, ctx?.last_1m ?? 0, ctx?.service_errors_10m ?? 0);
+}
 
 export function flagFeedback(db: DB, triage: Triage | null, flagId: string, verdict: FlagVerdict, note: string | null) {
   const row = getFlagRow(db, flagId);
@@ -40,14 +61,7 @@ export function flagFeedback(db: DB, triage: Triage | null, flagId: string, verd
     const upsert = db.prepare(UPSERT_HUMAN);
     for (const id of ids) labeled += Number(upsert.run(y, note, now, id).changes);
   });
-  if (triage) {
-    for (const k of kindsOf(db, ids)) {
-      if (verdict === "false_positive") {
-        triage.cache.set(verdictKey({ template: k.template, severity: k.severity ?? undefined }), false, now);
-        triage.escalated.delete(k.template);
-      } else triage.escalated.add(k.template, now);
-    }
-  }
+  if (triage) for (const k of kindsOf(db, ids)) humanVerdict(triage, k, verdict === "confirmed", now, true);
   return { flag: flagId, status: verdict, labeled };
 }
 
@@ -59,12 +73,7 @@ export function eventFeedback(db: DB, eventId: number, escalate: boolean, note: 
   const changes = Number(db.prepare(UPSERT_HUMAN).run(escalate ? 1 : 0, note, Date.now(), eventId).changes);
   // A missed escalation's kind reaches Jev from now on and any cached "no" for it is gone;
   // a "no" takes it off that list.
-  for (const k of kindsOf(db, [eventId])) {
-    if (escalate) {
-      triage?.cache.deleteTemplate(k.template);
-      triage?.escalated.add(k.template, Date.now());
-    } else triage?.escalated.delete(k.template);
-  }
+  if (triage) for (const k of kindsOf(db, [eventId])) humanVerdict(triage, k, escalate, Date.now(), false);
   const flagged = (db.prepare("SELECT count(*) AS n FROM flags WHERE EXISTS (SELECT 1 FROM json_each(flags.event_ids) WHERE value = ?)").get(String(eventId)) as { n: number }).n > 0;
   return {
     event: String(eventId),

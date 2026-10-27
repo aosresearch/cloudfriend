@@ -70,6 +70,8 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       perTemplate: config.perTemplate,
       novelGuard: config.novelGuard,
       knownTtlMs: config.knownTtlMs,
+      escalatedMemoryMs: config.escalatedMemoryMs,
+      suppressionTtlMs: config.suppressionTtlMs,
       hasJev: decider !== null,
     });
     // The first model that loads: an explicit file, the last promoted one, the built-in one.
@@ -88,6 +90,8 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       safetySet: config.safetySet,
       incidentWindowMs: config.incidentWindowMs,
       knownTtlMs: config.knownTtlMs,
+      escalatedMemoryMs: config.escalatedMemoryMs,
+      suppressionTtlMs: config.suppressionTtlMs,
     });
     const shadowPath = path.join(config.dataDir, "models", "shadow.json");
     if (fs.existsSync(shadowPath)) triage.loadShadow(shadowPath);
