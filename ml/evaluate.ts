@@ -62,6 +62,8 @@ const { values: args } = parseArgs({
     concurrency: { type: "string", default: "6" },
     strategies: { type: "string", default: "cascade,classifier,keyword" },
     windows: { type: "string" },
+    // With --windows: only the windows of incidents whose id matches.
+    incidents: { type: "string" },
     safety: { type: "string" },
     // Write the cascade's Jev labels as a training CSV (the server's training loop, offline).
     "labels-out": { type: "string" },
@@ -159,7 +161,8 @@ function windowsOf(c: Case, spec: string | undefined): [number, number][] | null
   if (!spec || !c.incidents) return null;
   const [pad, quiet] = spec.split(":");
   const padMs = parseDurationMs(pad ?? "30m");
-  const w: [number, number][] = c.incidents.map((i) => [i.start_ms - padMs, i.end_ms + 5 * 60_000 + padMs]);
+  const pick = args.incidents ? new RegExp(args.incidents) : null;
+  const w: [number, number][] = c.incidents.filter((i) => !pick || pick.test(i.id)).map((i) => [i.start_ms - padMs, i.end_ms + 5 * 60_000 + padMs]);
   const rand = seeded(c.id);
   for (let tries = 0, n = 0; n < Number(quiet ?? 0) && tries < 200; tries++) {
     const s = c.start_ms + Math.floor(rand() * 23) * 3_600_000;
@@ -386,6 +389,7 @@ function incidentsOf(c: Case, windows: [number, number][] | null) {
   if (c.inject_ms !== undefined) return [{ id: c.id, kind: String(c.fault ?? ""), start: c.inject_ms, service: String(c.service ?? "") }];
   return (c.incidents ?? [])
     .filter((i) => !windows || windows.some(([a, b]) => i.start_ms >= a && i.start_ms <= b))
+    .filter((i) => !args.incidents || !windows || new RegExp(args.incidents).test(i.id) || windows.some(([a, b]) => i.start_ms >= a && i.end_ms <= b))
     .map((i) => ({ id: i.id, kind: i.kind, start: i.start_ms, service: i.service }));
 }
 
