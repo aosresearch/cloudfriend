@@ -12,6 +12,7 @@ Scripts that build, train and evaluate cloudfriend's classifier on public benchm
 | `jev.ts` | Jev client for the scripts: cached on disk by prompt hash, with a budget |
 | `replay.ts` | streams a case into a running cloudfriend over HTTP |
 | `export-demo.ts` | records replays for cloudfriend.dev/demo |
+| `safety-candidates.ts` | picks events from the held-out data for the human-labelled safety set (`benchmarks/safety-set/`) |
 
 Everything below writes under `data/` (git-ignored). You need Node 22.18+, Python 3.11+ with `lightgbm numpy pandas`, and about 15 GB of disk for GAIA.
 
@@ -45,7 +46,7 @@ unzip -p data/raw/gaia/business.zip business/business_table_2021-08.csv 2>/dev/n
 ```bash
 node ml/featurize.ts --data data/prepared/re3 --data data/prepared/gaia:0.005:0.1 --out data/features --keep 0.05
 python3 ml/train.py --train data/features/train.csv --valid data/features/valid.csv --eval data/features/eval.csv \
-  --featurizer-version 1 --recall 0.995 \
+  --featurizer-version 2 --recall 0.995 \
   --exclude '^(tok_|svc_new$|svc_count$|svc_age$|svc_templates$|all_m1$|all_h1$)' \
   --out models/base.json --parity test/fixtures/parity.json --note "RCAEval RE3 + GAIA MicroSS"
 ```
@@ -62,7 +63,15 @@ node ml/evaluate.ts --data data/prepared/gaia --model models/base.json --split e
 
 Without `--jev` the run is a dry run. It counts the Jev calls the cascade would make, and the cascade falls back to the classifier's own threshold. Jev replies are cached in `data/jev-cache`, so a rerun with the same model and data costs nothing.
 
-## 5. Try the loop against a real server
+## 5. Build the safety-set candidates
+
+```bash
+node ml/safety-candidates.ts --data data/prepared/re3 --data data/prepared/gaia --model models/base.json --out benchmarks/safety-set
+```
+
+It replays the eval split through the model, makes no Jev calls, and writes about 300 events for people to label. `benchmarks/safety-set/README.md` says how. Re-run it whenever the featurizer version changes, since it also stores each candidate's feature vector.
+
+## 6. Try the loop against a real server
 
 ```bash
 CLOUDFRIEND_DATA_DIR=/tmp/cf CLOUDFRIEND_ADMIN_KEY=admin JEV_API_KEY=sk-or-... npm start   # prints an ingest secret
@@ -72,7 +81,7 @@ curl -X POST -H "Authorization: Bearer admin" localhost:8080/flags/<id>/feedback
 CLOUDFRIEND_DATA_DIR=/tmp/cf npm run cloudfriend -- train
 ```
 
-## 6. Record the demo
+## 7. Record the demo
 
 ```bash
 node ml/export-demo.ts --model models/base.json --cache data/jev-cache --out ../cloudfriend-website/public/demo \

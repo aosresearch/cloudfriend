@@ -19,10 +19,23 @@ export interface CloudfriendEvent {
   score?: number;
   route?: string;
   /**
-   * Set when the classifier passed this event on to the decider: its score, and how many
-   * near-identical events in the batch were held back and will share this event's verdict.
+   * Set when the classifier passed this event on to the decider: its score (deciders should
+   * not show it to a model they learn from), how many near-identical events in this batch
+   * share its verdict, and what is known about its kind of event (counts include events the
+   * classifier dropped).
    */
-  triage?: { score: number; similar: number };
+  triage?: { score: number; similar: number; context?: TemplateContext | null };
+}
+
+export interface TemplateContext {
+  seen_total: number;
+  last_1m: number;
+  last_10m: number;
+  last_hour: number;
+  usual_per_hour: number;
+  first_seen_min_ago: number;
+  service_events_10m?: number;
+  service_errors_10m?: number;
 }
 
 export type Severity = "low" | "medium" | "high" | "critical";
@@ -33,6 +46,26 @@ export interface FlagDraft {
   reason: string;
   severity: Severity;
   event_ids: string[];
+  /** Id of an open flag these events continue: they are added to it and nobody is notified again. */
+  update?: string;
+}
+
+/**
+ * Whether one event deserves attention, separate from whether to notify about it. A
+ * duplicate symptom of an open incident is `relevant` even though it raises no new flag.
+ * Only explicit judgments become training labels; `uncertain` or a missing judgment never does.
+ */
+export interface Judgment {
+  event_id: string;
+  relevance: "relevant" | "benign" | "uncertain";
+}
+
+/** What a decider returns: flags, optionally a judgment per event, and a record of the call. */
+export interface Decision {
+  flags: FlagDraft[];
+  judgments?: Judgment[];
+  /** Kept with the labels it produced, so every label can be traced to the exact call. */
+  record?: { model?: string; prompt?: string; response?: string };
 }
 
 /** A stored flag. `id` is stable, so receivers can use it to ignore repeat deliveries. */
@@ -92,12 +125,22 @@ export interface SourceAdapter {
 export interface DeciderAdapter {
   /** Return false to stay disabled, e.g. when a required env var is missing. */
   enabled?(env: NodeJS.ProcessEnv): boolean;
-  decide(events: CloudfriendEvent[], ctx: DeciderContext): Promise<FlagDraft[]>;
+  /** Return flag drafts (v0) or a Decision with per-event judgments. */
+  decide(events: CloudfriendEvent[], ctx: DeciderContext): Promise<FlagDraft[] | Decision>;
 }
 
 export interface DeciderContext {
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
+  /** Flags still in the queue, so the decider can say an event continues one instead of raising another. */
+  openFlags?: { id: string; reason: string; severity: Severity }[];
+}
+
+/** Accept both decider return shapes. */
+export function toDecision(out: FlagDraft[] | Decision): Decision {
+  if (Array.isArray(out)) return { flags: out };
+  if (out && Array.isArray(out.flags)) return out;
+  throw new Error("decide() must return an array of flags or { flags, judgments }");
 }
 
 /** An action does something with each flag. Throw (or return false) to have it retried. */

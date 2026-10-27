@@ -9,7 +9,7 @@
 // Bump FEATURIZER_VERSION whenever a feature changes meaning. Models record the version
 // they were trained with, and stored feature vectors with another version are not mixed in.
 
-export const FEATURIZER_VERSION = 1;
+export const FEATURIZER_VERSION = 2;
 
 export interface FeatureInput {
   source: string;
@@ -25,6 +25,8 @@ export interface Featurized {
   service: string;
   /** 0 debug, 1 info, 2 warn, 3 error, 4 fatal; NaN when unknown. */
   level: number;
+  /** HTTP-style status code found in the event, or NaN. */
+  status: number;
   /** Error words or level >= error. */
   errorish: boolean;
   /** An error-like event whose template has never been seen before. */
@@ -306,6 +308,23 @@ export interface FeaturizerSnapshot {
   global: number[];
 }
 
+/**
+ * Counts are exponentially decayed: `last_10m` is roughly how many occurred in the last
+ * 10 minutes, including events the classifier dropped.
+ */
+export interface TemplateContext {
+  seen_total: number;
+  last_1m: number;
+  last_10m: number;
+  last_hour: number;
+  usual_per_hour: number;
+  first_seen_min_ago: number;
+  service_events_10m?: number;
+  service_errors_10m?: number;
+}
+
+const round1 = (x: number) => Math.round(x * 10) / 10;
+
 export interface FeaturizerOptions {
   /** Most templates remembered; the least recently seen are forgotten first. */
   maxTemplates?: number;
@@ -320,6 +339,8 @@ export class Featurizer {
   #all = newRate(0);
   #allErrors = newRate(0);
   #allNewTemplates = newRate(0);
+  /** Latest event time seen: the clock `context()` uses, so replays of old data work too. */
+  #now = 0;
   #maxTemplates: number;
   #maxServices: number;
 
@@ -345,9 +366,10 @@ export class Featurizer {
     const masked = maskMessage(text);
     const template = `${e.source}|${service}|${masked}`;
 
-    // Template history.
+    // Template history. Remember when each was last seen before decay() moves `last` to now.
     let tpl = this.#templates.get(template);
     const tplNew = !tpl;
+    const tplLast = tpl?.rate.last ?? t;
     if (tpl) {
       this.#templates.delete(template); // re-insert below: Map order doubles as LRU order
       decay(tpl.rate, t);
@@ -355,6 +377,7 @@ export class Featurizer {
     // Service history.
     let svc = this.#services.get(service);
     const svcNew = !svc;
+    const svcLast = svc?.all.last ?? t;
     if (svc) {
       decay(svc.all, t);
       decay(svc.errors, t);
@@ -392,9 +415,9 @@ export class Featurizer {
       log1p(text.length), log1p(text.split("\n").length - 1), digits / (text.length || 1), uppers / (letters || 1),
       log1p(stackFrames), errorish ? 1 : 0,
       ...kws,
-      tplNew ? 1 : 0, log1p(tc), tpl ? log1p((t - tpl.first) / 1000) : -1, tpl ? log1p((t - tr.last) / 1000) : -1,
+      tplNew ? 1 : 0, log1p(tc), tpl ? log1p((t - tpl.first) / 1000) : -1, tpl ? log1p(Math.max(0, t - tplLast) / 1000) : -1,
       tr.m1, tr.m10, tr.h1, ratio(tr.m1, tr.h1 / 60), ratio(tr.h1, sv.all.h1),
-      svcNew ? 1 : 0, log1p(sv.count), svc ? log1p((t - sv.first) / 1000) : -1, svc ? log1p((t - sv.all.last) / 1000) : -1,
+      svcNew ? 1 : 0, log1p(sv.count), svc ? log1p((t - sv.first) / 1000) : -1, svc ? log1p(Math.max(0, t - svcLast) / 1000) : -1,
       sv.all.m1, sv.all.h1, ratio(sv.all.m1, sv.all.h1 / 60),
       sv.errors.m1, sv.errors.m10, sv.errors.h1, ratio(sv.errors.m1, sv.errors.h1 / 60), ratio(sv.errors.h1, sv.all.h1),
       sv.newTemplates.m10, sv.newTemplates.h1, log1p(sv.templates),
@@ -426,7 +449,41 @@ export class Featurizer {
     bump(this.#all);
     if (errorish) bump(this.#allErrors);
 
-    return { values, template, service, level, errorish, novel: errorish && tplNew, time: t, text };
+    if (t > this.#now) this.#now = t;
+    return { values, template, service, level, status, errorish, novel: errorish && tplNew, time: t, text };
+  }
+
+  /**
+   * What the featurizer knows about a template right now, for the decider's prompt: how often
+   * it occurred (dropped events included), its usual rate, and how busy and how failing its
+   * service is. Read-only: nothing is updated.
+   */
+  context(template: string, now = this.#now): TemplateContext | null {
+    const tpl = this.#templates.get(template);
+    if (!tpl) return null;
+    const service = template.split("|")[1] ?? "";
+    const svc = this.#services.get(service);
+    const at = (r: Rate) => {
+      const dt = Math.max(0, now - r.last);
+      return { m1: r.m1 * Math.exp(-dt / TAU.m1), m10: r.m10 * Math.exp(-dt / TAU.m10), h1: r.h1 * Math.exp(-dt / TAU.h1) };
+    };
+    const r = at(tpl.rate);
+    const ageH = Math.max((now - tpl.first) / 3_600_000, 1 / 60);
+    const ctx: TemplateContext = {
+      seen_total: tpl.count,
+      last_1m: round1(r.m1),
+      last_10m: round1(r.m10),
+      last_hour: round1(r.h1),
+      usual_per_hour: round1(tpl.count / ageH),
+      first_seen_min_ago: round1((now - tpl.first) / 60_000),
+    };
+    if (svc) {
+      const all = at(svc.all);
+      const err = at(svc.errors);
+      ctx.service_events_10m = round1(all.m10);
+      ctx.service_errors_10m = round1(err.m10);
+    }
+    return ctx;
   }
 
   /** Everything the featurizer remembers, as plain JSON, to survive a restart. */

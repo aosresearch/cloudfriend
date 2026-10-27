@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 import slack, { slackMessage } from "../src/adapters/actions/slack.ts";
 import webhook from "../src/adapters/actions/webhook.ts";
-import openrouter, { buildPrompt, parseReply } from "../src/adapters/deciders/openrouter.ts";
+import openrouter, { buildPrompt, parseDecision, parseReply } from "../src/adapters/deciders/openrouter.ts";
 import { loadAdapters } from "../src/adapters.ts";
 import { compactJson } from "../src/compact.ts";
 import type { Flag, CloudfriendEvent } from "../src/types.ts";
@@ -69,8 +69,11 @@ describe("openrouter decider", () => {
         OPENROUTER_MODEL: "test/model",
         CLOUDFRIEND_DECIDER_INSTRUCTIONS: "Checkout matters most.",
       };
-      const flags = await openrouter.decide(events, { env, signal });
-      assert.deepEqual(flags, [{ reason: "Checkout errors", severity: "critical", event_ids: ["10"] }]);
+      const decision = await openrouter.decide(events, { env, signal });
+      assert.ok(!Array.isArray(decision));
+      assert.deepEqual(decision.flags, [{ reason: "Checkout errors", severity: "critical", event_ids: ["10"] }]);
+      assert.equal(decision.judgments, undefined, "a v0 reply has no judgments, so it yields no labels");
+      assert.match(decision.record!.prompt!, /\[0\] source=sentry/);
       const req = server.requests[0]!;
       assert.equal(req.url, "/api/v1/chat/completions");
       assert.equal(req.headers.authorization, "Bearer sk-or-test");
@@ -82,6 +85,46 @@ describe("openrouter decider", () => {
     } finally {
       await server.close();
     }
+  });
+
+  it("reads judgments and alerts, and never invents a judgment", () => {
+    const three = [...events, { ...events[0]!, id: "12" }];
+    const d = parseDecision(
+      JSON.stringify({
+        judgments: [
+          { event: 0, relevance: "relevant" },
+          { event: 1, relevance: "Benign" },
+          { event: 1, relevance: "relevant" },
+          { event: 2, relevance: "maybe" },
+          { event: 9, relevance: "relevant" },
+        ],
+        alerts: [
+          { reason: "Checkout broke", severity: "high", events: [0] },
+          { reason: "Still broken", severity: "high", events: [0], update: "flg_open" },
+          { reason: "Bogus update", severity: "low", events: [1], update: "flg_unknown" },
+        ],
+      }),
+      three,
+      new Set(["flg_open"]),
+    );
+    assert.deepEqual(d.judgments, [
+      { event_id: "10", relevance: "relevant" },
+      { event_id: "11", relevance: "benign" },
+    ]);
+    assert.equal(d.flags[0]!.update, undefined);
+    assert.equal(d.flags[1]!.update, "flg_open");
+    assert.equal(d.flags[2]!.update, undefined, "an update to a flag that isn't open becomes a new alert");
+  });
+
+  it("shows the decider counts, not the classifier's score", () => {
+    const p = buildPrompt(
+      [{ ...events[0]!, triage: { score: 0.97, similar: 4, context: { seen_total: 120, last_1m: 3, last_10m: 30, last_hour: 90, usual_per_hour: 2, first_seen_min_ago: 600 } } }],
+      {},
+      [{ id: "flg_1", reason: "Checkout failing", severity: "high" }],
+    );
+    assert.doesNotMatch(p, /0\.97|classifier/);
+    assert.match(p, /similar_in_batch=4 seen_total=120 last_1m=3 last_10m=30 last_hour=90 usual_per_hour=2 first_seen_min_ago=600/);
+    assert.match(p, /Open alerts:\n- flg_1 \(high\) Checkout failing/);
   });
 
   it("throws on HTTP errors so the batch is retried", async () => {

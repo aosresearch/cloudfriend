@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS models (
   report     TEXT    NOT NULL
 );
 
+-- Every decider call that produced labels: the exact prompt and raw reply, for audit.
+CREATE TABLE IF NOT EXISTS decisions (
+  id         TEXT    PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  decider    TEXT    NOT NULL,
+  model      TEXT,
+  prompt     TEXT,
+  response   TEXT,
+  event_ids  TEXT    NOT NULL
+);
+
 -- Small state that should survive restarts, e.g. the featurizer's template history.
 CREATE TABLE IF NOT EXISTS kv (
   key        TEXT    PRIMARY KEY,
@@ -138,6 +149,17 @@ const COLUMNS: [table: string, column: string, decl: string][] = [
   ["flags", "note", "TEXT"],
   // The labelled event's template, so a kind of event someone escalated keeps reaching Jev.
   ["labels", "template", "TEXT"],
+  // How the label came about (threshold | audit | novel | known | follower | human | import),
+  // its training weight, and the decider call it came from.
+  ["labels", "provenance", "TEXT"],
+  ["labels", "weight", "REAL"],
+  ["labels", "decision_id", "TEXT"],
+  // Level and status class (e.g. e5): verdicts are cached per template and severity.
+  ["events", "severity", "TEXT"],
+  // What a model running in shadow would have scored the event, and the route it would have
+  // taken (audits aside): `drop` means it would not have reached Jev.
+  ["events", "shadow_score", "REAL"],
+  ["events", "shadow_route", "TEXT"],
 ];
 
 function migrate(db: DB): void {

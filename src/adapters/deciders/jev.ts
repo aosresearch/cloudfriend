@@ -11,7 +11,8 @@ export const JEV: ChatDefaults = { keyVar: "JEV_API_KEY", modelVar: "JEV_MODEL",
 
 export default defineDecider({
   enabled: (env) => Boolean(apiKey(env, JEV)),
-  async decide(events, { env, signal }) {
-    return (await complete(events, env, signal, JEV)).flags;
+  async decide(events, { env, signal, openFlags }) {
+    const { flags, judgments, record } = await complete(events, env, signal, JEV, openFlags);
+    return { flags, judgments, record };
   },
 });

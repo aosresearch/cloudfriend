@@ -84,7 +84,13 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
       minLabels: config.retrainMinLabels,
       humanWeight: config.humanLabelWeight,
       recall: config.recallTarget,
+      shadowPeriodMs: config.shadowPeriodMs,
+      safetySet: config.safetySet,
+      incidentWindowMs: config.incidentWindowMs,
+      knownTtlMs: config.knownTtlMs,
     });
+    const shadowPath = path.join(config.dataDir, "models", "shadow.json");
+    if (fs.existsSync(shadowPath)) triage.loadShadow(shadowPath);
   }
   const worker = new Worker({
     db,
@@ -119,7 +125,11 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
   const startRetraining = () => {
     if (triage && !config.modelPath) {
       const active = path.join(config.dataDir, "models", "active.json");
-      reloadTimer = setInterval(() => triage!.reloadIfChanged(active), 30_000);
+      reloadTimer = setInterval(() => {
+        triage!.reloadIfChanged(active);
+        triage!.reloadShadowIfChanged(path.join(config.dataDir, "models", "shadow.json"));
+        trainer?.checkShadow();
+      }, 30_000);
       reloadTimer.unref();
     }
     if (!trainer || !config.retrainIntervalMs) return;

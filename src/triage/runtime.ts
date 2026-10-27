@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { DB } from "../db.ts";
 import { errMsg, log } from "../log.ts";
-import { EscalatedTemplates, routeEvent, VerdictCache, type FullRoute } from "./cascade.ts";
+import { EscalatedTemplates, routeEvent, severityBucket, VerdictCache, type FullRoute } from "./cascade.ts";
 import { Classifier, type ClassifierFile } from "./classifier.ts";
 import { extractEntities, Featurizer, FEATURIZER_VERSION, type FeaturizerSnapshot } from "./features.ts";
 
@@ -27,8 +27,12 @@ export interface TriageOptions {
 
 export interface Scored {
   score: number | null;
+  /** The shadow model's score and route (without audit sampling), when one is running. */
+  shadowScore: number | null;
+  shadowRoute: FullRoute | null;
   route: FullRoute;
   template: string;
+  severity: string;
   features: Uint8Array;
   user: string | null;
 }
@@ -40,6 +44,9 @@ export class Triage {
   readonly opts: TriageOptions;
   classifier: Classifier | null = null;
   modelPath: string | null = null;
+  /** A candidate being tried out: it scores every event, but its score decides nothing. */
+  shadow: Classifier | null = null;
+  #shadowMtime = 0;
   #db: DB;
 
   constructor(db: DB, opts: TriageOptions) {
@@ -91,10 +98,40 @@ export class Triage {
     this.load(file);
   }
 
+  /** Load a candidate to run in shadow. */
+  loadShadow(file: string): boolean {
+    try {
+      this.#shadowMtime = fs.statSync(file).mtimeMs;
+      this.shadow = new Classifier(JSON.parse(fs.readFileSync(file, "utf8")) as ClassifierFile);
+      log.info("shadow classifier loaded", { path: file, trees: this.shadow.gbdt.numTrees });
+      return true;
+    } catch (err) {
+      log.warn("shadow classifier not loaded", { path: file, error: errMsg(err) });
+      return false;
+    }
+  }
+
+  /** Pick up (or drop) a shadow model written by `cloudfriend train` in another process. */
+  reloadShadowIfChanged(file: string): void {
+    let mtime: number;
+    try {
+      mtime = fs.statSync(file).mtimeMs;
+    } catch {
+      this.shadow = null;
+      return;
+    }
+    if (!this.shadow || mtime !== this.#shadowMtime) this.loadShadow(file);
+  }
+
+  clearShadow(): void {
+    this.shadow = null;
+  }
+
   score(source: string, receivedAt: number, data: unknown, rand = Math.random): Scored {
     const f = this.featurizer.featurize({ source, received_at: receivedAt, data });
     const score = this.classifier ? this.classifier.score(f.values) : null;
     const c = this.classifier?.file;
+    const known = this.escalated.has(f.template.slice(0, 300), Date.now());
     const route = routeEvent(score, {
       dropBelow: c?.drop_below ?? 0,
       escalateAbove: c?.escalate_above ?? 2,
@@ -103,11 +140,19 @@ export class Triage {
       auditRate: this.opts.auditRate,
       novelGuard: this.opts.novelGuard,
       rand,
-    }, f.novel, this.escalated.has(f.template.slice(0, 300), Date.now()));
+    }, f.novel, known);
+    const shadowScore = this.shadow ? this.shadow.score(f.values) : null;
+    const s = this.shadow?.file;
+    const shadowRoute = s
+      ? routeEvent(shadowScore, { dropBelow: s.drop_below, escalateAbove: s.escalate_above, threshold: s.threshold, hasJev: this.opts.hasJev, auditRate: 0, novelGuard: this.opts.novelGuard }, f.novel, known)
+      : null;
     return {
       score,
+      shadowScore,
+      shadowRoute,
       route,
       template: f.template.slice(0, 300),
+      severity: severityBucket(f.level, f.status),
       features: encodeFeatures(f.values),
       user: extractEntities(data, f.text).user?.slice(0, 128) ?? null,
     };

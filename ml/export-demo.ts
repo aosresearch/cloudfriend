@@ -12,10 +12,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { applyVerdicts, EscalatedTemplates, planBatch, routeEvent, VerdictCache, type Pending } from "../src/triage/cascade.ts";
+import { applyVerdicts, EscalatedTemplates, planBatch, routeEvent, severityBucket, VerdictCache, verdictKey, type Pending } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, Featurizer } from "../src/triage/features.ts";
-import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
+import type { CloudfriendEvent, FlagDraft, Judgment } from "../src/types.ts";
 import { Jev } from "./jev.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
@@ -101,12 +101,15 @@ async function exportScenario(spec: string) {
     const inWindow = now >= from && now <= to + WAIT;
     if (inWindow) totals.cached_verdicts += plan.cached.length;
     let drafts: FlagDraft[] = [];
+    let judgments: Judgment[] | undefined;
     if (plan.ask.length) {
       const events: CloudfriendEvent[] = plan.ask.map(({ item, similar }) => {
         const e = byId.get(item.id)!;
         return { id: item.id, source: e.source, received_at: new Date(e.t).toISOString(), data: e.data, triage: { score: item.score ?? 0, similar } };
       });
-      drafts = (await jev.ask(events)) ?? [];
+      const res = await jev.ask(events);
+      drafts = res?.flags ?? [];
+      judgments = res?.judgments;
       if (inWindow) {
         totals.asked += events.length;
         totals.calls++;
@@ -121,7 +124,7 @@ async function exportScenario(spec: string) {
         });
       }
     }
-    const out = applyVerdicts(plan, drafts);
+    const out = applyVerdicts(plan, { flags: drafts, judgments });
     const ids: string[] = [];
     for (const f of out.flags) {
       const id = `flag-${flags.length + 1}`;
@@ -130,7 +133,9 @@ async function exportScenario(spec: string) {
       const users = [...new Set(f.event_ids.map((x) => byId.get(x)).filter(Boolean).map((e) => extractEntities(e!.data).user).filter(Boolean))] as string[];
       flags.push({ id, t: now, reason: f.reason, severity: f.severity, via: f.via, events: f.event_ids.slice(0, 50), count: f.event_ids.length, added: [], users: users.slice(0, 5) });
     }
-    out.verdicts.forEach((i, tpl) => cache.set(tpl, i >= 0, now, i >= 0 ? ids[i] : undefined));
+    const rateOf = new Map(batch.map((b) => [verdictKey(b), b.rate]));
+    out.verdicts.forEach((v, k) => cache.set(k, v.escalate, now, typeof v.flag === "number" ? ids[v.flag] : v.flag, rateOf.get(k)));
+    for (const t of out.relevant) escalated.add(t, now);
     for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) escalated.add(t, now);
     for (const [fid, evs] of out.attach) {
       const f = flags.find((x) => x.id === fid);
@@ -174,7 +179,7 @@ async function exportScenario(spec: string) {
         byId.set(id, rec);
         if (!pending.length) oldest = e.t;
         if (route !== "audit" && oldestUrgent === null) oldestUrgent = e.t;
-        pending.push({ id, template: f.template, score, route });
+        pending.push({ id, template: f.template, score, route, severity: severityBucket(f.level, f.status), rate: featurizer.context(f.template)?.last_1m });
       }
       if (!inWindow) {
         if (byId.size > 50_000) for (const k of [...byId.keys()].slice(0, 25_000)) byId.delete(k);

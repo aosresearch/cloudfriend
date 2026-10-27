@@ -115,7 +115,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!token || !safeEqual(token, adminKey)) return c.json({ error: "unauthorized" }, 401);
     await next();
   };
-  for (const prefix of ["/secrets", "/flags", "/events", "/queue", "/stats", "/model", "/labels"]) {
+  for (const prefix of ["/secrets", "/flags", "/events", "/queue", "/stats", "/model", "/labels", "/decisions"]) {
     app.use(prefix, requireAdmin);
     app.use(`${prefix}/*`, requireAdmin);
   }
@@ -251,11 +251,25 @@ export function createApp(deps: AppDeps): Hono {
     const history = db.prepare("SELECT id, created_at, status, labels, report FROM models ORDER BY created_at DESC LIMIT 20").all() as {
       id: string; created_at: number; status: string; labels: number; report: string;
     }[];
+    const shadow = db.prepare("SELECT id, created_at FROM models WHERE status = 'shadow' ORDER BY created_at DESC LIMIT 1").get() as
+      | { id: string; created_at: number }
+      | undefined;
     return c.json({
       active: triage?.classifier ? modelInfo(triage) : null,
+      shadow: shadow && triage?.shadow
+        ? { id: shadow.id, since: new Date(shadow.created_at).toISOString(), trained_at: triage.shadow.file.trained_at, drop_below: triage.shadow.file.drop_below }
+        : null,
       training: trainer?.running ?? false,
       history: history.map((h) => ({ ...JSON.parse(h.report), status: h.status, created_at: new Date(h.created_at).toISOString() })),
     });
+  });
+
+  app.get("/decisions/:id", (c) => {
+    const row = db.prepare("SELECT * FROM decisions WHERE id = ?").get(c.req.param("id")) as
+      | { id: string; created_at: number; decider: string; model: string | null; prompt: string | null; response: string | null; event_ids: string }
+      | undefined;
+    if (!row) return c.json({ error: "not found" }, 404);
+    return c.json({ ...row, created_at: new Date(row.created_at).toISOString(), event_ids: JSON.parse(row.event_ids) });
   });
 
   app.post("/model/train", async (c) => {

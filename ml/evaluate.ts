@@ -21,10 +21,10 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { JEV } from "../src/adapters/deciders/jev.ts";
 import { Jev } from "./jev.ts";
-import { applyVerdicts, EscalatedTemplates, planBatch, routeEvent, VerdictCache, type FullRoute, type Pending } from "../src/triage/cascade.ts";
+import { applyVerdicts, EscalatedTemplates, labelProvenance, planBatch, routeEvent, severityBucket, VerdictCache, verdictKey, type FullRoute, type Pending } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, FEATURE_NAMES, Featurizer } from "../src/triage/features.ts";
-import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
+import type { CloudfriendEvent, FlagDraft, Judgment } from "../src/types.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
 const { values: args } = parseArgs({
@@ -150,14 +150,14 @@ class Sim {
     }
   }
 
-  async push(id: string, now: number, score: number, errorish: boolean, novel: boolean, template: string) {
+  async push(id: string, now: number, score: number, errorish: boolean, novel: boolean, template: string, severity: string, rate?: number) {
     if (this.#pending.length && (this.#pending.length >= BATCH || now - (this.#oldestUrgent ?? this.#oldest + AUDIT_WAIT - WAIT) >= WAIT)) await this.#launch(now);
     const route = this.route(score, errorish, novel, this.#escalated.has(template, now));
     this.routed[route] = (this.routed[route] ?? 0) + 1;
     if (route === "drop") return;
     if (!this.#pending.length) this.#oldest = now;
     if (route !== "audit" && this.#oldestUrgent === null) this.#oldestUrgent = now;
-    this.#pending.push({ id, template, score, route });
+    this.#pending.push({ id, template, score, route, severity, rate });
   }
 
   #inflight: Promise<void>[] = [];
@@ -184,6 +184,7 @@ class Sim {
     if (!batch.length) return;
     const plan = planBatch(batch, this.#cache, now);
     let drafts: FlagDraft[] = [];
+    const judgments: Judgment[] = [];
     let answered = true;
     if (plan.ask.length) {
       this.asked += plan.ask.length;
@@ -202,7 +203,10 @@ class Sim {
         for (let i = 0; i < events.length; i += BATCH) {
           const part = events.slice(i, i + BATCH);
           const res = await jev.ask(part);
-          if (res) drafts.push(...res);
+          if (res) {
+            drafts.push(...res.flags);
+            judgments.push(...(res.judgments ?? []));
+          }
           else {
             // Jev unavailable: fall back to the classifier's own threshold for these events.
             this.unavailable += part.length;
@@ -216,13 +220,13 @@ class Sim {
         drafts = [];
       }
     }
-    const out = applyVerdicts(plan, drafts);
+    const out = applyVerdicts(plan, { flags: drafts, judgments });
     for (const l of out.labels) l.y ? this.labels.pos++ : this.labels.neg++;
     if (labelsOut && this.name === "cascade" && answered) {
       let rows = "";
       for (const l of out.labels) {
         const e = this.info.get(l.id);
-        if (e?.values) rows += `${this.caseId},${e.t},${l.y},1,${e.values.map(fmt).join(",")}\n`;
+        if (e?.values) rows += `${this.caseId},${e.t},${l.y},${labelProvenance(l, AUDIT).weight},${e.values.map(fmt).join(",")}\n`;
       }
       if (rows) fs.writeSync(labelsOut, rows);
     }
@@ -244,7 +248,9 @@ class Sim {
       this.#flagById.set(flag.id, flag);
       ids.push(flag.id);
     }
-    for (const [t, i] of out.verdicts) this.#cache.set(t, i >= 0, now, i >= 0 ? ids[i] : undefined);
+    const rateOf = new Map(batch.map((b) => [verdictKey(b), b.rate]));
+    for (const [k, v] of out.verdicts) this.#cache.set(k, v.escalate, now, typeof v.flag === "number" ? ids[v.flag] : v.flag, rateOf.get(k));
+    if (this.name === "cascade") for (const t of out.relevant) this.#escalated.add(t, now);
     if (this.name === "cascade") for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) this.#escalated.add(t, now);
     for (const [fid, evs] of out.attach) {
       const f = this.#flagById.get(fid);
@@ -345,7 +351,9 @@ async function runChain(dir: string, chain: Case[]): Promise<CaseResult[]> {
           (users.get(u) ?? users.set(u, new Set()).get(u)!).add(`${e.source}:${f.service}`);
         }
       }
-      for (const s of sims) await s.push(id, e.t, score, f.errorish, f.novel, f.template);
+      const sev = severityBucket(f.level, f.status);
+      const rate = featurizer.context(f.template)?.last_1m;
+      for (const s of sims) await s.push(id, e.t, score, f.errorish, f.novel, f.template, sev, rate);
       if (info.size > pruneAt) {
         pruneInfo(info, sims, e.t);
         pruneAt = Math.max(200_000, info.size * 2);

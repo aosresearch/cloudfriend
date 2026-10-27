@@ -165,6 +165,10 @@ async function mlCommand(
     minLabels: config.retrainMinLabels,
     humanWeight: config.humanLabelWeight,
     recall: config.recallTarget,
+    shadowPeriodMs: config.shadowPeriodMs,
+    safetySet: config.safetySet,
+    incidentWindowMs: config.incidentWindowMs,
+    knownTtlMs: config.knownTtlMs,
   });
   const report = await trainer.train({ dryRun: values["dry-run"] });
   out(report);

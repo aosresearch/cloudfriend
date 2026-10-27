@@ -6,7 +6,7 @@ import path from "node:path";
 import { loadAdapters, type Adapters } from "../src/adapters.ts";
 import { loadConfig, type Config } from "../src/config.ts";
 import { createCloudfriend, type cloudfriend } from "../src/cloudfriend.ts";
-import type { ActionAdapter, DeciderAdapter, FlagDraft, CloudfriendEvent } from "../src/types.ts";
+import type { ActionAdapter, DeciderAdapter, Decision, FlagDraft, CloudfriendEvent } from "../src/types.ts";
 
 process.env.CLOUDFRIEND_LOG ??= "silent";
 
@@ -27,12 +27,14 @@ export function testConfig(over: Partial<Config> = {}): Config {
     cleanupIntervalMs: 3_600_000,
     // The v0 tests check the pipeline without the classifier; test/triage.test.ts turns it on.
     triage: false,
+    // Promote trained models at once; the shadow tests set a period.
+    shadowPeriodMs: 0,
     ...over,
   };
 }
 
 /** A decider that records what it saw and returns whatever `respond` says. */
-export function fakeDecider(respond: (events: CloudfriendEvent[]) => FlagDraft[] | Promise<FlagDraft[]> = () => []) {
+export function fakeDecider(respond: (events: CloudfriendEvent[]) => FlagDraft[] | Decision | Promise<FlagDraft[] | Decision> = () => []) {
   const calls: CloudfriendEvent[][] = [];
   const adapter: DeciderAdapter = {
     async decide(events) {

@@ -106,16 +106,17 @@ Every parsed event goes through a featurizer: message template, rates, novelty, 
 | `audit` | 1% of what would be dropped | Jev checks it, to find what the classifier misses |
 | `classifier` | there is no Jev; score at or above the model's `threshold` | escalated by the classifier alone |
 
-Before a batch goes to Jev, events whose template Jev ruled on in the last 15 minutes reuse that verdict. A "yes" adds them to the open flag instead of raising a new one. At most 3 examples per template are sent, each with a count of the similar events it stands for. [docs/triage.md](docs/triage.md) has the details.
+Before a batch goes to Jev, events whose template and severity Jev ruled on in the last 15 minutes reuse that verdict. A "yes" adds them to the open flag instead of raising a new one. A "no" is not reused for audit, novel or known events, or when the template suddenly bursts. At most 3 examples per template are sent, each with real counts of how often the template and its service occurred recently. Jev judges every event it reads as relevant, benign or uncertain. [docs/triage.md](docs/triage.md) has the details.
 
 ### Training
 
-Each event Jev reads becomes a label with the feature vector the classifier saw. People add labels by confirming flags, marking false positives, flagging missed events, or importing history. `cloudfriend train`, `POST /model/train`, or the daily schedule then:
+Each event Jev judges relevant or benign becomes a label with the feature vector the classifier saw. Events Jev calls uncertain, or doesn't judge, get no label. People add labels by confirming flags, marking false positives, flagging missed events, or importing history. `cloudfriend train`, `POST /model/train`, or the daily schedule then:
 
-1. trains new LightGBM trees on top of the built-in model (`ml/train.py`),
-2. compares the candidate with the active model on the newest 20% of labels,
-3. checks on recent live traffic that the candidate won't cut Jev's share by more than half in one step,
-4. swaps it in without a restart.
+1. splits the labels by time into fit, calibrate and accept parts (60/20/20), keeping each incident in one part,
+2. trains new LightGBM trees on top of the built-in model (`ml/train.py`) on the fit part, and picks its thresholds on the calibrate part,
+3. promotes it only if it still sends 99.5% of the accept part's relevant events to Jev, and every `must_reach` event of the safety set if one is configured,
+4. checks on recent live traffic that the candidate won't cut Jev's share by more than half in one step,
+5. runs it in shadow for 24 hours next to the active model, and swaps it in only if it would not have dropped any event Jev or a person judged relevant.
 
 [docs/training.md](docs/training.md) has the details.
 
@@ -154,13 +155,16 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send error-like events of a never-seen template to Jev once. |
 | `CLOUDFRIEND_ESCALATED_TTL` | `7d` | How long an escalated template keeps going to Jev whatever its score. `off` disables. |
-| `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
+| `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template, at one severity, is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |
 | **Training** | | |
 | `CLOUDFRIEND_RETRAIN_INTERVAL` | `24h` | How often to retrain if enough labels arrived. `off` disables. |
 | `CLOUDFRIEND_RETRAIN_MIN_LABELS` | `200` | New labels needed before a scheduled run. |
 | `CLOUDFRIEND_HUMAN_LABEL_WEIGHT` | `5` | Weight of a person's label relative to Jev's. |
-| `CLOUDFRIEND_RECALL_TARGET` | `0.98` | Share of escalations that must still reach Jev. |
+| `CLOUDFRIEND_RECALL_TARGET` | `0.995` | Share of held-out relevant events a new model must still send to Jev. |
+| `CLOUDFRIEND_SHADOW_PERIOD` | `24h` | How long a new model runs in shadow before it replaces the active one. `off` promotes at once. |
+| `CLOUDFRIEND_SAFETY_SET` | | Directory with a labelled `candidates.csv` and `candidates.features.csv`. Every `must_reach` row must still reach Jev. |
+| `CLOUDFRIEND_INCIDENT_WINDOW` | `30m` | Labels of one template within this window stay in the same training split. |
 | `CLOUDFRIEND_PYTHON` | `python3` | Interpreter with LightGBM, for training. |
 | **Jev decider** | | |
 | `JEV_API_KEY` | `OPENROUTER_API_KEY` | OpenRouter key for Jev. Without any key, the classifier decides alone. |
@@ -236,7 +240,8 @@ To rotate a secret, create a new one, update the sender, then revoke the old one
 | --- | --- |
 | `GET /labels` | Label counts by source (`jev`, `human`) and verdict. |
 | `POST /labels` | `[{"source", "data", "received_at", "escalate"}]`: import labelled history. |
-| `GET /model` | The active classifier and the last training runs with their reports. |
+| `GET /decisions/:id` | One decider call that produced labels: the exact prompt, the raw reply, the model and the events. Labels point to it by `decision_id`. |
+| `GET /model` | The active classifier, the one in shadow if any, and the last training runs with their reports. |
 | `POST /model/train?dry_run=1` | Train now. Returns the run's report. |
 | `GET /stats?since=24h` | Events per route, share past the classifier, flags by status, Jev calls since start, the model. |
 
@@ -394,7 +399,7 @@ The built-in classifier is trained and evaluated on two public datasets with rea
 - **RCAEval RE3** (90 cases, MIT): code-level faults injected into Online Boutique, Sock Shop and Train Ticket. It measures whether the fault was escalated, how fast, and how much of the stream reached Jev.
 - **GAIA MicroSS** (two weeks, about 50M log lines): normal operation with occasional injected faults. It measures false escalations per day, and whether events can be linked across sources by user.
 
-BENCHMARK_SUMMARY
+On the 20 held-out RE3 cases, with live Jev and the featurizer v1 model, the cascade sent 0.25% of 1.27M events to Jev ($1.55 in 531 calls) and raised a flag after the injection in all 20, with a median of 23 seconds. That metric credits any flag after the injection, related or not, and the labels it trains on are heuristics, so it shows the pipeline works end to end, not that it is safe. An external review found real problems with these numbers. They are fixed in the code and the results will be re-run: see [docs/benchmarks.md](docs/benchmarks.md#what-changed-after-review).
 
 ## Left out on purpose
 

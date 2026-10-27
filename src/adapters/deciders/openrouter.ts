@@ -7,62 +7,121 @@
 //   CLOUDFRIEND_DECIDER_INSTRUCTIONS extra context for the model, e.g. "Checkout is our most important flow."
 //   CLOUDFRIEND_EVENT_CHARS         max characters of each event shown to the model (default 1500)
 import { compactJson } from "../../compact.ts";
-import { defineDecider, SEVERITIES, type FlagDraft, type CloudfriendEvent, type Severity } from "../../types.ts";
+import {
+  defineDecider,
+  SEVERITIES,
+  type CloudfriendEvent,
+  type Decision,
+  type DeciderContext,
+  type FlagDraft,
+  type Judgment,
+  type Severity,
+} from "../../types.ts";
 
-export const SYSTEM_PROMPT = `You are cloudfriend, a triage filter on a live stream of events from production systems: errors, logs, analytics events and alerts. Flag only what a person or an automated agent should look at now. Most events are routine; when nothing matters, return no flags.
+export const SYSTEM_PROMPT = `You are cloudfriend, a triage filter on a live stream of events from production systems: errors, logs, analytics events and alerts. You make two separate decisions about the numbered events you are shown.
 
-Flag: new or unusual errors, error spikes or repeated failures, regressions after a deploy, crashes, outages, data loss or corruption, security problems (bursts of auth failures, suspicious access), and failures in money or growth paths such as checkout, payments and signup. A service process that crashes, is killed or exits with an error (SIGTERM, SIGKILL, non-zero exit, crash loop) counts as a crash unless the events show a planned deploy.
-Do not flag: routine info logs, isolated handled errors, single minor warnings, normal user analytics, or "resolved" notifications unless they suggest flapping.
+1. A judgment for every event: is it relevant, meaning a problem or a symptom of a problem that a person or an automated agent should know about? Judge each event on its own merits, even if it is a duplicate of something already reported.
+- "relevant": new or unusual errors, error spikes or repeated failures, regressions after a deploy, crashes, outages, data loss or corruption, security problems (bursts of auth failures, suspicious access, secrets or card data in logs), and failures in money or growth paths such as checkout, payments and signup. A service process that crashes, is killed or exits with an error (SIGTERM, SIGKILL, non-zero exit, crash loop) is a crash unless the events show a planned deploy.
+- "benign": routine info logs, expected or handled conditions, normal user analytics, health checks, "resolved" notices that don't suggest flapping.
+- "uncertain": you can't tell from what is shown. Prefer this to guessing.
 
-Some events were pre-screened by a fast classifier. classifier_score (0 to 1) is its estimate that the event needs attention: a hint, not a verdict. similar_events_not_shown counts near-identical events that this one stands for, so a burst may be larger than it looks.
+2. Alerts: which relevant events should notify someone now. Group events with the same likely cause into one alert. If they continue an open alert listed below, put that alert's id in "update" instead of raising a new one. Relevant events need not all be in an alert; isolated minor ones can stay unalerted.
 
-Group events with the same likely cause into one flag. For each flag give:
-- reason: one specific sentence (max 160 characters) saying what happened and why it matters. Include counts, services or error names when the events show them.
+Each event line may carry context counted over everything the system received, including events not shown: seen_total, last_1m / last_10m / last_hour (how many of this kind recently), usual_per_hour, first_seen_min_ago, service_errors_10m. similar_in_batch counts near-identical events this one stands for.
+
+For each alert give:
+- reason: one specific sentence (max 160 characters) saying what happened and why it matters. Include counts, services or error names.
 - severity: "critical" (outage, data loss, security breach, money lost right now), "high" (user-facing breakage that needs attention today), "medium" (should be investigated), or "low" (worth knowing).
-- events: the bracketed numbers of the events behind the flag.
+- events: the bracketed numbers of the events behind it.
+- update: optional, the id of the open alert these events continue.
 
-Reply with JSON only, no prose: {"flags":[{"reason":"...","severity":"high","events":[0,3]}]}
-If nothing needs attention reply {"flags":[]}.`;
+Reply with JSON only, no prose, with exactly one judgment per event:
+{"judgments":[{"event":0,"relevance":"benign"},{"event":1,"relevance":"relevant"}],"alerts":[{"reason":"...","severity":"high","events":[1]}]}`;
 
-export function buildPrompt(events: CloudfriendEvent[], env: NodeJS.ProcessEnv): string {
+export function buildPrompt(events: CloudfriendEvent[], env: NodeJS.ProcessEnv, openFlags: DeciderContext["openFlags"] = []): string {
   const maxChars = Number(env.CLOUDFRIEND_EVENT_CHARS) || 1500;
-  const lines = [`${events.length} events, oldest first:`, ""];
+  const lines: string[] = [];
+  if (openFlags?.length) {
+    lines.push("Open alerts:");
+    for (const f of openFlags.slice(0, 20)) lines.push(`- ${f.id} (${f.severity}) ${f.reason}`);
+    lines.push("");
+  }
+  lines.push(`${events.length} events, oldest first:`, "");
   events.forEach((e, i) => {
     const meta = [`source=${e.source}`, `received_at=${e.received_at}`];
     if (e.type) meta.push(`type=${e.type}`);
     if (e.group_key) meta.push(`group=${e.group_key}`);
     if (e.triage) {
-      meta.push(`classifier_score=${e.triage.score.toFixed(2)}`);
-      if (e.triage.similar) meta.push(`similar_events_not_shown=${e.triage.similar}`);
+      // The classifier's score is deliberately not shown: the decider is the classifier's
+      // teacher, and its verdicts must not lean on the student's guess.
+      if (e.triage.similar) meta.push(`similar_in_batch=${e.triage.similar}`);
+      const c = e.triage.context;
+      if (c) for (const [k, v] of Object.entries(c)) meta.push(`${k}=${v}`);
     }
     lines.push(`[${i}] ${meta.join(" ")}`, compactJson(e.data, { maxChars }), "");
   });
   return lines.join("\n");
 }
 
-/** Turn the model's reply into flag drafts, keeping only what is valid. */
-export function parseReply(content: string, events: CloudfriendEvent[]): FlagDraft[] {
+const RELEVANCE = new Set(["relevant", "benign", "uncertain"]);
+
+/**
+ * Read a reply in the current format ({judgments, alerts}) or the v0 one ({flags}). Invalid
+ * entries are dropped; an event without a valid judgment simply has none.
+ */
+export function parseDecision(content: string, events: CloudfriendEvent[], openFlagIds: Set<string> = new Set()): Decision {
+  const parsed = parseJson(content);
+  const alerts = Array.isArray(parsed?.alerts) ? parsed.alerts : Array.isArray(parsed?.flags) ? parsed.flags : null;
+  if (!alerts) throw new Error("model reply has no alerts array");
+  const flags = toDrafts(alerts, events);
+  alerts.forEach((a: any, i: number) => {
+    const id = typeof a?.update === "string" ? a.update.trim() : "";
+    const draft = flags.find((f) => f.__index === i);
+    if (draft && id && openFlagIds.has(id)) draft.update = id;
+  });
+  const judgments: Judgment[] = [];
+  const seen = new Set<number>();
+  for (const j of Array.isArray(parsed?.judgments) ? parsed.judgments : []) {
+    const n = Number(j?.event);
+    const r = String(j?.relevance ?? "").toLowerCase();
+    if (!Number.isInteger(n) || n < 0 || n >= events.length || !RELEVANCE.has(r) || seen.has(n)) continue;
+    seen.add(n);
+    judgments.push({ event_id: events[n]!.id, relevance: r as Judgment["relevance"] });
+  }
+  return { flags: flags.map(({ __index, ...f }) => f), judgments: Array.isArray(parsed?.judgments) ? judgments : undefined };
+}
+
+function parseJson(content: string): any {
   const start = content.indexOf("{");
   const end = content.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error(`model reply has no JSON object: ${content.slice(0, 200)}`);
-  const parsed = JSON.parse(content.slice(start, end + 1));
-  if (!Array.isArray(parsed?.flags)) throw new Error("model reply has no flags array");
-  const out: FlagDraft[] = [];
-  for (const f of parsed.flags) {
-    if (!f || typeof f.reason !== "string" || !f.reason.trim()) continue;
+  return JSON.parse(content.slice(start, end + 1));
+}
+
+function toDrafts(items: unknown[], events: CloudfriendEvent[]): (FlagDraft & { __index: number })[] {
+  const out: (FlagDraft & { __index: number })[] = [];
+  items.forEach((f: any, i) => {
+    if (!f || typeof f.reason !== "string" || !f.reason.trim()) return;
     const idx: unknown[] = Array.isArray(f.events) ? f.events : Array.isArray(f.event_ids) ? f.event_ids : [];
-    const ids = [...new Set(idx.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < events.length))].map(
-      (n) => events[n]!.id,
-    );
-    if (!ids.length) continue;
+    const ids = [...new Set(idx.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < events.length))].map((n) => events[n]!.id);
+    if (!ids.length) return;
     const sev = String(f.severity ?? "").toLowerCase();
     out.push({
       reason: f.reason.trim().slice(0, 500),
       severity: (SEVERITIES as readonly string[]).includes(sev) ? (sev as Severity) : "medium",
       event_ids: ids,
+      __index: i,
     });
-  }
+  });
   return out;
+}
+
+/** Flag drafts from a reply, in either format. */
+export function parseReply(content: string, events: CloudfriendEvent[]): FlagDraft[] {
+  const parsed = parseJson(content);
+  const items = Array.isArray(parsed?.alerts) ? parsed.alerts : Array.isArray(parsed?.flags) ? parsed.flags : null;
+  if (!items) throw new Error("model reply has no flags array");
+  return toDrafts(items, events).map(({ __index, ...f }) => f);
 }
 
 export interface ChatDefaults {
@@ -74,7 +133,7 @@ export interface ChatDefaults {
   title: string;
 }
 
-export interface Completion {
+export interface Completion extends Decision {
   flags: FlagDraft[];
   /** What OpenRouter reports for the call: tokens and, when it knows, cost in USD. */
   usage: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
@@ -90,11 +149,13 @@ export async function complete(
   env: NodeJS.ProcessEnv,
   signal: AbortSignal,
   d: ChatDefaults,
+  openFlags: DeciderContext["openFlags"] = [],
 ): Promise<Completion> {
   const base = (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
   const instructions = env.CLOUDFRIEND_DECIDER_INSTRUCTIONS?.trim();
   const system = instructions ? `${SYSTEM_PROMPT}\n\nContext from the operator:\n${instructions}` : SYSTEM_PROMPT;
   const model = (d.modelVar && env[d.modelVar]) || env.OPENROUTER_MODEL || d.model;
+  const prompt = buildPrompt(events, env, openFlags);
   const res = await fetch(`${base}/chat/completions`, {
     method: "POST",
     signal: AbortSignal.any([signal, AbortSignal.timeout(180_000)]),
@@ -111,7 +172,7 @@ export async function complete(
       usage: { include: true },
       messages: [
         { role: "system", content: system },
-        { role: "user", content: buildPrompt(events, env) },
+        { role: "user", content: prompt },
       ],
     }),
   });
@@ -121,14 +182,21 @@ export async function complete(
   if (body.error) throw new Error(`OpenRouter error: ${JSON.stringify(body.error).slice(0, 300)}`);
   const content = body.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("OpenRouter reply has no message content");
-  return { flags: parseReply(content, events), usage: body.usage ?? {}, model: body.model ?? model };
+  const decision = parseDecision(content, events, new Set((openFlags ?? []).map((f) => f.id)));
+  return {
+    ...decision,
+    usage: body.usage ?? {},
+    model: body.model ?? model,
+    record: { model: body.model ?? model, prompt: `${system}\n\n---\n\n${prompt}`, response: content },
+  };
 }
 
 const DEFAULTS: ChatDefaults = { model: "anthropic/claude-haiku-5.5", title: "cloudfriend" };
 
 export default defineDecider({
   enabled: (env) => Boolean(env.OPENROUTER_API_KEY),
-  async decide(events, { env, signal }) {
-    return (await complete(events, env, signal, DEFAULTS)).flags;
+  async decide(events, { env, signal, openFlags }) {
+    const { flags, judgments, record } = await complete(events, env, signal, DEFAULTS, openFlags);
+    return { flags, judgments, record };
   },
 });

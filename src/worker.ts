@@ -4,10 +4,10 @@ import { tx, type DB } from "./db.ts";
 import type { Intake } from "./intake.ts";
 import { errMsg, log } from "./log.ts";
 import { EVENT_COLUMNS, eventsByIds, getFlagRow, toEvent, toFlag, type EventRow } from "./store.ts";
-import { applyVerdicts, planBatch, type Outcome, type Pending } from "./triage/cascade.ts";
+import { applyVerdicts, labelProvenance, planBatch, verdictKey, type Outcome, type Pending } from "./triage/cascade.ts";
 import type { Triage } from "./triage/runtime.ts";
 import { FEATURIZER_VERSION } from "./triage/features.ts";
-import type { ActionAdapter, CloudfriendEvent, DeciderAdapter, FlagDraft, ParsedEvent, SourceAdapter } from "./types.ts";
+import { toDecision, type ActionAdapter, type CloudfriendEvent, type DeciderAdapter, type Decision, type FlagDraft, type ParsedEvent, type Severity, type SourceAdapter } from "./types.ts";
 
 export interface WorkerOptions {
   db: DB;
@@ -71,7 +71,7 @@ export class Worker {
       newRows: db.prepare("SELECT id, source, received_at, body FROM queue WHERE status = 'new' ORDER BY id LIMIT ?"),
       setStatus: db.prepare("UPDATE queue SET status = ? WHERE id = ?"),
       insertEvent: db.prepare(
-        "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key, score, route, template, features, user_key, decided) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key, score, route, template, features, user_key, decided, severity, shadow_score, shadow_route) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ),
       pending: db.prepare("SELECT id, received_at, route FROM events WHERE decided = 0 ORDER BY id LIMIT ?"),
       insertFlag: db.prepare(
@@ -81,9 +81,13 @@ export class Worker {
         "UPDATE flags SET event_ids = ?, event_count = coalesce(event_count, 0) + ?, updated_at = ? WHERE id = ?",
       ),
       insertLabel: db.prepare(
-        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template)
-         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, template FROM events WHERE id = ? AND features IS NOT NULL
-         ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, created_at = excluded.created_at WHERE labels.source <> 'human'`,
+        `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, weight, decision_id)
+         SELECT id, ?, 'jev', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, template, ?, ?, ? FROM events WHERE id = ? AND features IS NOT NULL
+         ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, created_at = excluded.created_at, provenance = excluded.provenance,
+           weight = excluded.weight, decision_id = excluded.decision_id WHERE labels.source <> 'human'`,
+      ),
+      insertDecisionRecord: db.prepare(
+        "INSERT INTO decisions (id, created_at, decider, model, prompt, response, event_ids) VALUES (?, ?, ?, ?, ?, ?, ?)",
       ),
       insertDelivery: db.prepare(
         "INSERT INTO deliveries (flag_id, action, next_attempt_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -211,14 +215,14 @@ export class Worker {
       for (const { row, events } of results) {
         for (const e of events ?? []) {
           if (!triage) {
-            this.#stmts.insertEvent.run(row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key, null, null, null, null, null, 0);
+            this.#stmts.insertEvent.run(row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key, null, null, null, null, null, 0, null, null, null);
             continue;
           }
           const t = triage.score(row.source, row.received_at, e.parsed);
           const route = routing ? t.route : null;
           this.#stmts.insertEvent.run(
             row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key,
-            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0,
+            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0, t.severity, t.shadowScore, t.shadowRoute,
           );
         }
         this.#stmts.setStatus.run(events ? "done" : "failed", row.id);
@@ -270,8 +274,7 @@ export class Worker {
     const started = Date.now();
     let drafts: FlagDraft[];
     try {
-      drafts = await adapter.decide(events, { env: this.#o.env, signal: this.#abort.signal });
-      if (!Array.isArray(drafts)) throw new Error("decide() must return an array");
+      drafts = toDecision(await adapter.decide(events, { env: this.#o.env, signal: this.#abort.signal })).flags;
       if (this.#abort.signal.aborted) return; // finished after shutdown; decided again after restart
     } catch (err) {
       if (this.#stopped) return; // events stay pending and are decided after restart
@@ -300,8 +303,8 @@ export class Worker {
   async #triageBatch(ids: number[], triage: Triage): Promise<void> {
     const db = this.#o.db;
     const rows = db
-      .prepare(`SELECT ${EVENT_COLUMNS}, template FROM events WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`)
-      .all(...ids) as unknown as (EventRow & { score: number | null; route: string | null; template: string | null })[];
+      .prepare(`SELECT ${EVENT_COLUMNS}, template, severity FROM events WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`)
+      .all(...ids) as unknown as (EventRow & { template: string | null; severity: string | null })[];
     const decider = this.#o.decider;
     const threshold = triage.classifier?.file.threshold ?? 0.5;
     const now = Date.now();
@@ -309,25 +312,29 @@ export class Worker {
       let route = (r.route ?? "jev") as Pending["route"];
       // Routed to Jev while one was configured, but there is none now: the classifier decides.
       if (!decider && (route === "jev" || route === "audit" || route === "novel" || route === "known" || route === "auto")) route = (r.score ?? 0) >= threshold ? "classifier" : "drop";
-      return { id: String(r.id), template: r.template ?? `${r.source}|`, score: r.score, route };
+      const template = r.template ?? `${r.source}|`;
+      return { id: String(r.id), template, score: r.score ?? null, route, severity: r.severity ?? undefined, rate: triage.featurizer.context(template)?.last_1m };
     });
     // A cached "escalate" verdict only holds while its flag is still in the queue.
     for (const it of items) {
-      const v = triage.cache.get(it.template, now);
-      if (v?.flagId && !this.#flagOpen(v.flagId)) triage.cache.delete(it.template);
+      const v = triage.cache.get(verdictKey(it), now);
+      if (v?.flagId && !this.#flagOpen(v.flagId)) triage.cache.delete(verdictKey(it));
     }
     const plan = planBatch(items, triage.cache, now, triage.opts.perTemplate);
-    let drafts: FlagDraft[] = [];
+    let decision: Decision = { flags: [] };
+    let decisionId: string | null = null;
     const started = Date.now();
     if (plan.ask.length && decider) {
       const byId = new Map(rows.map((r) => [String(r.id), r]));
       const events: CloudfriendEvent[] = plan.ask.map(({ item, similar }) => ({
         ...toEvent(byId.get(item.id)!),
-        triage: { score: item.score ?? 0, similar },
+        triage: { score: item.score ?? 0, similar, context: triage.featurizer.context(item.template) },
       }));
+      const openFlags = (db
+        .prepare("SELECT id, reason, severity FROM flags WHERE coalesce(status, 'open') IN ('open', 'acknowledged') ORDER BY coalesce(updated_at, created_at) DESC LIMIT 20")
+        .all() as { id: string; reason: string; severity: Severity }[]);
       try {
-        drafts = await decider.adapter.decide(events, { env: this.#o.env, signal: this.#abort.signal });
-        if (!Array.isArray(drafts)) throw new Error("decide() must return an array");
+        decision = toDecision(await decider.adapter.decide(events, { env: this.#o.env, signal: this.#abort.signal, openFlags }));
         if (this.#abort.signal.aborted) return;
       } catch (err) {
         if (this.#stopped) return;
@@ -340,18 +347,29 @@ export class Worker {
       this.#deciderFailures = 0;
       this.counters.deciderCalls++;
       this.counters.asked += plan.ask.length;
+      decisionId = "dec_" + randomBytes(8).toString("hex");
+      this.#stmts.insertDecisionRecord.run(
+        decisionId, now, decider.name, decision.record?.model ?? null, decision.record?.prompt ?? null,
+        decision.record?.response ?? JSON.stringify({ flags: decision.flags, judgments: decision.judgments }), JSON.stringify(events.map((e) => e.id)),
+      );
     }
     this.counters.cached += plan.cached.length;
     for (const g of plan.direct.values()) this.counters.direct += g.length;
-    const out = applyVerdicts(plan, drafts);
-    const flagIds = this.#storeOutcome(decider?.name ?? "classifier", ids, out, rows.map((r) => [String(r.id), r.user_key ?? null]));
-    out.verdicts.forEach((i, template) => triage.cache.set(template, i >= 0, now, i >= 0 ? flagIds[i] : undefined));
-    // Whatever Jev escalated keeps reaching Jev, even where the classifier would drop it.
+    const out = applyVerdicts(plan, decision);
+    const flagIds = this.#storeOutcome(decider?.name ?? "classifier", ids, out, rows.map((r) => [String(r.id), r.user_key ?? null]), decisionId, triage);
+    const rateOf = new Map(items.map((it) => [verdictKey(it), it.rate]));
+    out.verdicts.forEach((v, key) => {
+      const flagId = typeof v.flag === "number" ? flagIds[v.flag] : v.flag;
+      triage.cache.set(key, v.escalate, now, flagId, rateOf.get(key));
+    });
+    // What Jev escalated or judged relevant keeps reaching Jev, even where the classifier would drop it.
     for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) triage.escalated.add(t, now);
+    for (const t of out.relevant) triage.escalated.add(t, now);
     log.info("batch decided", {
       events: ids.length,
       asked: plan.ask.length,
       cached: plan.cached.length,
+      labels: out.labels.length,
       flags: flagIds.length,
       ms: Date.now() - started,
     });
@@ -363,7 +381,7 @@ export class Worker {
     return row?.status === "open" || row?.status === "acknowledged";
   }
 
-  #storeOutcome(decider: string, ids: number[], out: Outcome, users: [string, string | null][]): string[] {
+  #storeOutcome(decider: string, ids: number[], out: Outcome, users: [string, string | null][], decisionId: string | null, triage: Triage): string[] {
     const now = Date.now();
     const actions = [...this.#o.actions.keys()];
     const userOf = new Map(users);
@@ -385,7 +403,10 @@ export class Worker {
         const merged = [...new Set([...(JSON.parse(row.event_ids) as string[]), ...evs])].slice(0, 1000);
         this.#stmts.attachToFlag.run(JSON.stringify(merged), evs.length, now, flagId);
       }
-      for (const l of out.labels) this.#stmts.insertLabel.run(l.y, now, Number(l.id));
+      for (const l of out.labels) {
+        const p = labelProvenance(l, triage.opts.auditRate);
+        this.#stmts.insertLabel.run(l.y, now, p.provenance, p.weight, decisionId, Number(l.id));
+      }
       for (const id of ids) this.#stmts.markDecided.run(id);
     });
     for (const id of flagIds) log.info("flag raised", { flag: id });

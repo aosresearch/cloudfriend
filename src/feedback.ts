@@ -9,18 +9,23 @@
 import { tx, type DB } from "./db.ts";
 import { getFlagRow } from "./store.ts";
 import { Featurizer, FEATURIZER_VERSION } from "./triage/features.ts";
+import { verdictKey } from "./triage/cascade.ts";
 import { encodeFeatures, type Triage } from "./triage/runtime.ts";
 
 export type FlagVerdict = "confirmed" | "false_positive";
 
 const UPSERT_HUMAN = `
-  INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template)
-  SELECT id, ?, 'human', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, ?, template FROM events WHERE id = ? AND features IS NOT NULL
-  ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, source = 'human', note = excluded.note, created_at = excluded.created_at`;
+  INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template, provenance, weight)
+  SELECT id, ?, 'human', route, score, features, ${FEATURIZER_VERSION}, source, received_at, data, ?, ?, template, 'human', NULL FROM events WHERE id = ? AND features IS NOT NULL
+  ON CONFLICT(event_id) DO UPDATE SET y = excluded.y, source = 'human', note = excluded.note, created_at = excluded.created_at,
+    provenance = 'human', weight = NULL, decision_id = NULL`;
 
-const templatesOf = (db: DB, ids: number[]) =>
+/** The (template, severity) pairs of some events: the units verdicts are cached for. */
+const kindsOf = (db: DB, ids: number[]) =>
   ids.length
-    ? (db.prepare(`SELECT DISTINCT template FROM events WHERE id IN (${ids.map(() => "?").join(",")}) AND template IS NOT NULL`).all(...ids) as { template: string }[]).map((r) => r.template)
+    ? (db
+        .prepare(`SELECT DISTINCT template, severity FROM events WHERE id IN (${ids.map(() => "?").join(",")}) AND template IS NOT NULL`)
+        .all(...ids) as { template: string; severity: string | null }[])
     : [];
 
 export function flagFeedback(db: DB, triage: Triage | null, flagId: string, verdict: FlagVerdict, note: string | null) {
@@ -36,11 +41,11 @@ export function flagFeedback(db: DB, triage: Triage | null, flagId: string, verd
     for (const id of ids) labeled += Number(upsert.run(y, note, now, id).changes);
   });
   if (triage) {
-    for (const t of templatesOf(db, ids)) {
+    for (const k of kindsOf(db, ids)) {
       if (verdict === "false_positive") {
-        triage.cache.set(t, false, now);
-        triage.escalated.delete(t);
-      } else triage.escalated.add(t, now);
+        triage.cache.set(verdictKey({ template: k.template, severity: k.severity ?? undefined }), false, now);
+        triage.escalated.delete(k.template);
+      } else triage.escalated.add(k.template, now);
     }
   }
   return { flag: flagId, status: verdict, labeled };
@@ -52,8 +57,14 @@ export function eventFeedback(db: DB, eventId: number, escalate: boolean, note: 
     | undefined;
   if (!ev) return null;
   const changes = Number(db.prepare(UPSERT_HUMAN).run(escalate ? 1 : 0, note, Date.now(), eventId).changes);
-  // A missed escalation's kind reaches Jev from now on; a "no" takes it off that list.
-  for (const t of templatesOf(db, [eventId])) (escalate ? triage?.escalated.add(t, Date.now()) : triage?.escalated.delete(t));
+  // A missed escalation's kind reaches Jev from now on and any cached "no" for it is gone;
+  // a "no" takes it off that list.
+  for (const k of kindsOf(db, [eventId])) {
+    if (escalate) {
+      triage?.cache.deleteTemplate(k.template);
+      triage?.escalated.add(k.template, Date.now());
+    } else triage?.escalated.delete(k.template);
+  }
   const flagged = (db.prepare("SELECT count(*) AS n FROM flags WHERE EXISTS (SELECT 1 FROM json_each(flags.event_ids) WHERE value = ?)").get(String(eventId)) as { n: number }).n > 0;
   return {
     event: String(eventId),
@@ -91,8 +102,8 @@ export function importLabels(db: DB, items: ImportedLabel[]): number {
   const min = (db.prepare("SELECT min(event_id) AS m FROM labels").get() as { m: number | null }).m ?? 0;
   let next = Math.min(min, 0) - 1;
   const ins = db.prepare(
-    `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template)
-     VALUES (?, ?, 'human', 'import', NULL, ?, ${FEATURIZER_VERSION}, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO labels (event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, note, created_at, template, provenance)
+     VALUES (?, ?, 'human', 'import', NULL, ?, ${FEATURIZER_VERSION}, ?, ?, ?, ?, ?, ?, 'import')`,
   );
   tx(db, () => {
     for (const { it, t } of timed) {

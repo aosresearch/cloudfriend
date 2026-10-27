@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { buildPrompt, complete, SYSTEM_PROMPT } from "../src/adapters/deciders/openrouter.ts";
 import { JEV } from "../src/adapters/deciders/jev.ts";
-import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
+import type { CloudfriendEvent, Decision, FlagDraft } from "../src/types.ts";
 
 export interface JevCall {
   model: string;
@@ -36,8 +36,12 @@ export class Jev {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  /** Flags for these events, or null when Jev is unavailable (dry run or out of budget). */
-  async ask(events: CloudfriendEvent[]): Promise<FlagDraft[] | null> {
+  /**
+   * Jev's decision for these events (flags and, in the current format, a judgment per event),
+   * or null when Jev is unavailable (dry run or out of budget). Each call is stored with its
+   * exact prompt and raw reply.
+   */
+  async ask(events: CloudfriendEvent[]): Promise<Decision | null> {
     const prompt = buildPrompt(events, this.#env);
     const model = this.#env.JEV_MODEL || JEV.model;
     const key = crypto.createHash("sha256").update(model + "\0" + SYSTEM_PROMPT + "\0" + prompt).digest("hex");
@@ -47,7 +51,9 @@ export class Jev {
       this.cachedCalls++;
       this.#count(hit);
       this.last = { model: hit.model, latency_ms: hit.latency_ms, cost: hit.usage?.cost ?? 0, cached: true };
-      return hit.flags.map((f: any) => ({ ...f, event_ids: f.events.map((i: number) => events[i]!.id) }));
+      const flags: FlagDraft[] = hit.flags.map((f: any) => ({ ...f, event_ids: f.events.map((i: number) => events[i]!.id) }));
+      const judgments = hit.judgments?.map((j: any) => ({ event_id: events[j.event]!.id, relevance: j.relevance }));
+      return { flags, judgments };
     }
     if (!this.live || this.spent >= this.budget) {
       this.skipped++;
@@ -66,6 +72,9 @@ export class Jev {
           usage: res.usage,
           latency_ms: latency,
           flags: res.flags.map((f) => ({ reason: f.reason, severity: f.severity, events: f.event_ids.map((id) => idx.get(id)) })),
+          judgments: res.judgments?.map((j) => ({ event: idx.get(j.event_id), relevance: j.relevance })),
+          prompt: res.record?.prompt,
+          response: res.record?.response,
         };
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, JSON.stringify(record));
@@ -74,7 +83,7 @@ export class Jev {
         this.latencies.push(latency);
         this.#count(record);
         this.last = { model: res.model, latency_ms: latency, cost: res.usage.cost ?? 0, cached: false };
-        return res.flags;
+        return { flags: res.flags, judgments: res.judgments };
       } catch (err) {
         if (attempt >= 3) {
           console.error(`jev call failed, treating as unavailable: ${(err as Error).message}`);

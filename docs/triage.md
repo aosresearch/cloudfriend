@@ -59,12 +59,12 @@ The model gives each event a probability that it should be escalated, and the ev
 | `drop` | score below the model's `drop_below` | Done. Not escalated, never sent anywhere. |
 | `jev` | score at or above `drop_below` | Goes to Jev in the next batch. |
 | `novel` | error-like (error level, error words or a 5xx) and its template has never been seen, whatever its score | Goes to Jev once. Later events of the template are scored normally. Turn off with `CLOUDFRIEND_NOVEL_ERRORS=off`. |
-| `known` | its template was escalated by Jev, or by a person, in the last `CLOUDFRIEND_ESCALATED_TTL` (7 days), whatever its score | Goes to Jev, where a cached verdict usually adds it to the open flag. The classifier can never drop the next instance of something that was escalated. A person marking the flag `false_positive` ends this for its templates. |
+| `known` | an event of its template was judged relevant by Jev, or escalated by a person, in the last `CLOUDFRIEND_ESCALATED_TTL` (7 days), whatever its score | Goes to Jev, where a cached verdict usually adds it to the open flag. The classifier can never drop the next instance of something that was escalated. A person marking the flag `false_positive` ends this for its templates. |
 | `audit` | a random `CLOUDFRIEND_AUDIT_RATE` (1%) of what would be dropped | Goes to Jev, so its answers measure what the classifier misses. Audits aren't urgent: they ride along with the next batch, or go on their own after `CLOUDFRIEND_AUDIT_WAIT` (5 minutes). |
 | `auto` | score at or above `escalate_above` | Escalated without asking Jev. Off in the shipped model (`escalate_above` is above 1). |
 | `classifier` | no Jev configured, score at or above the model's `threshold` | Escalated on the classifier alone. |
 
-`drop_below` is chosen when the model is trained: the highest score that still sends 98% of the known escalations to Jev (`CLOUDFRIEND_RECALL_TARGET`).
+`drop_below` is chosen when the model is trained: the highest score that still sends 99.5% of the known escalations to Jev (`CLOUDFRIEND_RECALL_TARGET`).
 
 `GET /stats` shows how many events took each route, and `GET /events?route=jev` lists them. Every event in the API has its `score` and `route`.
 
@@ -72,12 +72,23 @@ The model gives each event a probability that it should be escalated, and the ev
 
 Events that pass the classifier wait for a batch, as before: 100 events, or 10 seconds after the oldest arrived. Before anything is sent to Jev, cloudfriend shrinks the batch in two steps:
 
-1. **Recent verdicts.** If Jev ruled on the same template in the last `CLOUDFRIEND_VERDICT_TTL` (15 minutes), that verdict is reused. A "no" means the event is done. A "yes" adds the event to the flag Jev raised, if that flag is still open or acknowledged. No new flag is raised and nothing is notified again. A template marked `false_positive` by a person gets a cached "no".
-2. **Examples.** At most `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` (3) events per template are sent. Each shows Jev how many similar events it stands for (`similar_events_not_shown=40`), and the rest take its verdict.
+1. **Recent verdicts.** If Jev ruled on the same template **at the same severity** in the last `CLOUDFRIEND_VERDICT_TTL` (15 minutes), that verdict is reused. Severity is the event's level and its HTTP status class, so an `info` line with status 200 and an `error` line with status 500 never share a verdict, even with the same message. A "yes" adds the event to the flag Jev raised, if that flag is still open or acknowledged. No new flag is raised and nothing is notified again. A template marked `false_positive` by a person gets a cached "no".
+
+   A cached "no" is used more carefully than a "yes", since a wrong one hides a problem:
+   - it is stored only when Jev judged every example of that template and severity benign, never from silence;
+   - it is ignored once the template's rate in the last minute is more than 5 times its rate when Jev ruled, since a burst is new information;
+   - `audit`, `novel` and `known` events skip it and always reach Jev;
+   - a person reporting a missed event (`POST /events/:id/feedback {"escalate": true}`) clears it.
+2. **Examples.** At most `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` (3) events per template are sent. Each carries counts from the featurizer's history, which includes events the classifier dropped: how often the template occurred in the last minute, 10 minutes and hour, its usual rate per hour, when it was first seen, and its service's recent errors. The rest of the template's events take the examples' verdict.
 
 A burst of 2,000 identical errors therefore costs one Jev call, not twenty. In the benchmarks this cut Jev's reading to about 1 line in 2,000 (see [Benchmarks](./benchmarks.md)).
 
-Jev's reply is the same as any decider's: flags with a reason, a severity and the events behind them. The followers of each flagged example are added to its flag.
+Jev doesn't see the classifier's score, so its judgment stays independent of the model it trains. It answers in two parts:
+
+- **Judgments:** one per event shown, `relevant` (worth a person's attention), `benign` or `uncertain`. These become the training labels; `uncertain` and missing judgments produce none.
+- **Alerts:** which relevant events should notify someone now, each with a reason and a severity. The prompt lists the open alerts, and an alert that continues one names it in `update`: its events join that flag and nobody is notified again.
+
+The followers of each alerted example are added to its flag. Each call's prompt and raw reply are stored, and `GET /decisions/:id` returns them. The older reply format (`flags` only) is still accepted. It produces labels only for the events its flags cite, as relevant, and never a "don't escalate".
 
 ### The Jev decider
 
@@ -89,7 +100,7 @@ Jev's reply is the same as any decider's: flags with a reason, a severity and th
 | `JEV_MODEL` | `typesafe/jev-router` | Any OpenRouter model id. The router picks a model per request. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. |
 
-The prompt, the reply format and `CLOUDFRIEND_DECIDER_INSTRUCTIONS` are shared with the `openrouter` decider. Any other decider adapter works in the second stage too. It receives `event.triage = { score, similar }` on each example.
+The prompt, the reply format and `CLOUDFRIEND_DECIDER_INSTRUCTIONS` are shared with the `openrouter` decider. Any other decider adapter works in the second stage too. It receives `event.triage = { score, similar, context }` on each example and the open flags in its context, and may return `{ flags, judgments }`. An adapter that returns only flags still works; the events its flags cite become "escalate" labels, and nothing becomes a "don't escalate".
 
 With no decider configured, the classifier escalates on its own at its `threshold`. No labels are produced in that mode.
 
@@ -117,5 +128,5 @@ Flags are the queue. Each has a `status`:
 | `CLOUDFRIEND_AUDIT_WAIT` | `5m` | Longest a batch of only audit samples waits for other events. |
 | `CLOUDFRIEND_NOVEL_ERRORS` | `on` | Send never-seen error templates to Jev once. |
 | `CLOUDFRIEND_ESCALATED_TTL` | `7d` | How long a template that was escalated keeps going to Jev whatever its score. `off` disables. |
-| `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template is reused. |
+| `CLOUDFRIEND_VERDICT_TTL` | `15m` | How long a Jev verdict on a template, at one severity, is reused. |
 | `CLOUDFRIEND_EXAMPLES_PER_TEMPLATE` | `3` | Examples of one template per Jev batch. |

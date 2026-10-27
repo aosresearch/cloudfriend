@@ -175,7 +175,8 @@ def main():
         "objective": "binary",
         "learning_rate": args.learning_rate,
         "num_leaves": args.num_leaves,
-        "min_data_in_leaf": 40,
+        # 40 rows per leaf suits the benchmark sets; a few hundred labels need smaller leaves.
+        "min_data_in_leaf": max(5, min(40, len(ytr) // 20)),
         "feature_fraction": 0.8,
         "bagging_fraction": 0.8,
         "bagging_freq": 1,

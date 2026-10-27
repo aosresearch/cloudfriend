@@ -39,6 +39,11 @@ export interface Config {
   /** 0 turns scheduled retraining off. */
   retrainIntervalMs: number;
   retrainMinLabels: number;
+  /** How long a trained candidate runs in shadow before it may be promoted. 0 promotes at once. */
+  shadowPeriodMs: number;
+  /** Directory with a human-labelled safety set the gate must pass, or null. */
+  safetySet: string | null;
+  incidentWindowMs: number;
   humanLabelWeight: number;
   recallTarget: number;
   python: string;
@@ -122,8 +127,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     knownTtlMs: /^(off|0)$/i.test(env.CLOUDFRIEND_ESCALATED_TTL ?? "") ? 0 : duration(env, "CLOUDFRIEND_ESCALATED_TTL", "7d"),
     retrainIntervalMs: /^(off|0)$/i.test(env.CLOUDFRIEND_RETRAIN_INTERVAL ?? "") ? 0 : duration(env, "CLOUDFRIEND_RETRAIN_INTERVAL", "24h"),
     retrainMinLabels: int(env, "CLOUDFRIEND_RETRAIN_MIN_LABELS", 200),
+    shadowPeriodMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SHADOW_PERIOD ?? "") ? 0 : duration(env, "CLOUDFRIEND_SHADOW_PERIOD", "24h"),
+    safetySet: env.CLOUDFRIEND_SAFETY_SET ? path.resolve(env.CLOUDFRIEND_SAFETY_SET) : null,
+    incidentWindowMs: duration(env, "CLOUDFRIEND_INCIDENT_WINDOW", "30m"),
     humanLabelWeight: num(env, "CLOUDFRIEND_HUMAN_LABEL_WEIGHT", 5, 0, 1000),
-    recallTarget: num(env, "CLOUDFRIEND_RECALL_TARGET", 0.98, 0.5, 1),
+    recallTarget: num(env, "CLOUDFRIEND_RECALL_TARGET", 0.995, 0.5, 1),
     python: env.CLOUDFRIEND_PYTHON || "python3",
   };
 }
