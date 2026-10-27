@@ -203,7 +203,12 @@ export async function complete(
     ...decision,
     usage: body.usage ?? {},
     model: body.model ?? model,
-    record: { model: body.model ?? model, prompt: `${system}\n\n---\n\n${prompt}`, response: content },
+    record: {
+      model: body.model ?? model,
+      prompt: `${system}\n\n---\n\n${prompt}`,
+      response: content,
+      ...(typeof body.usage?.cost === "number" ? { cost_usd: body.usage.cost } : {}),
+    },
   };
 }
 

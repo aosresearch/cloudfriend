@@ -64,8 +64,12 @@ export interface Judgment {
 export interface Decision {
   flags: FlagDraft[];
   judgments?: Judgment[];
-  /** Kept with the labels it produced, so every label can be traced to the exact call. */
-  record?: { model?: string; prompt?: string; response?: string };
+  /**
+   * Kept with the labels it produced, so every label can be traced to the exact call.
+   * `cost_usd`: what the call cost, when the provider reports it; counted against the
+   * workspace's daily budget (CLOUDFRIEND_JEV_DAILY_BUDGET_USD).
+   */
+  record?: { model?: string; prompt?: string; response?: string; cost_usd?: number };
 }
 
 /** A stored flag. `id` is stable, so receivers can use it to ignore repeat deliveries. */
@@ -134,6 +138,8 @@ export interface DeciderContext {
   signal: AbortSignal;
   /** Flags still in the queue, so the decider can say an event continues one instead of raising another. */
   openFlags?: { id: string; reason: string; severity: Severity }[];
+  /** The workspace the batch belongs to. A batch never mixes workspaces. */
+  workspace?: string;
 }
 
 /** Accept both decider return shapes. */
