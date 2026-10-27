@@ -201,14 +201,14 @@ export class Worker {
    */
   async parseNew(limit = PARSE_CHUNK): Promise<number> {
     const n = await tx(this.#db, async (c) => {
-      const rows = await all<{ id: number; source: string; received_at: number; body: Uint8Array }>(
+      const rows = await all<{ id: number; source: string; adapter: string | null; received_at: number; body: Uint8Array }>(
         c,
-        "SELECT id, source, received_at, body FROM queue WHERE workspace_id = $1 AND status = 'new' ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED",
+        "SELECT id, source, adapter, received_at, body FROM queue WHERE workspace_id = $1 AND status = 'new' ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED",
         [this.#ws, limit],
       );
       if (!rows.length) return 0;
       const results = rows.map((row) => {
-        const adapter = this.#o.sources.get(row.source) ?? this.#o.sources.get("json")!;
+        const adapter = this.#o.sources.get(row.adapter ?? row.source) ?? this.#o.sources.get("json")!;
         try {
           const parsed = adapter.parse(row.body, { source: row.source, received_at: new Date(row.received_at) });
           if (!Array.isArray(parsed)) throw new Error("parse() must return an array");
