@@ -57,6 +57,19 @@ def load(path):
     return np.asarray(X, dtype=np.float32).reshape(-1, len(idx)), np.asarray(y, dtype=np.int8), np.asarray(w), [header[i] for i in idx]
 
 
+def check_roles(roles_file, files):
+    """Refuse rows whose case doesn't have the role of the file they are in."""
+    roles = json.load(open(roles_file))["cases"]
+    for path, want in files:
+        with open(path, newline="") as f:
+            r = csv.reader(f)
+            i = next(r).index("case")
+            seen = {row[i] for row in r}
+        bad = sorted(c for c in seen if roles.get(c) != want)
+        if bad:
+            raise SystemExit(f"{path}: cases without the role {want}: {', '.join(f'{c} ({roles.get(c)})' for c in bad[:10])}")
+
+
 def curve(y, w, p):
     """Weighted counts at every distinct score, highest first."""
     order = np.argsort(-p, kind="stable")
@@ -145,6 +158,7 @@ def main():
     ap.add_argument("--auto-precision", type=float, default=0.995)
     ap.add_argument("--featurizer-version", type=int, required=True)
     ap.add_argument("--note", default="")
+    ap.add_argument("--roles", help="roles.json: every --train row must be a fit case, every --valid row a calibration case, every --eval row a dev case")
     ap.add_argument(
         "--exclude",
         default="",
@@ -153,6 +167,8 @@ def main():
     ap.add_argument("--parity", help="also write N sample rows with LightGBM's scores here, for the TS parity test")
     args = ap.parse_args()
 
+    if args.roles:
+        check_roles(args.roles, [(args.train, "fit"), (args.valid, "calibrate")] + ([(args.eval, "dev")] if args.eval else []))
     Xtr, ytr, wtr, feats = load(args.train)
     Xva, yva, wva, feats_va = load(args.valid)
     if feats != feats_va:

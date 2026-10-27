@@ -43,6 +43,7 @@ import { CascadeSim, type SimFlag } from "../src/triage/sim.ts";
 import { bootstrap, lowerBound, upperBound } from "../src/stats.ts";
 import type { CloudfriendEvent } from "../src/types.ts";
 import { Jev } from "./jev.ts";
+import { checkFreeze } from "./roles.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
 const DAY = 86_400_000;
@@ -87,6 +88,9 @@ const { values: args } = parseArgs({
     "samples-out": { type: "string" },
     "drops-per-case": { type: "string", default: "40" },
     "compare-model": { type: "string" },
+    // Holdout cases only: the freeze the model must match (ml/holdout.ts), and the roles.
+    freeze: { type: "string" },
+    roles: { type: "string" },
   },
 });
 if (!args.data?.length || !args.model) {
@@ -125,7 +129,9 @@ let dropsOut: number | null = null;
 if (args["samples-out"]) {
   fs.mkdirSync(args["samples-out"], { recursive: true });
   judgmentsOut = fs.openSync(path.join(args["samples-out"], "judgments.csv"), "w");
-  fs.writeSync(judgmentsOut, "id,case,time,source,service,message,route,score,weak_label,jev\n");
+  // One row per event shown to Jev: its answer (`missing` when it gave none), how many events
+  // the example stood for, the recorded call (cache key) and whether an alert of that call named it.
+  fs.writeSync(judgmentsOut, "id,case,time,source,service,message,route,score,weak_label,jev,similar,call,in_alert\n");
   dropsOut = fs.openSync(path.join(args["samples-out"], "drops.csv"), "w");
   fs.writeSync(dropsOut, "id,case,time,source,service,message,score,compare_score,weak_label\n");
 }
@@ -290,12 +296,12 @@ async function runCase(dir: string, c: Case) {
                   return args["on-miss"] === "fallback" ? null : "censored";
                 }
                 if (judgmentsOut !== null) {
-                  const byItem = new Map(asked.map((a) => [a.item.id, a.item]));
+                  const answer = new Map((res.decision.judgments ?? []).map((j) => [j.event_id, j.relevance as string]));
+                  const alerted = new Set(res.decision.flags.flatMap((f) => f.event_ids));
                   let rows = "";
-                  for (const j of res.decision.judgments ?? []) {
-                    const e = info.get(j.event_id)!;
-                    const it = byItem.get(j.event_id)!;
-                    rows += [`${c.id}:${j.event_id}`, c.id, new Date(e.t).toISOString(), e.source, serviceOf(e.data), messageOf(e.data), it.route, (it.score ?? 0).toFixed(4), positives.has(j.event_id) ? 1 : 0, j.relevance].map(csvCell).join(",") + "\n";
+                  for (const { item: it, similar } of asked) {
+                    const e = info.get(it.id)!;
+                    rows += [`${c.id}:${it.id}`, c.id, new Date(e.t).toISOString(), e.source, serviceOf(e.data), messageOf(e.data), it.route, (it.score ?? 0).toFixed(4), positives.has(it.id) ? 1 : 0, answer.get(it.id) ?? "missing", similar, res.key, alerted.has(it.id) ? 1 : 0].map(csvCell).join(",") + "\n";
                   }
                   fs.writeSync(judgmentsOut, rows);
                 }
@@ -521,10 +527,18 @@ async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Prom
 
 const only = args.cases ? new RegExp(args.cases) : null;
 const all: Awaited<ReturnType<typeof runCase>>[] = [];
-for (const dir of args.data) {
-  const cases = loadCases(dir).filter((c) => (args.split === "all" || c.split === args.split) && (!only || only.test(c.id)));
-  all.push(...(await pool(cases, N("concurrency"), (c) => runCase(dir, c))));
+const selected = args.data.map((dir) => ({ dir, cases: loadCases(dir).filter((c) => (args.split === "all" || c.split === args.split) && (!only || only.test(c.id))) }));
+// Holdout days stay untouched until a candidate is frozen: only a frozen model, with the
+// frozen settings, may run on them (ml/holdout.ts).
+if (selected.some(({ cases }) => cases.some((c) => c.split === "holdout"))) {
+  if (!args.freeze || !args.roles) throw new Error("holdout cases need --freeze and --roles (run them through ml/holdout.ts)");
+  const f = checkFreeze(args.freeze, args.model, args.roles);
+  for (const [k, v] of Object.entries(f.settings)) {
+    const got = (args as Record<string, unknown>)[k];
+    if (String(got) !== v) throw new Error(`--${k} is ${String(got)}, but the freeze says ${v}`);
+  }
 }
+for (const { dir, cases } of selected) all.push(...(await pool(cases, N("concurrency"), (c) => runCase(dir, c))));
 
 const median = (xs: number[]) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]! : null);
 const rate = (k: number, n: number) => ({ k, n, rate: n ? k / n : null, upper95: n ? upperBound(k, n) : null });

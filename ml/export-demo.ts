@@ -38,6 +38,9 @@ const { values: args } = parseArgs({
     budget: { type: "string" },
     "audit-rate": { type: "string", default: "0.002" },
     "max-shown": { type: "string", default: "1200" },
+    // Every event Jev was shown in a window, with its answer, as ml/evaluate.ts --samples-out
+    // writes judgments.csv (ml/evidence.ts reads both).
+    "judgments-out": { type: "string" },
   },
 });
 if (!args.model || !args.out || !args.scenario?.length) {
@@ -49,6 +52,12 @@ const model = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as 
 const mf = model.file;
 const jev = new Jev({ mode: args.live ? "live" : "offline", budget: args.budget === undefined ? undefined : Number(args.budget), dir: args.cache! });
 const WAIT = 10_000;
+const judgmentsOut = args["judgments-out"] ? fs.openSync(args["judgments-out"], "w") : null;
+if (judgmentsOut !== null) fs.writeSync(judgmentsOut, "id,case,time,source,service,message,route,score,weak_label,jev,similar,call,in_alert\n");
+const cell = (v: unknown) => {
+  const s = String(v ?? "");
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
 const routing = { verdictTtlMs: 15 * 60_000, escalatedTtlMs: 7 * DAY, escalatedMemoryMs: 90 * DAY, suppressionTtlMs: 30 * DAY };
 
 interface Shown {
@@ -92,6 +101,8 @@ async function exportScenario(spec: string) {
   const calls: { t: number; model: string; latency_ms: number | null; cost: number; examples: { id: string; similar: number; score: number }[]; flags: { reason: string; severity: string; events: string[] }[]; judged: Record<string, number> }[] = [];
   const callAt = new Map<number, (typeof calls)[number]>();
   const byId = new Map<string, Shown & { data: unknown }>();
+  /** Each event's id in the dataset: its case and index in the stream. */
+  const refOf = new Map<string, [string, number]>();
   const positives = new Set<string>();
   const seconds = new Map<number, { events: number; dropped: number; routed: number }>();
   const totals = { events: 0, dropped: 0, routed: 0, asked: 0, calls: 0, cost: 0, cached_verdicts: 0 };
@@ -115,6 +126,17 @@ async function exportScenario(spec: string) {
           process.exit(3);
         }
         const res = ans.kind === "unavailable" ? null : ans;
+        if (res && judgmentsOut !== null) {
+          const answer = new Map((res.decision.judgments ?? []).map((j) => [j.event_id, j.relevance as string]));
+          const alerted = new Set(res.decision.flags.flatMap((f) => f.event_ids));
+          let rows = "";
+          for (const { item, similar } of asked) {
+            const e = byId.get(item.id)!;
+            const [caseId, index] = refOf.get(item.id)!;
+            rows += [`${caseId}:${index}`, caseId, new Date(e.t).toISOString(), e.source, e.service, e.text.replace(/\s+/g, " ").slice(0, 300), item.route, (item.score ?? 0).toFixed(4), e.y, answer.get(item.id) ?? "missing", similar, res.key, alerted.has(item.id) ? 1 : 0].map(cell).join(",") + "\n";
+          }
+          fs.writeSync(judgmentsOut, rows);
+        }
         const drafts: FlagDraft[] = res?.decision.flags ?? [];
         const judged: Record<string, number> = {};
         for (const j of res?.decision.judgments ?? []) judged[j.relevance] = (judged[j.relevance] ?? 0) + 1;
@@ -140,12 +162,15 @@ async function exportScenario(spec: string) {
   let n = 0;
   let last = 0;
   for (const day of chain) {
+    let k = 0;
     for await (const e of readStream(dir, day.id)) {
+      const index = k++;
       if (e.t > to + WAIT * 2) break;
       const f = featurizer.featurize({ source: e.source, received_at: e.t, data: e.data });
       const score = model.score(f.values);
       const ctx = featurizer.context(f.template);
       const id = String(n++);
+      refOf.set(id, [day.id, index]);
       if (e.y) positives.add(id);
       last = e.t;
       const rec: Shown & { data: unknown } = {
@@ -154,10 +179,18 @@ async function exportScenario(spec: string) {
       };
       byId.set(id, rec);
       rec.route = await sim.push({ id, t: e.t, score, template: f.template, severity: severityBucket(f.level, f.status), novel: f.novel, rate: ctx?.last_1m, serviceErrors: ctx?.service_errors_10m });
-      if (rec.route === "drop" && !(e.t >= from && e.t <= to)) byId.delete(id);
+      if (rec.route === "drop" && !(e.t >= from && e.t <= to)) {
+        byId.delete(id);
+        refOf.delete(id);
+      }
       if (byId.size > 60_000) {
         const keep = new Set(sim.pendingIds());
-        for (const k of [...byId.keys()].slice(0, 30_000)) if (!keep.has(k) && byId.get(k)!.t < from) byId.delete(k);
+        for (const k of [...byId.keys()].slice(0, 30_000)) {
+          if (!keep.has(k) && byId.get(k)!.t < from) {
+            byId.delete(k);
+            refOf.delete(k);
+          }
+        }
       }
       if (!(e.t >= from && e.t <= to)) continue;
       totals.events++;
