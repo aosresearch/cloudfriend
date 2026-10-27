@@ -151,7 +151,11 @@ export async function getFlagRow(db: Queryable, ws: string, id: string, forUpdat
 }
 
 export interface DeliveryInfo {
+  /** The action adapter that runs it: the destination's kind, or the adapter's name for env-configured actions. */
   action: string;
+  /** The destination it goes to, or null for an env-configured action. A deleted destination keeps its name. */
+  destination_id: string | null;
+  destination_name: string | null;
   status: string;
   attempts: number;
   last_error: string | null;
@@ -161,7 +165,9 @@ export interface DeliveryInfo {
 export async function deliveriesFor(db: Queryable, ws: string, flagId: string): Promise<DeliveryInfo[]> {
   const rows = await all<Omit<DeliveryInfo, "updated_at"> & { updated_at: number }>(
     db,
-    "SELECT action, status, attempts, last_error, updated_at FROM deliveries WHERE workspace_id = $1 AND flag_id = $2 ORDER BY action",
+    `SELECT coalesce(t.kind, d.action) AS action, t.id AS destination_id, t.name AS destination_name, d.status, d.attempts, d.last_error, d.updated_at
+     FROM deliveries d LEFT JOIN destinations t ON t.workspace_id = d.workspace_id AND t.id = d.action
+     WHERE d.workspace_id = $1 AND d.flag_id = $2 ORDER BY d.action`,
     [ws, flagId],
   );
   return rows.map((r) => ({ ...r, updated_at: new Date(r.updated_at).toISOString() }));

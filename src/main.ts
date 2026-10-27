@@ -7,6 +7,8 @@ export async function main(): Promise<void> {
   const config = loadConfig();
   const cloudfriend = await createCloudfriend(config);
 
+  if (cloudfriend.role === "worker") log.info("CLOUDFRIEND_ROLE=worker: running the worker; HTTP serves only /healthz");
+  if (cloudfriend.role === "web") log.info("CLOUDFRIEND_ROLE=web: serving HTTP and intake; events are processed by workers (CLOUDFRIEND_ROLE=worker or all)");
   if (cloudfriend.bootSecret) {
     const bar = "=".repeat(72);
     console.log(
@@ -30,12 +32,12 @@ export async function main(): Promise<void> {
         : `decider '${config.decider}' is not configured (JEV_API_KEY or OPENROUTER_API_KEY missing?); events are stored but not triaged`,
     );
   }
-  if (!cloudfriend.actions.size) log.warn("no actions configured; flags are stored but nothing is notified (set SLACK_WEBHOOK_URL or WEBHOOK_URL)");
+  if (!cloudfriend.actions.size && cloudfriend.role !== "worker") log.info("no actions configured from environment variables; flags go to each workspace's destinations (SLACK_WEBHOOK_URL or WEBHOOK_URL add one to the default workspace)");
 
-  cloudfriend.worker.start();
-  cloudfriend.startRetraining();
+  cloudfriend.start();
   const server = serve({ fetch: cloudfriend.app.fetch, port: config.port, hostname: config.host }, (info) => {
     log.info("cloudfriend listening", {
+      role: cloudfriend.role,
       port: info.port,
       data: config.dataDir,
       decider: cloudfriend.decider?.name ?? "none",

@@ -1,6 +1,10 @@
 import path from "node:path";
 
+export type Role = "all" | "web" | "worker";
+
 export interface Config {
+  /** all: HTTP and the worker. web: HTTP and intake only. worker: the worker, and only /healthz. */
+  role: Role;
   port: number;
   host: string;
   /** Where trained model files live. Everything else is in Postgres. */
@@ -55,6 +59,15 @@ export interface Config {
   humanLabelWeight: number;
   recallTarget: number;
   python: string;
+  /** How long a workspace's lease lasts without renewal, and how often its owner renews it. */
+  leaseTtlMs: number;
+  leaseRenewMs: number;
+  /** Most workspaces one worker holds at once. */
+  maxWorkspacesPerWorker: number;
+  /** A workspace with no work for this long is saved, released and dropped from memory. */
+  idleUnloadMs: number;
+  /** Daily decider spend per workspace, in USD; null = no cap. */
+  jevDailyBudgetUsd: number | null;
 }
 
 const UNITS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
@@ -109,7 +122,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!databaseUrl) {
     throw new Error("CLOUDFRIEND_DATABASE_URL is not set: cloudfriend stores everything in Postgres (e.g. postgres://user:password@host:5432/cloudfriend). DATABASE_URL works too.");
   }
+  const role = (env.CLOUDFRIEND_ROLE || "all").trim().toLowerCase();
+  if (role !== "all" && role !== "web" && role !== "worker") throw new Error(`CLOUDFRIEND_ROLE must be all, web or worker, got ${JSON.stringify(env.CLOUDFRIEND_ROLE)}`);
+  const leaseTtlMs = duration(env, "CLOUDFRIEND_LEASE_TTL", "30s");
+  const leaseRenewMs = duration(env, "CLOUDFRIEND_LEASE_RENEW", "10s");
+  if (leaseRenewMs <= 0 || leaseRenewMs >= leaseTtlMs) throw new Error("CLOUDFRIEND_LEASE_RENEW must be shorter than CLOUDFRIEND_LEASE_TTL");
+  const budget = env.CLOUDFRIEND_JEV_DAILY_BUDGET_USD;
   return {
+    role,
     port: int(env, "PORT", 8080, 0),
     host: env.HOST || "0.0.0.0",
     dataDir: path.resolve(env.CLOUDFRIEND_DATA_DIR || "./data"),
@@ -149,5 +169,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     humanLabelWeight: num(env, "CLOUDFRIEND_HUMAN_LABEL_WEIGHT", 5, 0, 1000),
     recallTarget: num(env, "CLOUDFRIEND_RECALL_TARGET", 0.995, 0.5, 1),
     python: env.CLOUDFRIEND_PYTHON || "python3",
+    leaseTtlMs,
+    leaseRenewMs,
+    maxWorkspacesPerWorker: int(env, "CLOUDFRIEND_MAX_WORKSPACES_PER_WORKER", 200),
+    idleUnloadMs: duration(env, "CLOUDFRIEND_IDLE_UNLOAD", "10m"),
+    jevDailyBudgetUsd: budget === undefined || budget.trim() === "" ? null : num(env, "CLOUDFRIEND_JEV_DAILY_BUDGET_USD", 0, 0, 1e9),
   };
 }
