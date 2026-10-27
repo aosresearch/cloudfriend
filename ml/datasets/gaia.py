@@ -22,7 +22,8 @@ else is negative, so `positives` is small and the interesting number is how many
 escalations happen on the quiet days.
 
 Labelling is a separate pass over the written streams: `--relabel` reruns it alone on an
-existing output directory, without reading the raw logs again.
+existing output directory, without reading the raw logs again (with --run, --start and
+--days, it rebuilds a missing cases.json from the run table). `--jobs N` labels N days at once.
 
 Split: by day. Days 1-8 train, 9-10 valid, 11-14 eval (development), 15-21 holdout (frozen
 models only). All days form one chain: the
@@ -131,7 +132,47 @@ class Windows:
         return [iid for s, e, iid in self.w[lo:hi] if s <= t <= e]
 
 
-def label(out_dir, cases):
+def _count(job):
+    """Pass 1 for one day: error-like templates per incident window, and on baseline days outside every window."""
+    out_dir, c, incidents = job
+    windows = Windows(incidents)
+    base, during = collections.Counter(), collections.Counter()
+    for e in read_stream(out_dir, c["id"]):
+        msg = e["data"]["message"]
+        if not is_errorish(msg):
+            continue
+        k = (e["source"], e["data"]["service"], template(msg))
+        ids = windows.at(e["t"])
+        for iid in ids:
+            during[(iid,) + k] += 1
+        if not ids and c["split"] == "train":
+            base[k] += 1
+    return c["id"], base, during
+
+
+def _rewrite(job):
+    """Pass 2 for one day: label and rewrite its stream."""
+    out_dir, c, incidents, base, during, durations, base_secs = job
+    windows = Windows(incidents)
+    hits = collections.Counter()
+    events = []
+    for e in read_stream(out_dir, c["id"]):
+        e.pop("inc", None)
+        e["y"] = 0
+        msg = e["data"]["message"]
+        if is_errorish(msg):
+            k = (e["source"], e["data"]["service"], template(msg))
+            inc = [iid for iid in windows.at(e["t"]) if elevated(during[(iid,) + k], durations[iid], base[k], base_secs)]
+            if inc:
+                e["y"] = 1
+                e["inc"] = inc
+                hits.update(inc)
+        events.append(e)
+    cnt, pos = write_stream(stream_path(out_dir, c["id"]), events)
+    return c["id"], cnt, pos, hits
+
+
+def label(out_dir, cases, jobs=1):
     """Weak labels for written streams: two passes, counting then rewriting."""
     incidents = [i for c in cases for i in c["incidents"]]
     windows = Windows(incidents)
@@ -155,6 +196,8 @@ def label(out_dir, cases):
         covered += cur_e - cur_s
     base_secs = (hi - lo - covered) / 1000
 
+    if jobs > 1:
+        return _label_parallel(out_dir, cases, incidents, windows, durations, base_secs, jobs)
     base = collections.Counter()  # (source, service, template) on train days, outside windows
     during = collections.Counter()  # (incident, source, service, template)
     for c in cases:
@@ -199,6 +242,50 @@ def label(out_dir, cases):
     return cases
 
 
+def _label_parallel(out_dir, cases, incidents, windows, durations, base_secs, jobs):
+    import multiprocessing as mp
+    with mp.Pool(jobs) as pool:
+        base, during = collections.Counter(), collections.Counter()
+        for cid, b, d in pool.imap_unordered(_count, [(out_dir, c, incidents) for c in cases]):
+            base.update(b)
+            during.update(d)
+            print(f"  counted {cid}", flush=True)
+    hits = collections.Counter()
+    by_case = {c["id"]: c for c in cases}
+    # Rewriting holds a whole day in memory (several GB): fewer at once.
+    with mp.Pool(max(1, jobs // 2)) as pool:
+        for cid, cnt, pos, h in pool.imap_unordered(_rewrite, [(out_dir, c, incidents, base, during, durations, base_secs) for c in cases]):
+            by_case[cid]["events"], by_case[cid]["positives"] = cnt, pos
+            hits.update(h)
+            print(f"{cid} events={cnt:8d} positives={pos:6d}", flush=True)
+    for c in cases:
+        for inc in c["incidents"]:
+            inc["positives"] = hits[inc["id"]]
+            inc["overlaps"] = [x for x in windows.at(inc["start_ms"]) if x != inc["id"]]
+    silent = [i for i in incidents if not hits[i["id"]]]
+    print(f"{len(incidents)} incidents; {len(silent)} have no positive event", flush=True)
+    return cases
+
+
+def make_cases(args):
+    """The case list (days, splits, incidents) without reading the business logs."""
+    day0 = dt.date.fromisoformat(args.start)
+    days = [(day0 + dt.timedelta(days=i)).isoformat() for i in range(args.days)]
+    lo = ms(days[0] + " 00:00:00")
+    incidents, _ = parse_run(args.run)
+    out = []
+    for i, d in enumerate(days):
+        start = lo + i * 86_400_000
+        split = "train" if i < TRAIN_DAYS else "valid" if i < 10 else "eval" if i < 14 else "holdout"
+        out.append({
+            "id": f"gaia-{d}", "dataset": "gaia", "split": split, "chain": "gaia",
+            "start_ms": start, "end_ms": start + 86_400_000,
+            "incidents": [x for x in incidents if start <= x["start_ms"] < start + 86_400_000],
+            "events": 0, "positives": 0,
+        })
+    return out
+
+
 def stream_path(out_dir, case_id):
     return os.path.join(out_dir, "streams", f"{case_id}.ndjson.gz")
 
@@ -216,16 +303,21 @@ def main():
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--out", required=True)
     ap.add_argument("--relabel", action="store_true", help="only recompute the labels of an existing --out")
+    ap.add_argument("--jobs", type=int, default=1)
     args = ap.parse_args()
     cases_file = os.path.join(args.out, "cases.json")
-    if args.relabel:
+    if args.relabel and not os.path.exists(cases_file):
+        if not args.run:
+            ap.error("--relabel without cases.json needs --run")
+        cases = make_cases(args)
+    elif args.relabel:
         with open(cases_file) as f:
             cases = json.load(f)
     else:
         if not args.run:
             ap.error("--run is required unless --relabel")
         cases = convert(args)
-    label(args.out, cases)
+    label(args.out, cases, args.jobs)
     with open(cases_file, "w") as f:
         json.dump(cases, f, indent=1)
 

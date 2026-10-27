@@ -1,0 +1,127 @@
+{
+ "what": "Round-3 runs replayed offline from the recorded Jev calls (cache key v2, ml/rekey-cache.ts), with --on-miss fallback so a call round 3 could not make (budget spent or bad JSON) is treated as it was then. Run with ml/no-network.ts and dummy API keys set: 0 requests.",
+ "runs": {
+  "re3-acceptance": {
+   "round3_calls": 416,
+   "round3_skipped": 544,
+   "replay": {
+    "recorded": 416,
+    "live": 0,
+    "miss": 544,
+    "invalid": 0,
+    "unavailable": 0
+   },
+   "cases": [
+    {
+     "case": "re3-ob-adservice_f5-1",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected"
+     ],
+     "now": [
+      "detected"
+     ]
+    },
+    {
+     "case": "re3-ob-emailservice_f1-1",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected"
+     ],
+     "now": [
+      "detected"
+     ]
+    },
+    {
+     "case": "re3-ss-carts_f4-1",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected"
+     ],
+     "now": [
+      "unanswered (fallback alert)"
+     ]
+    },
+    {
+     "case": "re3-ss-front-end_f3-1",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected"
+     ],
+     "now": [
+      "dismissed (fallback alert)"
+     ]
+    },
+    {
+     "case": "re3-tt-ts-auth-service_f3-1",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected"
+     ],
+     "now": [
+      "detected"
+     ]
+    },
+    {
+     "case": "re3-tt-ts-route-service_f2-1",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected"
+     ],
+     "now": [
+      "detected"
+     ]
+    }
+   ]
+  },
+  "gaia-acceptance": {
+   "round3_calls": 687,
+   "round3_skipped": 984,
+   "replay": {
+    "recorded": 687,
+    "live": 0,
+    "miss": 984,
+    "invalid": 0,
+    "unavailable": 0
+   },
+   "cases": [
+    {
+     "case": "gaia-2021-08-13",
+     "same_routing_and_flags": true,
+     "round3": [
+      "detected",
+      "detected",
+      "detected",
+      "detected",
+      "dismissed",
+      "dismissed",
+      "dismissed",
+      "withheld"
+     ],
+     "now": [
+      "detected",
+      "detected",
+      "detected",
+      "detected",
+      "unanswered",
+      "unanswered",
+      "unanswered",
+      "withheld"
+     ]
+    }
+   ]
+  },
+  "demo": {
+   "identical_summary_lines": true,
+   "lines": [
+    "boutique-ads: 10230 events, 955 past the classifier, 11 Jev calls ($0.047), 4 flags, 1200 shown",
+    "trainticket-auth: 6161 events, 445 past the classifier, 14 Jev calls ($0.183), 5 flags, 1160 shown",
+    "sockshop-carts: 11099 events, 932 past the classifier, 12 Jev calls ($0.116), 3 flags, 1200 shown",
+    "gaia-access: 74216 events, 3856 past the classifier, 111 Jev calls ($0.407), 6 flags, 3857 shown",
+    "gaia-quiet: 78098 events, 520 past the classifier, 91 Jev calls ($0.306), 7 flags, 1195 shown",
+    "no-network: 0 request(s) attempted"
+   ]
+  }
+ },
+ "not_replayable": "The pilot and relabel runs were made with earlier code during round 3; the current code builds other prompts for them (47 of 108 pilot calls replay). Their judgments are rebuilt from the recorded prompts instead (ml/evidence.ts: 14,447 of 14,447 prompt events matched to their events)."
+}

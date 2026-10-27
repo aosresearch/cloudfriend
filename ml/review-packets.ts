@@ -8,7 +8,9 @@
 //     --trace trace.json --out review/ [--batch 60] [--seed 1]
 //
 // Items: the rows of each --items CSV (by their `id`, `<case>:<index>`), plus a priority set:
-//   conflict-labels   events whose label CSVs (--labels) disagree at the same case and time
+//   conflict-labels   events the label CSVs (--labels) label differently at the same case and
+//                     time (one file's labels against another's; events sharing a millisecond
+//                     within one file are different events, not a conflict)
 //   conflict-direct   events Jev answered both relevant and benign (evidence.csv)
 //   benign-positive   weak positives Jev called benign
 //   inconsistent      messages (service and text) Jev answered both ways, on different events
@@ -99,8 +101,13 @@ for (const f of args.labels ?? []) {
   }
 }
 for (const [k, v] of labelYs) {
-  const ys = new Set([...v].map((x) => x.split(":").at(-1)));
-  if (ys.size < 2) continue;
+  const files = new Map<string, Set<string>>();
+  for (const x of v) {
+    const i = x.lastIndexOf(":");
+    (files.get(x.slice(0, i)) ?? files.set(x.slice(0, i), new Set()).get(x.slice(0, i))!).add(x.slice(i + 1));
+  }
+  const sets = [...files.values()].map((s) => [...s].sort().join("/"));
+  if (files.size < 2 || new Set(sets).size < 2) continue;
   const [c, t] = k.split("\0") as [string, string];
   (byTime.get(c) ?? byTime.set(c, new Map()).get(c)!).set(Number(t), "conflict-labels");
 }
@@ -155,6 +162,11 @@ for (const c of byTime.keys()) if (!wantedIdx.has(c)) wantedIdx.set(c, new Set()
 
 const serviceOf = (d: any, source: string) => String(d?.service ?? d?.container_name ?? d?.serviceName ?? d?.service_name ?? source);
 const textOf = (d: any) => String(d?.message ?? d?.msg ?? compactJson(d, { maxChars: 400 })).replace(/\s+/g, " ");
+/** A context line without what the line prefix repeats (time, host, ids): GAIA's `ts | LEVEL | ... | text`. */
+const shortText = (s: string) => {
+  const g = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ \| (\w+) \|.*\| ([^|]*)$/.exec(s);
+  return (g ? `${g[1]} ${g[2]!.trim()}` : s).slice(0, 160);
+};
 
 const packets: Packet[] = [];
 const notFound: string[] = [];
@@ -188,7 +200,7 @@ for (const [caseId, idxs] of wantedIdx) {
       } else {
         const p: Packet = {
           pid: `p${String(packets.length + 1).padStart(4, "0")}`, case: caseId, ids: [id], from, t: e.t, service: line.service,
-          raw: compactJson(e.data, { maxChars: 1500 }), text: line.text,
+          raw: compactJson(e.data, { maxChars: 1000 }), text: line.text,
           before: recent.filter((l) => l.service === line.service).slice(-20),
           around: recent.filter((l) => l.t >= e.t - 30_000),
         };
@@ -204,17 +216,23 @@ for (const [caseId, idxs] of wantedIdx) {
 
 // --- write -----------------------------------------------------------------------------------
 const clock = (t: number) => new Date(t).toISOString().slice(11, 23);
-/** Lines with consecutive repeats of the same service and text collapsed. */
+/** Lines with repeats of the same service and text (numbers aside) collapsed into the first, with a count. */
 function collapse(lines: Line[], max: number, skip: number): string[] {
   const out: { l: Line; n: number }[] = [];
+  const seen = new Map<string, { l: Line; n: number }>();
   for (const l of lines) {
     if (l.i === skip) continue;
-    const last = out.at(-1);
-    if (last && last.l.service === l.service && last.l.text === l.text) last.n++;
-    else out.push({ l, n: 1 });
+    const k = `${l.service}|${shortText(l.text).replace(/[0-9a-f]{8}-[0-9a-f-]{27,}|[A-Za-z0-9+/=_-]{16,}|'[^']*'|\d+/g, "#")}`;
+    const prev = seen.get(k);
+    if (prev) prev.n++;
+    else {
+      const x = { l, n: 1 };
+      seen.set(k, x);
+      out.push(x);
+    }
   }
   const pick = out.length > max ? out.filter((_, k) => k % Math.ceil(out.length / max) === 0) : out;
-  return pick.map(({ l, n }) => `  ${clock(l.t)} [${l.service}] ${l.text.slice(0, 220)}${n > 1 ? `  (×${n})` : ""}`);
+  return pick.map(({ l, n }) => `  ${clock(l.t)} [${l.service}] ${shortText(l.text)}${n > 1 ? `  (×${n})` : ""}`);
 }
 fs.mkdirSync(args.out, { recursive: true });
 const order = shuffle(packets);
