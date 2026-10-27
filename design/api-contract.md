@@ -85,3 +85,13 @@ A source is an ingest endpoint plus its secret. `kind` picks the parser: `json` 
 | --- | --- |
 | `GET /api/w/:ws/usage` | `{ "day": "2026-10-27", "events": 1234, "backlog": 0, "jev_calls": 12, "jev_spend_usd": 0.06, "jev_budget_usd": 5, "budget_exhausted": false, "decider": "jev" \| "classifier" \| "none" }` |
 | `GET /api/w/:ws/stats?since=1h` | `{ "routes": { "drop": 980, "jev": 12, ... }, "events": 1000, "flags": 2 }` |
+
+## Additions from building the dashboard
+
+See `src/ui/CONTRACT-NOTES.md` for the reasoning. These are part of the contract:
+
+- `GET /api/w/:ws/test-event/:queue_id` → `{ "queue_id", "status": "new" | "done" | "failed", "event": Event | null }`.
+- `Event` also has `judgment` (`"relevant" | "benign" | "uncertain" | null`) and `flag_id` (string or null).
+- `Event.source` is the `Source.id` the event arrived on (or the legacy `/in/<name>` segment).
+- The server serves `src/ui/static/` at `/` with `index.html` for unknown non-API GET paths, and sends the CSP
+  listed in the notes.
