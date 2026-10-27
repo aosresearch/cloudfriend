@@ -69,7 +69,7 @@ Every flag has a stable `id`, which is the same on every attempt. Receivers that
 
 ### Slack
 
-Enabled when `SLACK_WEBHOOK_URL` is set. Posts one message per flag:
+Enabled when `SLACK_WEBHOOK_URL` is set, or configured as a workspace destination with `{ "url" }`. Posts one message per flag:
 
 - the severity, as a colored dot and a label, and the reason
 - how many events, from which sources, and the flag id
@@ -79,7 +79,7 @@ Enabled when `SLACK_WEBHOOK_URL` is set. Posts one message per flag:
 
 ### Webhook
 
-Enabled when `WEBHOOK_URL` is set. Sends:
+Enabled when `WEBHOOK_URL` is set, or configured as a workspace destination with `{ "url", "signing_secret"? }` (the destination's secret replaces `WEBHOOK_SECRET`). Sends:
 
 ```http
 POST <WEBHOOK_URL>
@@ -102,7 +102,24 @@ function isFromCloudfriend(rawBody: string, header: string | undefined, secret: 
 }
 ```
 
-Any `2xx` reply counts as delivered. Anything else is retried.
+Any `2xx` reply counts as delivered. Anything else, including a redirect, is retried.
+
+A test message from the dashboard has the same shape and signature, with `"test": true` in the body, a flag id starting `flg_test_`, and the header `x-cloudfriend-test: 1`.
+
+## Outbound requests
+
+Slack and webhook URLs can be typed into the dashboard by anyone who manages a workspace, and cloudfriend sends to them from inside your network. So every request to a destination goes through `src/net/outbound.ts`, which applies these rules:
+
+- **https only.** No user name or password in the URL.
+- **Public addresses only.** The host is resolved (A and AAAA), and if any address it resolves to is not public, the destination is refused. Not public: loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, which includes the cloud metadata address `169.254.169.254` and the ECS endpoint `169.254.170.2`, and `fe80::/10`), carrier-grade NAT (`100.64/10`), `0.0.0.0/8`, multicast, broadcast, documentation and other reserved ranges, IPv6 unique local (`fc00::/7`), and IPv6 forms that carry one of those IPv4 addresses (`::ffff:10.0.0.1`, NAT64 `64:ff9b::/96`, 6to4). IP literals count in any notation: `https://2130706433/` is `127.0.0.1`.
+- **Checked again when connecting.** The host is resolved again at connect time, every address is checked again, and the connection goes only to a checked address. A DNS answer that changes between the check and the send (DNS rebinding) is refused.
+- **No redirects.** A `3xx` reply is a failed delivery, like any other non-`2xx`.
+- **15-second timeout**, and at most 4 KB of the reply is read. The rest is discarded.
+- **Status-only errors.** `last_error` says `slack replied 404`, `webhook replied 500`, `destination refused: private address`, `timed out` or `connection refused`, never anything from the reply body.
+
+The same check runs when a destination is saved (`validate`): a Slack destination must also be an `https://hooks.slack.com/...` URL, and a webhook's optional `signing_secret` must be at least 16 characters.
+
+To send to private addresses, for example a webhook receiver on your own network when self-hosting, set `CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS=on` (`true`, `1` and `yes` also work). Then private and loopback addresses and `http` URLs are allowed, and any URL may be used for Slack. The other rules still apply. This also covers `SLACK_WEBHOOK_URL` and `WEBHOOK_URL`: without it, an `http` or private URL there fails every delivery with `destination refused: ...`.
 
 ## Choosing actions
 
