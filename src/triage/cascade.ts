@@ -184,8 +184,10 @@ export function planBatch(items: Pending[], cache: VerdictCache, now: number, pe
     byKey.set(key, g);
   }
   for (const group of byKey.values()) {
-    const examples = group.slice(0, perTemplate);
-    const rest = group.slice(perTemplate);
+    // A kind sent only for review (it hasn't earned suppression, or its protection expired)
+    // needs one look; the classifier's uncertain cases get up to `perTemplate`.
+    const examples = group.slice(0, group.every((g) => g.route === "review") ? 1 : perTemplate);
+    const rest = group.slice(examples.length);
     examples.forEach((ex, i) => {
       // Spread the followers over the examples so each verdict covers its share.
       const mine = rest.filter((_, j) => j % examples.length === i);

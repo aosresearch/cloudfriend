@@ -202,6 +202,13 @@ describe("cascade", () => {
     assert.deepEqual(out.labels.map((l) => [l.id, l.y, l.follower]).sort(), [["a1", 1, false], ["a4", 1, true]]);
   });
 
+  it("asks about one example of a kind sent only for review, and loses none of the rest", () => {
+    const items = ["a", "b", "c"].map((id) => ({ ...item(id, "T"), route: "review" as const }));
+    const plan = planBatch(items, new VerdictCache(60_000), 0, 3);
+    assert.deepEqual(plan.ask.map((a) => [a.item.id, a.similar]), [["a", 2]]);
+    assert.deepEqual(plan.followers.get("a")!.map((f) => f.id), ["b", "c"]);
+  });
+
   it("labels only what the decider explicitly judged", () => {
     const items = [...Array.from({ length: 3 }, (_, i) => item(`a${i}`, "A")), item("b0", "B"), item("c0", "C")];
     const plan = planBatch(items, new VerdictCache(60_000), 0, 3);
