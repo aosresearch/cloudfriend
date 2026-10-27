@@ -4,21 +4,27 @@
 //     --scenario re3:data/prepared/re3:re3-ob-adservice_f5-1 \
 //     --scenario gaia:data/prepared/gaia:gaia-2021-08-12@14:00-15:00
 //
-// Each scenario replays a real case through the same featurizer, classifier and cascade the
-// server runs, asks Jev about the events that pass the classifier (recorded calls, cached in
-// --cache), and writes <out>/<id>.json with a window of the stream: the events (routine lines
-// sampled), every Jev call with its examples and answer, and the flags that would have been
-// sent to Slack. The page plays these back; nothing in it is invented.
+// Each scenario replays a real case through the same featurizer, classifier, routing rules
+// and causal batching the server runs (src/triage/sim.ts), asks Jev about the events that
+// reach it inside the recorded window (recorded calls, cached in --cache), and writes
+// <out>/<id>.json with that window of the stream: the events (routine lines sampled), every
+// Jev call with its examples and answer, and the flags that would have gone to Slack. Before
+// the window, the routing state learns from the dataset's labels instead (no Jev calls), so
+// the system isn't brand new when the window starts. The page plays these back; nothing in it
+// is invented.
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { applyVerdicts, EscalatedTemplates, planBatch, routeEvent, severityBucket, VerdictCache, verdictKey, type Pending } from "../src/triage/cascade.ts";
+import { severityBucket } from "../src/triage/cascade.ts";
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, Featurizer } from "../src/triage/features.ts";
-import type { CloudfriendEvent, FlagDraft, Judgment } from "../src/types.ts";
+import { RoutingState } from "../src/triage/routing.ts";
+import { CascadeSim } from "../src/triage/sim.ts";
+import type { CloudfriendEvent, FlagDraft } from "../src/types.ts";
 import { Jev } from "./jev.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
+const DAY = 86_400_000;
 const { values: args } = parseArgs({
   options: {
     model: { type: "string" },
@@ -36,11 +42,10 @@ if (!args.model || !args.out || !args.scenario?.length) {
 }
 
 const model = new Classifier(JSON.parse(fs.readFileSync(args.model, "utf8")) as ClassifierFile);
+const mf = model.file;
 const jev = new Jev(Boolean(process.env.JEV_API_KEY || process.env.OPENROUTER_API_KEY), Number(args.budget), args.cache!);
-const BATCH = 100;
 const WAIT = 10_000;
-const AUDIT_WAIT = 300_000;
-const TTL = 15 * 60_000;
+const routing = { verdictTtlMs: 15 * 60_000, escalatedTtlMs: 7 * DAY, escalatedMemoryMs: 90 * DAY, suppressionTtlMs: 30 * DAY };
 
 interface Shown {
   id: string;
@@ -62,7 +67,7 @@ async function exportScenario(spec: string) {
   const [caseId, range] = rest.split("@") as [string, string | undefined];
   const c = loadCases(dir).find((x) => x.id === caseId);
   if (!c) throw new Error(`no case ${caseId} in ${dir}`);
-  // A GAIA day continues the previous one; replay it first so the history is warm.
+  // A GAIA day continues the previous one; replay that first so the history is warm.
   const chain: Case[] = c.chain ? loadCases(dir).filter((x) => x.chain === c.chain && x.start_ms <= c.start_ms).slice(-2) : [c];
   let from: number;
   let to: number;
@@ -75,121 +80,82 @@ async function exportScenario(spec: string) {
     from = c.inject_ms! - 90_000;
     to = c.inject_ms! + 120_000;
   }
+  const inWindow = (t: number) => t >= from && t <= to + WAIT;
 
   const featurizer = new Featurizer();
-  const cache = new VerdictCache(TTL);
-  const escalated = new EscalatedTemplates(7 * 86_400_000);
-  const rand = seeded(name);
   const shown: Shown[] = [];
   const dropped: Shown[] = [];
-  const calls: unknown[] = [];
-  const flags: { id: string; t: number; reason: string; severity: string; via: string; events: string[]; count: number; added: { t: number; n: number }[]; users: string[] }[] = [];
+  const calls: { t: number; model: string; latency_ms: number | null; cost: number; examples: { id: string; similar: number; score: number }[]; flags: { reason: string; severity: string; events: string[] }[]; judged: Record<string, number> }[] = [];
+  const callAt = new Map<number, (typeof calls)[number]>();
   const byId = new Map<string, Shown & { data: unknown }>();
+  const positives = new Set<string>();
   const seconds = new Map<number, { events: number; dropped: number; routed: number }>();
-  let pending: Pending[] = [];
-  let oldest = 0;
-  let oldestUrgent: number | null = null;
-  let n = 0;
   const totals = { events: 0, dropped: 0, routed: 0, asked: 0, calls: 0, cost: 0, cached_verdicts: 0 };
 
-  const flush = async (now: number) => {
-    const batch = pending;
-    pending = [];
-    oldestUrgent = null;
-    if (!batch.length) return;
-    const plan = planBatch(batch, cache, now);
-    const inWindow = now >= from && now <= to + WAIT;
-    if (inWindow) totals.cached_verdicts += plan.cached.length;
-    let drafts: FlagDraft[] = [];
-    let judgments: Judgment[] | undefined;
-    if (plan.ask.length) {
-      const events: CloudfriendEvent[] = plan.ask.map(({ item, similar }) => {
-        const e = byId.get(item.id)!;
-        return { id: item.id, source: e.source, received_at: new Date(e.t).toISOString(), data: e.data, triage: { score: item.score ?? 0, similar } };
-      });
-      const res = await jev.ask(events);
-      drafts = res?.flags ?? [];
-      judgments = res?.judgments;
-      if (inWindow) {
+  const sim = new CascadeSim(
+    new RoutingState(routing),
+    { route: { dropBelow: mf.drop_below, escalateAbove: mf.escalate_above, threshold: mf.threshold, hasJev: true, auditRate: Number(args["audit-rate"]), novelGuard: true, rand: seeded(name) } },
+    {
+      async decide(asked, openFlags, start) {
+        if (!inWindow(start)) {
+          // Before the window: the dataset's labels stand in for Jev, at no cost.
+          return { latencyMs: 3000, decision: { flags: [], judgments: asked.map(({ item }) => ({ event_id: item.id, relevance: positives.has(item.id) ? ("relevant" as const) : ("benign" as const) })) } };
+        }
+        const events: CloudfriendEvent[] = asked.map(({ item, similar }) => {
+          const e = byId.get(item.id)!;
+          return { id: item.id, source: e.source, received_at: new Date(e.t).toISOString(), data: e.data, triage: { score: item.score ?? 0, similar, context: featurizer.context(item.template, Math.max(start, e.t)) ?? undefined } };
+        });
+        const res = await jev.ask(events, openFlags.map((f) => ({ id: f.id, reason: f.reason, severity: f.severity })));
+        const drafts: FlagDraft[] = res?.flags ?? [];
+        const judged: Record<string, number> = {};
+        for (const j of res?.judgments ?? []) judged[j.relevance] = (judged[j.relevance] ?? 0) + 1;
+        const call = {
+          t: start,
+          model: res?.call.model ?? "unavailable",
+          latency_ms: res?.call.latency_ms ?? null,
+          cost: res?.call.cost ?? 0,
+          examples: asked.map(({ item, similar }) => ({ id: item.id, similar, score: round(item.score ?? 0) })),
+          flags: drafts.map((d) => ({ reason: d.reason, severity: d.severity, events: d.event_ids })),
+          judged,
+        };
+        calls.push(call);
+        callAt.set(start + (call.latency_ms ?? 0), call);
         totals.asked += events.length;
         totals.calls++;
-        totals.cost += jev.last?.cost ?? 0;
-        calls.push({
-          t: now,
-          model: jev.last?.model ?? "unavailable",
-          latency_ms: jev.last?.latency_ms ?? null,
-          cost: jev.last?.cost ?? 0,
-          examples: plan.ask.map(({ item, similar }) => ({ id: item.id, similar, score: round(item.score ?? 0) })),
-          flags: drafts.map((d) => ({ reason: d.reason, severity: d.severity, events: d.event_ids })),
-        });
-      }
-    }
-    const out = applyVerdicts(plan, { flags: drafts, judgments });
-    const ids: string[] = [];
-    for (const f of out.flags) {
-      const id = `flag-${flags.length + 1}`;
-      ids.push(id);
-      if (!inWindow) continue;
-      const users = [...new Set(f.event_ids.map((x) => byId.get(x)).filter(Boolean).map((e) => extractEntities(e!.data).user).filter(Boolean))] as string[];
-      flags.push({ id, t: now, reason: f.reason, severity: f.severity, via: f.via, events: f.event_ids.slice(0, 50), count: f.event_ids.length, added: [], users: users.slice(0, 5) });
-    }
-    const rateOf = new Map(batch.map((b) => [verdictKey(b), b.rate]));
-    out.verdicts.forEach((v, k) => cache.set(k, v.escalate, now, typeof v.flag === "number" ? ids[v.flag] : v.flag, rateOf.get(k)));
-    for (const t of out.relevant) escalated.add(t, now);
-    for (const f of out.flags) if (f.via === "decider") for (const t of f.templates) escalated.add(t, now);
-    for (const [fid, evs] of out.attach) {
-      const f = flags.find((x) => x.id === fid);
-      if (f && inWindow) {
-        f.count += evs.length;
-        f.added.push({ t: now, n: evs.length });
-      }
-    }
-  };
+        totals.cost += call.cost;
+        return res ? { decision: { flags: res.flags, judgments: res.judgments }, latencyMs: res.call.latency_ms } : null;
+      },
+    },
+  );
 
+  let n = 0;
+  let last = 0;
   for (const day of chain) {
     for await (const e of readStream(dir, day.id)) {
       if (e.t > to + WAIT * 2) break;
       const f = featurizer.featurize({ source: e.source, received_at: e.t, data: e.data });
       const score = model.score(f.values);
-      const route = routeEvent(score, {
-        dropBelow: model.file.drop_below,
-        escalateAbove: model.file.escalate_above,
-        threshold: model.file.threshold,
-        hasJev: true,
-        auditRate: Number(args["audit-rate"]),
-        rand,
-      }, f.novel, escalated.has(f.template, e.t));
+      const ctx = featurizer.context(f.template);
       const id = String(n++);
-      if (pending.length && (pending.length >= BATCH || e.t - (oldestUrgent ?? oldest + AUDIT_WAIT - WAIT) >= WAIT)) await flush(e.t);
-      const inWindow = e.t >= from && e.t <= to;
+      if (e.y) positives.add(id);
+      last = e.t;
       const rec: Shown & { data: unknown } = {
-        id,
-        t: e.t,
-        source: e.source,
-        service: f.service,
-        level: Number.isNaN(f.level) ? "" : LEVELS[f.level]!,
-        text: f.text.slice(0, 400),
-        raw: JSON.stringify(e.data).slice(0, 1500),
-        score: round(score),
-        route,
-        y: e.y,
-        data: e.data,
+        id, t: e.t, source: e.source, service: f.service, level: Number.isNaN(f.level) ? "" : LEVELS[f.level]!,
+        text: f.text.slice(0, 400), raw: JSON.stringify(e.data).slice(0, 1500), score: round(score), route: "", y: e.y, data: e.data,
       };
-      if (route !== "drop") {
-        byId.set(id, rec);
-        if (!pending.length) oldest = e.t;
-        if (route !== "audit" && oldestUrgent === null) oldestUrgent = e.t;
-        pending.push({ id, template: f.template, score, route, severity: severityBucket(f.level, f.status), rate: featurizer.context(f.template)?.last_1m });
+      byId.set(id, rec);
+      rec.route = await sim.push({ id, t: e.t, score, template: f.template, severity: severityBucket(f.level, f.status), novel: f.novel, rate: ctx?.last_1m, serviceErrors: ctx?.service_errors_10m });
+      if (rec.route === "drop" && !(e.t >= from && e.t <= to)) byId.delete(id);
+      if (byId.size > 60_000) {
+        const keep = new Set(sim.pendingIds());
+        for (const k of [...byId.keys()].slice(0, 30_000)) if (!keep.has(k) && byId.get(k)!.t < from) byId.delete(k);
       }
-      if (!inWindow) {
-        if (byId.size > 50_000) for (const k of [...byId.keys()].slice(0, 25_000)) byId.delete(k);
-        continue;
-      }
+      if (!(e.t >= from && e.t <= to)) continue;
       totals.events++;
       const sec = Math.floor((e.t - from) / 1000);
       const b = seconds.get(sec) ?? { events: 0, dropped: 0, routed: 0 };
       b.events++;
-      if (route === "drop") {
+      if (rec.route === "drop") {
         b.dropped++;
         totals.dropped++;
         dropped.push(rec);
@@ -201,7 +167,26 @@ async function exportScenario(spec: string) {
       seconds.set(sec, b);
     }
   }
-  await flush(to + WAIT);
+  await sim.finish(last + WAIT);
+
+  // Flags raised in the window, at the time their call started (the page adds the latency).
+  const flags = sim.flags
+    .filter((f) => inWindow(f.created))
+    .map((f) => {
+      const call = callAt.get(f.created);
+      const users = [...new Set(f.events.map((x) => byId.get(x)).filter(Boolean).map((e) => extractEntities(e!.data).user).filter(Boolean))] as string[];
+      return {
+        id: f.id,
+        t: f.via === "decider" && call ? call.t : f.created,
+        reason: f.reason,
+        severity: f.severity,
+        via: f.via,
+        events: f.events.slice(0, 50),
+        count: f.events.length + f.additions.reduce((a, x) => a + x.ids.length, 0),
+        added: f.additions.filter((a) => inWindow(a.t)).map((a) => ({ t: a.t, n: a.ids.length })),
+        users: users.slice(0, 5),
+      };
+    });
 
   // Show every event that reached the cascade, and an even sample of the routine ones.
   const room = Math.max(0, Number(args["max-shown"]) - shown.length);
@@ -226,16 +211,16 @@ async function exportScenario(spec: string) {
     from,
     to,
     routine_sample_every: every,
-    model: { trained_at: model.file.trained_at, drop_below: round(model.file.drop_below), trees: model.gbdt.numTrees },
+    model: { trained_at: mf.trained_at, drop_below: round(mf.drop_below), trees: model.gbdt.numTrees },
     totals: { ...totals, cost: Math.round(totals.cost * 1e5) / 1e5, flags: flags.length },
     timeline,
     events,
-    calls,
+    calls: calls.filter((x) => inWindow(x.t)),
     flags,
   };
   fs.mkdirSync(args.out!, { recursive: true });
   fs.writeFileSync(path.join(args.out!, `${name}.json`), JSON.stringify(result));
-  console.log(`${name}: ${totals.events} events, ${totals.routed} past the classifier, ${totals.calls} Jev calls, ${flags.length} flags, ${events.length} shown`);
+  console.log(`${name}: ${totals.events} events, ${totals.routed} past the classifier, ${totals.calls} Jev calls ($${totals.cost.toFixed(3)}), ${flags.length} flags, ${events.length} shown`);
   return { id: name, case: c.id, system: result.system, fault: result.fault, flags: flags.length, events: totals.events };
 }
 

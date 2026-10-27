@@ -29,6 +29,7 @@ import type { DB } from "./db.ts";
 import { errMsg, log } from "./log.ts";
 import { Classifier, type ClassifierFile } from "./triage/classifier.ts";
 import { FEATURE_NAMES, FEATURIZER_VERSION } from "./triage/features.ts";
+import { upperBound } from "./stats.ts";
 import { verdictKey } from "./triage/cascade.ts";
 import { RoutingState, type RoutingOptions } from "./triage/routing.ts";
 import { BUILTIN_SCENARIOS, loadScenarios, runSuite } from "./triage/scenarios.ts";
@@ -45,8 +46,12 @@ export interface TrainOptions {
   humanWeight: number;
   /** Share of positives that must still reach Jev (ml/train.py --recall), and the gate's floor. */
   recall: number;
-  /** How long a candidate runs in shadow before promotion. 0 promotes at once. */
+  /** How long a candidate runs in shadow at least. 0 promotes at once. */
   shadowPeriodMs?: number;
+  /** Judged events it would newly drop, none relevant, before it is promoted. */
+  shadowMinEvidence?: number;
+  /** How long it may keep collecting that evidence before it is rejected. */
+  shadowMaxMs?: number;
   /** Directory with a labelled safety set (candidates.csv + candidates.features.csv), if any. */
   safetySet?: string | null;
   /** Labels of one template within this window are one incident and stay in one split. */
@@ -74,6 +79,8 @@ export interface TrainReport {
   safety?: { must_reach: number; reached: number } | null;
   /** The regression scenarios, run with the candidate through the complete pipeline. */
   regression?: RegressionSummary;
+  /** What the shadow period showed (see `shadowEvidence`). */
+  shadow?: ReturnType<Trainer["shadowEvidence"]>;
   candidate?: Metrics;
   active?: Metrics | null;
   model?: Pick<ClassifierFile, "drop_below" | "threshold" | "trained_at"> & { path: string; trees: number };
@@ -309,31 +316,66 @@ export class Trainer {
     this.#triage.load(activePath);
   }
 
+  /** What a candidate in shadow would change: the events it would newly drop, and how they were judged. */
+  shadowEvidence(trainedAt: string) {
+    const r = this.#db
+      .prepare(
+        `SELECT
+           sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' THEN 1 ELSE 0 END) AS newly,
+           sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL THEN 1 ELSE 0 END) AS judged,
+           sum(CASE WHEN e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND l.y = 1 THEN 1 ELSE 0 END) AS relevant,
+           sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.event_id IS NOT NULL THEN 1 ELSE 0 END) AS shared_audited,
+           sum(CASE WHEN e.route = 'audit' AND e.shadow_route = 'drop' AND l.y = 1 THEN 1 ELSE 0 END) AS shared_relevant,
+           count(*) AS scored
+         FROM events e LEFT JOIN labels l ON l.event_id = e.id WHERE e.shadow_model = ?`,
+      )
+      .get(trainedAt) as Record<string, number | null>;
+    const n = (k: string) => Number(r[k] ?? 0);
+    return {
+      scored: n("scored"),
+      /** Events the active model sends to Jev and the candidate would drop: its savings, and its risk. */
+      newly_suppressed: n("newly"),
+      judged: n("judged"),
+      relevant: n("relevant"),
+      /** Exact 95% upper bound on the share of newly suppressed events that are relevant. */
+      relevant_upper95: n("judged") ? upperBound(n("relevant"), n("judged")) : 1,
+      /** Audit samples both models drop: their shared blind spot. */
+      shared_drops_audited: n("shared_audited"),
+      shared_drops_relevant: n("shared_relevant"),
+    };
+  }
+
   /**
-   * Promote or reject the model in shadow once its period is over. It is promoted only if,
-   * among the events scored while in shadow that Jev or a person judged relevant, it would
-   * have dropped none (events that reached Jev as never-seen or already-escalated kinds don't
-   * count: those routes don't depend on the model).
+   * Decide on the model in shadow. It is rejected as soon as an event it would newly drop
+   * (one the active model sends to Jev) is judged relevant by Jev or a person. It is promoted
+   * only after the minimum period, and only once at least `shadowMinEvidence` such events
+   * have been judged, none relevant: promotion on evidence, not on elapsed time. Without
+   * enough evidence it keeps running, up to `shadowMaxMs`, then is rejected.
    */
   checkShadow(now = Date.now()): TrainReport | null {
     const row = this.#db.prepare("SELECT id, created_at, path, report FROM models WHERE status = 'shadow' ORDER BY created_at DESC LIMIT 1").get() as
       | { id: string; created_at: number; path: string; report: string }
       | undefined;
-    if (!row || now - row.created_at < (this.#o.shadowPeriodMs ?? 0)) return null;
-    // shadow_route already accounts for the novel and escalated-template rules.
-    const seen = this.#db
-      .prepare(
-        `SELECT count(*) AS relevant, sum(CASE WHEN e.shadow_route = 'drop' THEN 1 ELSE 0 END) AS dropped
-         FROM labels l JOIN events e ON e.id = l.event_id WHERE l.y = 1 AND e.shadow_route IS NOT NULL`,
-      )
-      .get() as { relevant: number; dropped: number | null };
-    const dropped = seen.dropped ?? 0;
+    if (!row) return null;
     const report = JSON.parse(row.report) as TrainReport;
-    const ok = dropped === 0;
+    const ev = this.shadowEvidence(report.model?.trained_at ?? "");
+    const age = now - row.created_at;
+    const min = this.#o.shadowMinEvidence ?? 200;
+    let ok: boolean;
+    if (ev.relevant > 0) {
+      ok = false;
+      report.reason = `shadow: it would have dropped ${ev.relevant} event(s) judged relevant that the active model sends to Jev`;
+    } else if (age < (this.#o.shadowPeriodMs ?? 0)) return null;
+    else if (ev.judged >= min) {
+      ok = true;
+      report.reason = `shadow: none of the ${ev.judged} judged events it would newly drop was relevant (at most ${pct(ev.relevant_upper95)} at 95%); ${ev.newly_suppressed} newly dropped in all`;
+    } else if (age < (this.#o.shadowMaxMs ?? 7 * 86_400_000)) return null;
+    else {
+      ok = false;
+      report.reason = `shadow: not enough evidence after ${Math.round(age / 3_600_000)}h: ${ev.judged} judged events it would newly drop, ${min} needed`;
+    }
     report.status = ok ? "promoted" : "rejected";
-    report.reason = ok
-      ? `shadow: of ${seen.relevant} events judged relevant while in shadow, it would have dropped none`
-      : `shadow: it would have dropped ${dropped} of ${seen.relevant} events judged relevant while in shadow`;
+    report.shadow = ev;
     if (ok) {
       this.#db.prepare("UPDATE models SET status = 'retired' WHERE status = 'active'").run();
       this.#promote(row.path);
@@ -347,14 +389,14 @@ export class Trainer {
   }
 
   #clearShadowScores(): void {
-    this.#db.prepare("UPDATE events SET shadow_score = NULL, shadow_route = NULL WHERE shadow_route IS NOT NULL OR shadow_score IS NOT NULL").run();
+    this.#db.prepare("UPDATE events SET shadow_score = NULL, shadow_route = NULL, shadow_model = NULL WHERE shadow_model IS NOT NULL OR shadow_route IS NOT NULL").run();
   }
 
   /** Feature vectors of the most recent events still in retention, newest first. */
   #recentFeatures(limit = 50_000): Float32Array[] {
     const rows = this.#db
-      .prepare("SELECT features FROM events WHERE features IS NOT NULL ORDER BY id DESC LIMIT ?")
-      .all(limit) as unknown as { features: Uint8Array }[];
+      .prepare("SELECT features FROM events WHERE features IS NOT NULL AND fv = ? ORDER BY id DESC LIMIT ?")
+      .all(FEATURIZER_VERSION, limit) as unknown as { features: Uint8Array }[];
     return rows.map((r) => decodeFeatures(r.features));
   }
 

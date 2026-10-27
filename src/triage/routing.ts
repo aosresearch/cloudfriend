@@ -187,9 +187,11 @@ export class RoutingState {
    */
   learn(batch: Pending[], out: Outcome, now: number, flagIds: (string | undefined)[]): void {
     const ctx = new Map(batch.map((b) => [verdictKey(b), b]));
+    const top = new Map<string, number>();
+    for (const b of batch) if (b.score !== null) top.set(verdictKey(b), Math.max(top.get(verdictKey(b)) ?? 0, b.score));
     out.verdicts.forEach((v, key) => {
       const b = ctx.get(key);
-      this.cache.set(key, v.escalate, now, typeof v.flag === "number" ? flagIds[v.flag] : v.flag, b?.rate);
+      this.cache.set(key, v.escalate, now, typeof v.flag === "number" ? flagIds[v.flag] : v.flag, b?.rate, top.get(key));
       if (!v.escalate && v.judged) {
         this.ledger.benign(key, now, b?.rate ?? 0, b?.serviceErrors ?? 0);
         const t = templateOfKey(key);

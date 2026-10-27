@@ -10,6 +10,8 @@ export interface StreamEvent {
   data: unknown;
   /** Weak label from the dataset: 1 = should escalate. */
   y: 0 | 1;
+  /** GAIA: the incidents a positive belongs to. */
+  inc?: string[];
 }
 
 export interface Case {

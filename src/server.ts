@@ -257,7 +257,13 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({
       active: triage?.classifier ? modelInfo(triage) : null,
       shadow: shadow && triage?.shadow
-        ? { id: shadow.id, since: new Date(shadow.created_at).toISOString(), trained_at: triage.shadow.file.trained_at, drop_below: triage.shadow.file.drop_below }
+        ? {
+            id: shadow.id,
+            since: new Date(shadow.created_at).toISOString(),
+            trained_at: triage.shadow.file.trained_at,
+            drop_below: triage.shadow.file.drop_below,
+            evidence: trainer?.shadowEvidence(triage.shadow.file.trained_at) ?? null,
+          }
         : null,
       training: trainer?.running ?? false,
       history: history.map((h) => ({ ...JSON.parse(h.report), status: h.status, created_at: new Date(h.created_at).toISOString() })),
@@ -270,6 +276,25 @@ export function createApp(deps: AppDeps): Hono {
       | undefined;
     if (!row) return c.json({ error: "not found" }, 404);
     return c.json({ ...row, created_at: new Date(row.created_at).toISOString(), event_ids: JSON.parse(row.event_ids) });
+  });
+
+  // What the candidate in shadow would newly drop that a person should look at: events judged
+  // relevant (they block promotion) and events nobody judged (uncertain, or only grouped).
+  app.get("/model/shadow/review", (c) => {
+    const trainedAt = triage?.shadow?.file.trained_at;
+    if (!trainedAt) return c.json({ shadow: null, events: [] });
+    const rows = db
+      .prepare(
+        `SELECT e.id, e.source, e.received_at, e.route, e.score, e.shadow_score, e.template, e.data, l.y AS label, l.source AS label_source
+         FROM events e LEFT JOIN labels l ON l.event_id = e.id
+         WHERE e.shadow_model = ? AND e.route NOT IN ('drop', 'audit') AND e.shadow_route = 'drop' AND (l.y IS NULL OR l.y = 1)
+         ORDER BY (l.y = 1) DESC, e.id DESC LIMIT 200`,
+      )
+      .all(trainedAt) as { id: number; received_at: number; data: string; label: number | null }[];
+    return c.json({
+      shadow: trainedAt,
+      events: rows.map((r) => ({ ...r, id: String(r.id), received_at: new Date(r.received_at).toISOString(), data: JSON.parse(r.data), why: r.label === 1 ? "judged relevant" : "not judged" })),
+    });
   });
 
   app.post("/model/train", async (c) => {

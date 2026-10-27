@@ -232,6 +232,10 @@ describe("cascade", () => {
     assert.equal(planBatch([{ ...info, id: "i2", rate: 10 }], cache, 1000).ask.length, 1);
     cache.set(verdictKey(info), false, 0, undefined, 1);
     assert.equal(planBatch([{ ...info, id: "i3", rate: 1 }], cache, 1000).cached.length, 1, "same rate: the no stands");
+    // Scored far above what the "no" was given for: the classifier sees a change, so Jev looks again.
+    cache.set(verdictKey(info), false, 0, undefined, 1, 0.01);
+    assert.equal(planBatch([{ ...info, id: "i4", rate: 1, score: 0.02 }], cache, 1000).cached.length, 1, "a similar score: the no stands");
+    assert.equal(planBatch([{ ...info, id: "i5", rate: 1, score: 0.6 }], cache, 1000).ask.length, 1, "a much higher score: asked");
     // Audits, never-seen errors and escalated kinds get a second look past a cached "no".
     for (const route of ["audit", "novel", "known", "review"] as const) {
       assert.equal(planBatch([{ ...info, id: route, route, rate: 1 }], cache, 1000).ask.length, 1, route);
@@ -721,11 +725,16 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     });
     cf = await makeCloudfriend({
       decider: jev.adapter,
-      config: { triage: true, modelPath: writeModel(tinyModel()), auditRate: 0, verdictTtlMs: 0, perTemplate: 50, batchSize: 100, batchWaitMs: 0, shadowPeriodMs: 60_000, incidentWindowMs: 1 },
+      config: {
+        triage: true, modelPath: writeModel(tinyModel()), auditRate: 0, verdictTtlMs: 0, perTemplate: 50, batchSize: 100, batchWaitMs: 0,
+        shadowPeriodMs: 60_000, shadowMinEvidence: 5, incidentWindowMs: 1,
+      },
     });
+    const t0 = Date.now() - 15 * 60_000;
+    const at = (i: number, k: number) => new Date(t0 + Math.min(i, 13) * 60_000 + k * 100).toISOString();
     const round = (i: number) => [
-      ...Array.from({ length: 8 }, (_, k) => ({ level: "warn", service: "cache", message: `cache refresh slow, retrying shard ${k} after ${i}ms timeout` })),
-      ...Array.from({ length: 12 }, (_, k) => ({ level: "error", service: "billing", message: `payment failed for order ${i * 100 + k}: card declined by provider` })),
+      ...Array.from({ length: 8 }, (_, k) => ({ timestamp: at(i, k), level: "warn", service: "cache", message: `cache refresh slow, retrying shard ${k} after ${i}ms timeout` })),
+      ...Array.from({ length: 12 }, (_, k) => ({ timestamp: at(i, 10 + k), level: "error", service: "billing", message: `payment failed for order ${i * 100 + k}: card declined by provider` })),
     ];
     for (let i = 0; i < 12; i++) {
       await cf.post("app", round(i));
@@ -739,10 +748,27 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     await run();
     assert.ok(count(cf, "events WHERE shadow_score IS NOT NULL AND shadow_route IS NOT NULL") >= 20);
     assert.equal(cf.trainer!.checkShadow(), null, "nothing happens before the period ends");
+    const ev = cf.trainer!.shadowEvidence(cf.triage!.shadow!.file.trained_at);
+    assert.ok(ev.newly_suppressed >= 5 && ev.judged >= 5 && ev.relevant === 0, JSON.stringify(ev));
     const done = cf.trainer!.checkShadow(Date.now() + 120_000)!;
     assert.equal(done.status, "promoted", done.reason);
+    assert.match(done.reason, /none of the \d+ judged events it would newly drop was relevant/);
     assert.notEqual(cf.triage!.classifier!.file.trained_at, activeBefore);
     assert.equal(cf.triage!.shadow, null);
+  });
+
+  it("keeps a candidate in shadow until there is evidence, and rejects it if none comes", async () => {
+    cf = await makeCloudfriend({ decider: fakeDecider().adapter, config: { triage: true, modelPath: writeModel(tinyModel()), shadowPeriodMs: 60_000, shadowMinEvidence: 200 } });
+    const quiet = writeModel(tinyModel({ drop_below: 0.999, trained_at: "2026-10-27T01:00:00Z" }));
+    cf.triage!.loadShadow(quiet);
+    cf.db.prepare("INSERT INTO models (id, created_at, path, status, labels, report) VALUES ('mdl_quiet', ?, ?, 'shadow', 0, ?)").run(
+      Date.now(), quiet, JSON.stringify({ id: "mdl_quiet", status: "shadow", reason: "", model: { trained_at: "2026-10-27T01:00:00Z" } }),
+    );
+    assert.equal(cf.trainer!.checkShadow(Date.now() + 2 * 3_600_000), null, "past the minimum period, but no evidence yet: keep watching");
+    const done = cf.trainer!.checkShadow(Date.now() + 8 * 86_400_000)!;
+    assert.equal(done.status, "rejected");
+    assert.match(done.reason, /not enough evidence/);
+    assert.equal(cf.triage!.classifier!.file.trained_at, "2026-10-26T00:00:00Z");
   });
 
   it("rejects a shadow candidate that would have dropped a relevant event", async () => {
@@ -755,7 +781,7 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     const bad = writeModel(tinyModel({ drop_below: 0.999, trained_at: "2026-10-27T00:00:00Z" }));
     cf.triage!.loadShadow(bad);
     cf.db.prepare("INSERT INTO models (id, created_at, path, status, labels, report) VALUES ('mdl_bad', ?, ?, 'shadow', 0, ?)").run(
-      Date.now() - 120_000, bad, JSON.stringify({ id: "mdl_bad", status: "shadow", reason: "", model: { drop_below: 0.999 } }),
+      Date.now() - 120_000, bad, JSON.stringify({ id: "mdl_bad", status: "shadow", reason: "", model: { drop_below: 0.999, trained_at: "2026-10-27T00:00:00Z" } }),
     );
     // The same error again: the active model still sends it to Jev; the candidate would drop it.
     await cf.post("app", { level: "error", message: "ledger write failed" });
@@ -770,7 +796,7 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     });
     const done = cf.trainer!.checkShadow()!;
     assert.equal(done.status, "rejected");
-    assert.match(done.reason, /would have dropped 1 of 1/);
+    assert.match(done.reason, /would have dropped 1 event\(s\) judged relevant/);
     assert.equal(cf.triage!.classifier!.file.trained_at, "2026-10-26T00:00:00Z", "the active model stays");
   });
 

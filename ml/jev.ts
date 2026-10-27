@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { buildPrompt, complete, SYSTEM_PROMPT } from "../src/adapters/deciders/openrouter.ts";
 import { JEV } from "../src/adapters/deciders/jev.ts";
-import type { CloudfriendEvent, Decision, FlagDraft } from "../src/types.ts";
+import type { CloudfriendEvent, Decision, DeciderContext, FlagDraft } from "../src/types.ts";
 
 export interface JevCall {
   model: string;
@@ -41,8 +41,8 @@ export class Jev {
    * or null when Jev is unavailable (dry run or out of budget). Each call is stored with its
    * exact prompt and raw reply.
    */
-  async ask(events: CloudfriendEvent[]): Promise<Decision | null> {
-    const prompt = buildPrompt(events, this.#env);
+  async ask(events: CloudfriendEvent[], openFlags: DeciderContext["openFlags"] = []): Promise<(Decision & { call: JevCall }) | null> {
+    const prompt = buildPrompt(events, this.#env, openFlags);
     const model = this.#env.JEV_MODEL || JEV.model;
     const key = crypto.createHash("sha256").update(model + "\0" + SYSTEM_PROMPT + "\0" + prompt).digest("hex");
     const file = path.join(this.dir, key.slice(0, 2), key + ".json");
@@ -50,10 +50,10 @@ export class Jev {
       const hit = JSON.parse(fs.readFileSync(file, "utf8"));
       this.cachedCalls++;
       this.#count(hit);
-      this.last = { model: hit.model, latency_ms: hit.latency_ms, cost: hit.usage?.cost ?? 0, cached: true };
-      const flags: FlagDraft[] = hit.flags.map((f: any) => ({ ...f, event_ids: f.events.map((i: number) => events[i]!.id) }));
+      const call = (this.last = { model: hit.model, latency_ms: hit.latency_ms, cost: hit.usage?.cost ?? 0, cached: true });
+      const flags: FlagDraft[] = hit.flags.map((f: any) => ({ reason: f.reason, severity: f.severity, event_ids: f.events.map((i: number) => events[i]!.id), ...(f.update ? { update: f.update } : {}) }));
       const judgments = hit.judgments?.map((j: any) => ({ event_id: events[j.event]!.id, relevance: j.relevance }));
-      return { flags, judgments };
+      return { flags, judgments, call };
     }
     if (!this.live || this.spent >= this.budget) {
       this.skipped++;
@@ -64,14 +64,14 @@ export class Jev {
     const started = Date.now();
     for (let attempt = 1; ; attempt++) {
       try {
-        const res = await complete(events, this.#env, AbortSignal.timeout(240_000), JEV);
+        const res = await complete(events, this.#env, AbortSignal.timeout(240_000), JEV, openFlags);
         const latency = Date.now() - started;
         const idx = new Map(events.map((e, i) => [e.id, i]));
         const record = {
           model: res.model,
           usage: res.usage,
           latency_ms: latency,
-          flags: res.flags.map((f) => ({ reason: f.reason, severity: f.severity, events: f.event_ids.map((id) => idx.get(id)) })),
+          flags: res.flags.map((f) => ({ reason: f.reason, severity: f.severity, events: f.event_ids.map((id) => idx.get(id)), ...(f.update ? { update: f.update } : {}) })),
           judgments: res.judgments?.map((j) => ({ event: idx.get(j.event_id), relevance: j.relevance })),
           prompt: res.record?.prompt,
           response: res.record?.response,
@@ -82,8 +82,8 @@ export class Jev {
         this.spent += res.usage.cost ?? 0;
         this.latencies.push(latency);
         this.#count(record);
-        this.last = { model: res.model, latency_ms: latency, cost: res.usage.cost ?? 0, cached: false };
-        return { flags: res.flags, judgments: res.judgments };
+        const call = (this.last = { model: res.model, latency_ms: latency, cost: res.usage.cost ?? 0, cached: false });
+        return { flags: res.flags, judgments: res.judgments, call };
       } catch (err) {
         if (attempt >= 3) {
           console.error(`jev call failed, treating as unavailable: ${(err as Error).message}`);

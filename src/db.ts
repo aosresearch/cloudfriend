@@ -160,6 +160,9 @@ const COLUMNS: [table: string, column: string, decl: string][] = [
   // taken (audits aside): `drop` means it would not have reached Jev.
   ["events", "shadow_score", "REAL"],
   ["events", "shadow_route", "TEXT"],
+  // Which shadow model (its trained_at) those are from, and the featurizer version of `features`.
+  ["events", "shadow_model", "TEXT"],
+  ["events", "fv", "INTEGER"],
   // Severity and context of a label's event when it was judged, so earned suppression and
   // escalation memory can be rebuilt exactly after a restart (routing.ts).
   ["labels", "severity", "TEXT"],

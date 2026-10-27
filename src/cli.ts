@@ -180,6 +180,8 @@ async function mlCommand(
     humanWeight: config.humanLabelWeight,
     recall: config.recallTarget,
     shadowPeriodMs: config.shadowPeriodMs,
+    shadowMinEvidence: config.shadowMinEvidence,
+    shadowMaxMs: config.shadowMaxMs,
     safetySet: config.safetySet,
     regressionSuite: config.regressionSuite,
     verdictTtlMs: config.verdictTtlMs,

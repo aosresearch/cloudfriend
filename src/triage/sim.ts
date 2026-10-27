@@ -197,8 +197,8 @@ export class CascadeSim {
       this.#hooks.reached?.(ids, "attached", at);
     }
     if (this.#o.learn && answered) this.state.learn(batch, out, at, flagIds);
-    else if (this.#o.learn) {
-      // Unanswered: still group a burst behind the fallback's flags, but learn nothing.
+    else {
+      // Unanswered, or a baseline that doesn't learn: still group a burst behind its flag.
       out.verdicts.forEach((v, key) => v.escalate && this.state.cache.set(key, true, at, typeof v.flag === "number" ? flagIds[v.flag] : v.flag));
     }
     this.#hooks.outcome?.({ plan, out, at, asked: plan.ask.length, flagIds, answered });

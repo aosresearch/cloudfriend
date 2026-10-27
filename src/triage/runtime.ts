@@ -35,6 +35,8 @@ export interface Scored {
   /** The shadow model's score and route (without audit sampling), when one is running. */
   shadowScore: number | null;
   shadowRoute: FullRoute | null;
+  /** The shadow model's trained_at, so its routes are never mixed with another's. */
+  shadowModel: string | null;
   route: FullRoute;
   template: string;
   severity: string;
@@ -164,6 +166,7 @@ export class Triage {
       score,
       shadowScore,
       shadowRoute,
+      shadowModel: this.shadow?.file.trained_at ?? null,
       route,
       template,
       severity,

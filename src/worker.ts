@@ -71,7 +71,7 @@ export class Worker {
       newRows: db.prepare("SELECT id, source, received_at, body FROM queue WHERE status = 'new' ORDER BY id LIMIT ?"),
       setStatus: db.prepare("UPDATE queue SET status = ? WHERE id = ?"),
       insertEvent: db.prepare(
-        "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key, score, route, template, features, user_key, decided, severity, shadow_score, shadow_route) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (queue_id, source, received_at, data, external_id, type, group_key, score, route, template, features, user_key, decided, severity, shadow_score, shadow_route, shadow_model, fv) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ),
       pending: db.prepare("SELECT id, received_at, route FROM events WHERE decided = 0 ORDER BY id LIMIT ?"),
       insertFlag: db.prepare(
@@ -221,14 +221,14 @@ export class Worker {
       for (const { row, events } of results) {
         for (const e of events ?? []) {
           if (!triage) {
-            this.#stmts.insertEvent.run(row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key, null, null, null, null, null, 0, null, null, null);
+            this.#stmts.insertEvent.run(row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key, null, null, null, null, null, 0, null, null, null, null, null);
             continue;
           }
           const t = triage.score(row.source, row.received_at, e.parsed);
           const route = routing ? t.route : null;
           this.#stmts.insertEvent.run(
             row.id, row.source, row.received_at, e.data, e.id, e.type, e.group_key,
-            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0, t.severity, t.shadowScore, t.shadowRoute,
+            t.score, route, t.template, t.features, t.user, route === "drop" ? 1 : 0, t.severity, t.shadowScore, t.shadowRoute, t.shadowModel, FEATURIZER_VERSION,
           );
         }
         this.#stmts.setStatus.run(events ? "done" : "failed", row.id);

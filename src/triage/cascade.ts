@@ -86,7 +86,13 @@ export interface Verdict {
   until: number;
   /** The template's 1-minute rate when the verdict was given. */
   rate?: number;
+  /** The highest classifier score among the events it was given for. */
+  score?: number;
 }
+
+/** A cached "no" stops applying to an event the classifier scores this much higher (log-odds). */
+export const NEGATIVE_SCORE_SHIFT = 2;
+const logit = (p: number) => Math.log(Math.min(Math.max(p, 1e-9), 1 - 1e-9) / (1 - Math.min(Math.max(p, 1e-9), 1 - 1e-9)));
 
 /** Recent verdicts by template and severity, so a burst of the same error costs one Jev call. */
 export class VerdictCache {
@@ -98,8 +104,12 @@ export class VerdictCache {
     this.max = max;
   }
 
-  /** The verdict for `key`, unless it expired or (for a "no") the template is now bursting. */
-  get(key: string, now: number, rate?: number): Verdict | undefined {
+  /**
+   * The verdict for `key`, unless it expired. A "no" also ends when the template is now
+   * bursting, and doesn't apply to an event the classifier scores far above the ones it was
+   * given for: both mean the situation changed (the "no" is kept for the others).
+   */
+  get(key: string, now: number, rate?: number, score?: number | null): Verdict | undefined {
     const v = this.#map.get(key);
     if (!v) return undefined;
     const base = v.rate ?? 0;
@@ -108,13 +118,14 @@ export class VerdictCache {
       this.#map.delete(key);
       return undefined;
     }
+    if (!v.escalate && score != null && v.score !== undefined && logit(score) > logit(v.score) + NEGATIVE_SCORE_SHIFT) return undefined;
     return v;
   }
 
-  set(key: string, escalate: boolean, now: number, flagId?: string, rate?: number): void {
+  set(key: string, escalate: boolean, now: number, flagId?: string, rate?: number, score?: number): void {
     if (this.ttlMs <= 0) return;
     this.#map.delete(key);
-    this.#map.set(key, { escalate, flagId, until: now + this.ttlMs, rate });
+    this.#map.set(key, { escalate, flagId, until: now + this.ttlMs, rate, score });
     if (this.#map.size > this.max) for (const k of [...this.#map.keys()].slice(0, this.max / 10)) this.#map.delete(k);
   }
 
@@ -152,7 +163,7 @@ export function planBatch(items: Pending[], cache: VerdictCache, now: number, pe
   for (const it of items) {
     const key = verdictKey(it);
     if (it.route === "auto" || it.route === "classifier") {
-      const v = cache.get(key, now, it.rate);
+      const v = cache.get(key, now, it.rate, it.score);
       if (v?.escalate) {
         plan.cached.push({ item: it, verdict: v });
         continue;
@@ -163,7 +174,7 @@ export function planBatch(items: Pending[], cache: VerdictCache, now: number, pe
       continue;
     }
     if (it.route === "drop") continue;
-    const v = cache.get(key, now, it.rate);
+    const v = cache.get(key, now, it.rate, it.score);
     if (v && (v.escalate || !BYPASS_NEGATIVE.has(it.route))) {
       plan.cached.push({ item: it, verdict: v });
       continue;

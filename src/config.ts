@@ -43,6 +43,8 @@ export interface Config {
   retrainMinLabels: number;
   /** How long a trained candidate runs in shadow before it may be promoted. 0 promotes at once. */
   shadowPeriodMs: number;
+  shadowMinEvidence: number;
+  shadowMaxMs: number;
   /** Directory with a human-labelled safety set the gate must pass, or null. */
   safetySet: string | null;
   regressionSuite: string | null;
@@ -133,6 +135,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     retrainIntervalMs: /^(off|0)$/i.test(env.CLOUDFRIEND_RETRAIN_INTERVAL ?? "") ? 0 : duration(env, "CLOUDFRIEND_RETRAIN_INTERVAL", "24h"),
     retrainMinLabels: int(env, "CLOUDFRIEND_RETRAIN_MIN_LABELS", 200),
     shadowPeriodMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SHADOW_PERIOD ?? "") ? 0 : duration(env, "CLOUDFRIEND_SHADOW_PERIOD", "24h"),
+    shadowMinEvidence: int(env, "CLOUDFRIEND_SHADOW_MIN_EVIDENCE", 200, 0),
+    shadowMaxMs: duration(env, "CLOUDFRIEND_SHADOW_MAX", "7d"),
     safetySet: env.CLOUDFRIEND_SAFETY_SET ? path.resolve(env.CLOUDFRIEND_SAFETY_SET) : null,
     regressionSuite: env.CLOUDFRIEND_REGRESSION_SUITE ? path.resolve(env.CLOUDFRIEND_REGRESSION_SUITE) : null,
     incidentWindowMs: duration(env, "CLOUDFRIEND_INCIDENT_WINDOW", "30m"),
