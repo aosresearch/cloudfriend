@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { after, before, describe, it } from "node:test";
 import { mockServer, tempDir, waitFor } from "./helpers.ts";
+import { freshDatabase } from "./pg.ts";
 
 describe("end to end: Sentry -> decider -> Slack", () => {
   let openrouter: Awaited<ReturnType<typeof mockServer>>;
@@ -30,6 +31,7 @@ describe("end to end: Sentry -> decider -> Slack", () => {
         PORT: String(port),
         HOST: "127.0.0.1",
         CLOUDFRIEND_DATA_DIR: tempDir(),
+        CLOUDFRIEND_DATABASE_URL: await freshDatabase(),
         CLOUDFRIEND_ADMIN_KEY: "admin",
         CLOUDFRIEND_BATCH_WAIT: "200ms",
         CLOUDFRIEND_POLL_INTERVAL: "20ms",

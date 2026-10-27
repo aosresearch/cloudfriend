@@ -51,7 +51,7 @@ describe("secrets API", () => {
     assert.equal(entry.name, "sentry-prod");
     assert.equal(entry.secret, undefined, "the secret is never listed");
 
-    const dump = JSON.stringify(cloudfriend.db.prepare("SELECT * FROM secrets").all());
+    const dump = JSON.stringify((await cloudfriend.db.query("SELECT * FROM secrets")).rows);
     assert.ok(!dump.includes(created.secret), "plain secret is not in the database");
 
     const ingest = { authorization: `Bearer ${created.secret}` };
@@ -81,13 +81,13 @@ describe("secrets API", () => {
   });
 
   it("generates a secret on first boot only", async () => {
-    const config = testConfig({ decider: "test" });
+    const config = await testConfig({ decider: "test" });
     const a = await createCloudfriend(config, {}, await testAdapters(null));
     assert.match(a.bootSecret!, /^cloudfriend_/);
     await a.close(0);
     const b = await createCloudfriend(config, {}, await testAdapters(null));
     assert.equal(b.bootSecret, null);
-    assert.equal(b.secrets.list().length, 1);
+    assert.equal((await b.secrets.list()).length, 1);
     await b.close(0);
   });
 });
@@ -102,8 +102,8 @@ describe("read API", () => {
     await cloudfriend.post("sentry", { action: "created", data: { issue: { id: "1" } } });
     await cloudfriend.post("posthog", { event: "signup_failed" });
     await cloudfriend.post("myapp", { msg: "hi" });
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
   }
 
@@ -166,7 +166,7 @@ describe("read API", () => {
 
     assert.equal((await admin("DELETE", `/flags/${flags[0].id}`)).status, 204);
     assert.equal((await cloudfriend.get(`/flags/${flags[0].id}`)).status, 404);
-    assert.equal(count(cloudfriend, "flags"), 1);
+    assert.equal(await count(cloudfriend, "flags"), 1);
   });
 
   it("returns JSON 404 for unknown routes", async () => {

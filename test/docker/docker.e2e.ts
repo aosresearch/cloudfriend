@@ -1,6 +1,10 @@
 // Tests the Docker image the way people run it: `docker run` with a volume, env config,
 // mock OpenRouter and Slack on the host. Run with `npm run test:docker` (needs a Docker daemon).
 // Set CLOUDFRIEND_IMAGE to test an existing image instead of building one.
+//
+// Not yet updated for Postgres: the image now needs CLOUDFRIEND_DATABASE_URL, which this file
+// does not provide, so the container exits at boot. The volume at /data holds only trained
+// model files now; events, flags and secrets live in Postgres.
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -79,7 +83,7 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
     CLOUDFRIEND_BATCH_WAIT: "300ms",
   });
 
-  /** `docker run -d -p ... -v <volume>:/data -e ...`, the README's command plus test settings. */
+  /** `docker run -d -p ... -v <volume>:/data -e ...`, the README's command plus test settings. The volume holds model files. */
   async function start(opts: { volume?: boolean; env?: Record<string, string> } = {}): Promise<void> {
     name = `cloudfriend-test-${RUN}-${containers.length}`;
     const args = ["run", "-d", "--name", name, "-p", "127.0.0.1::8080", "--add-host=host.docker.internal:host-gateway"];
@@ -217,7 +221,7 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
     assert.equal((await logs(name)).match(/First boot/g)?.length, 1, "no second boot secret");
   });
 
-  it("keeps everything when the container is replaced but the volume is kept", async () => {
+  it("keeps everything when the container is replaced", async () => {
     const before = await settledEventCount();
     await docker("rm", "-f", name);
     await start();
@@ -260,11 +264,5 @@ describe(`docker image ${IMAGE}`, { timeout: 600_000 }, () => {
     assert.equal(await inspect(name, "{{.State.ExitCode}}"), "0");
     assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started}ms`);
     assert.match(await logs(name), /shutting down signal=SIGTERM/);
-  });
-
-  it("starts fresh without a volume (data lives in the container only)", async () => {
-    await start({ volume: false });
-    assert.match(await logs(name), /First boot/);
-    assert.equal((await api("/flags")).flags.length, 0);
   });
 });

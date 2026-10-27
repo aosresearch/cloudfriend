@@ -8,9 +8,10 @@ import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, FEATURE_NAMES, Featurizer, FEATURIZER_VERSION, levelOf, maskMessage } from "../src/triage/features.ts";
 import { Gbdt } from "../src/triage/gbdt.ts";
 import { BUILTIN_MODEL, encodeFeatures, Triage } from "../src/triage/runtime.ts";
-import { openDb } from "../src/db.ts";
+import { DEFAULT_WORKSPACE as WS, openDb } from "../src/db.ts";
 import { gate, limitThreshold, rulesAtTheTime, splitLabels, Trainer } from "../src/training.ts";
-import { count, fakeDecider, makeCloudfriend, tempDir, type TestCloudfriend } from "./helpers.ts";
+import { count, fakeDecider, makeCloudfriend, rows, tempDir, type TestCloudfriend } from "./helpers.ts";
+import { freshDatabase } from "./pg.ts";
 
 const ERRORISH = FEATURE_NAMES.indexOf("errorish");
 const json = async (r: Response | Promise<Response>): Promise<any> => (await r).json();
@@ -289,8 +290,8 @@ describe("triage in the pipeline", () => {
   }
 
   async function run() {
-    cf.worker.parseNew();
-    cf.worker.startDueBatches();
+    await cf.worker.parseNew();
+    await cf.worker.startDueBatches();
     await cf.worker.whenIdle();
   }
 
@@ -303,7 +304,7 @@ describe("triage in the pipeline", () => {
     await cf.post("app", body);
     await run();
 
-    assert.equal(count(cf, "events WHERE route = 'drop' AND decided = 1"), 5);
+    assert.equal(await count(cf, "events WHERE route = 'drop' AND decided"), 5);
     assert.equal(d.calls.length, 1);
     assert.equal(d.calls[0]!.length, 3, "three examples of the one error template");
     assert.equal(d.calls[0]![0]!.triage?.similar, 1);
@@ -314,10 +315,10 @@ describe("triage in the pipeline", () => {
     assert.ok(flags[0].users.length >= 1);
     // Jev cited one example: it and its follower are labelled "escalate". The two it didn't cite
     // get no label at all: silence is not a "benign" verdict.
-    assert.equal(count(cf, "labels WHERE source = 'jev'"), 2);
-    assert.equal(count(cf, "labels WHERE y = 1"), 2);
-    assert.equal(count(cf, "labels WHERE provenance = 'follower'"), 1);
-    assert.equal(count(cf, "decisions"), 1, "the call is recorded");
+    assert.equal(await count(cf, "labels WHERE source = 'jev'"), 2);
+    assert.equal(await count(cf, "labels WHERE y = 1"), 2);
+    assert.equal(await count(cf, "labels WHERE provenance = 'follower'"), 1);
+    assert.equal(await count(cf, "decisions"), 1, "the call is recorded");
 
     // The same error again: the cached verdict adds it to the open flag without asking Jev.
     await cf.post("app", { level: "error", message: "payment provider timeout after 99ms" });
@@ -344,11 +345,11 @@ describe("triage in the pipeline", () => {
     });
     assert.equal(fb.status, 200);
     assert.deepEqual(await json(fb), { flag: flag.id, status: "false_positive", labeled: 1 });
-    assert.equal(count(cf, "labels WHERE source = 'human' AND y = 0"), 1);
+    assert.equal(await count(cf, "labels WHERE source = 'human' AND y = 0"), 1);
     assert.equal((await json(cf.get("/queue"))).flags.length, 0, "false positives leave the queue");
 
     // A missed escalation: the dropped info event should have been escalated.
-    const dropped = cf.db.prepare("SELECT id FROM events WHERE route = 'drop'").get() as { id: number };
+    const [dropped] = await rows(cf, "SELECT id FROM events WHERE route = 'drop'");
     const miss = await cf.app.request(`/events/${dropped.id}/feedback`, {
       method: "POST",
       headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
@@ -361,7 +362,7 @@ describe("triage in the pipeline", () => {
     // Same template again: the overturned verdict means it is not escalated or asked about.
     await cf.post("app", { level: "error", message: "disk almost full" });
     await run();
-    assert.equal(count(cf, "flags"), 1);
+    assert.equal(await count(cf, "flags"), 1);
   });
 
   it("keeps sending Jev a kind of event it escalated, even when the classifier would drop it", async () => {
@@ -374,21 +375,21 @@ describe("triage in the pipeline", () => {
       decider: d.adapter,
       config: { triage: true, modelPath: writeModel(tinyModel({ drop_below: 0.99, threshold: 0.995 })), auditRate: 0, verdictTtlMs: 0, batchWaitMs: 0, suppressionTtlMs: 0 },
     });
-    const route = () => (cf.db.prepare("SELECT route FROM events ORDER BY id DESC LIMIT 1").get() as { route: string }).route;
+    const route = async () => (await rows(cf, "SELECT route FROM events ORDER BY id DESC LIMIT 1"))[0].route as string;
     // First time: a never-seen error goes to Jev once (novel), and Jev escalates it.
     await cf.post("app", { level: "error", message: "ledger write failed for account 17" });
     await run();
-    assert.equal(route(), "novel");
-    assert.equal(count(cf, "flags"), 1);
+    assert.equal(await route(), "novel");
+    assert.equal(await count(cf, "flags"), 1);
     // Next ones would be dropped by the classifier, but Jev escalated this kind: they still reach it.
     await cf.post("app", { level: "error", message: "ledger write failed for account 18" });
     await run();
-    assert.equal(route(), "known");
+    assert.equal(await route(), "known");
     assert.equal(d.calls.length, 2);
     // A kind Jev didn't escalate is dropped once it isn't new.
     await cf.post("app", [{ level: "error", message: "thumbnail cache miss for image 1" }, { level: "error", message: "thumbnail cache miss for image 2" }]);
     await run();
-    assert.equal(route(), "drop");
+    assert.equal(await route(), "drop");
     // A person says the ledger flag was a false positive: the kind stops reaching Jev.
     const [flag] = (await json(cf.get("/flags"))).flags.slice(-1);
     await cf.app.request(`/flags/${flag.id}/feedback`, {
@@ -398,7 +399,7 @@ describe("triage in the pipeline", () => {
     });
     await cf.post("app", { level: "error", message: "ledger write failed for account 19" });
     await run();
-    assert.equal(route(), "drop");
+    assert.equal(await route(), "drop");
   });
 
   it("remembers escalated kinds across a restart", async () => {
@@ -408,9 +409,9 @@ describe("triage in the pipeline", () => {
     await cf.post("app", { level: "error", message: "replica lag over 30s on db 2" });
     await run();
     assert.equal(cf.triage!.escalated.size, 1);
-    const dataDir = cf.config.dataDir;
+    const { dataDir, databaseUrl } = cf.config;
     await cf.close(0);
-    cf = await makeCloudfriend({ decider: d.adapter, config: { ...config, dataDir } });
+    cf = await makeCloudfriend({ decider: d.adapter, config: { ...config, dataDir, databaseUrl } });
     assert.equal(cf.triage!.escalated.size, 1, "loaded from the labels table");
   });
 
@@ -426,7 +427,7 @@ describe("triage in the pipeline", () => {
     await cf.post("app", { level: "error", status: 500, message: "POST /checkout" });
     await run();
     assert.equal(d.calls.length, 2, "the error was asked about, not settled by the cached no");
-    assert.equal(count(cf, "flags"), 1);
+    assert.equal(await count(cf, "flags"), 1);
   });
 
   it("forgets a cached no once someone says the event should have been escalated", async () => {
@@ -437,7 +438,7 @@ describe("triage in the pipeline", () => {
     await cf.post("app", { level: "warn", message: "disk 92% full on db-1" });
     await run();
     assert.equal(d.calls.length, 1, "the second one was settled by the cached no");
-    const missed = cf.db.prepare("SELECT id FROM events ORDER BY id DESC LIMIT 1").get() as { id: number };
+    const [missed] = await rows(cf, "SELECT id FROM events ORDER BY id DESC LIMIT 1");
     const res = await json(
       cf.app.request(`/events/${missed.id}/feedback`, {
         method: "POST",
@@ -466,7 +467,7 @@ describe("triage in the pipeline", () => {
     });
     await cf.post("app", { level: "error", message: "database unreachable" });
     await run();
-    assert.equal(count(cf, "flags"), 2, "the events are not hidden in a resolved flag");
+    assert.equal(await count(cf, "flags"), 2, "the events are not hidden in a resolved flag");
     assert.equal((await json(cf.get("/queue"))).flags.length, 1);
   });
 
@@ -474,10 +475,10 @@ describe("triage in the pipeline", () => {
     await setup((events) => ({ flags: [], judgments: events.map((e) => ({ event_id: e.id, relevance: "benign" as const })) }));
     await cf.post("app", { level: "error", message: "card 4111 declined" });
     await run();
-    assert.equal(count(cf, "decisions WHERE response IS NOT NULL"), 1);
+    assert.equal(await count(cf, "decisions WHERE response IS NOT NULL"), 1);
     await cf.worker.cleanup(Date.now() + cf.config.retentionMs + 1);
-    assert.equal(count(cf, "decisions"), 1, "the row stays for the labels that point to it");
-    assert.equal(count(cf, "decisions WHERE prompt IS NOT NULL OR response IS NOT NULL"), 0);
+    assert.equal(await count(cf, "decisions"), 1, "the row stays for the labels that point to it");
+    assert.equal(await count(cf, "decisions WHERE prompt IS NOT NULL OR response IS NOT NULL"), 0);
   });
 
   it("acknowledges and resolves flags in the queue", async () => {
@@ -507,7 +508,7 @@ describe("triage in the pipeline", () => {
     });
     await cf.post("app", [{ level: "info", message: "page served" }, { level: "info", message: "cache warm" }]);
     await run();
-    assert.equal(count(cf, "events WHERE route = 'audit' AND decided = 0"), 2);
+    assert.equal(await count(cf, "events WHERE route = 'audit' AND NOT decided"), 2);
     assert.equal(d.calls.length, 0, "audits alone wait");
     await cf.post("app", { level: "error", message: "queue consumer crashed" });
     await run();
@@ -522,7 +523,7 @@ describe("triage in the pipeline", () => {
     const [flag] = (await json(cf.get("/queue"))).flags;
     assert.equal(flag.decider, "classifier");
     assert.match(flag.reason, /Classifier escalation/);
-    assert.equal(count(cf, "labels"), 0, "no Jev, no labels");
+    assert.equal(await count(cf, "labels"), 0, "no Jev, no labels");
   });
 
   it("imports labelled history", async () => {
@@ -533,7 +534,7 @@ describe("triage in the pipeline", () => {
       body: JSON.stringify({ labels: [{ source: "app", data: { message: "a" }, escalate: true }, { source: "app", data: { message: "b" }, escalate: false }] }),
     });
     assert.equal(res.status, 201);
-    assert.equal(count(cf, "labels WHERE event_id < 0 AND source = 'human'"), 2);
+    assert.equal(await count(cf, "labels WHERE event_id < 0 AND source = 'human'"), 2);
     const labels = await json(cf.get("/labels"));
     assert.deepEqual(labels.labels.human, { escalate: 1, ignore: 1 });
   });
@@ -634,8 +635,8 @@ const hasLightgbm = spawnSync("python3", ["-c", "import lightgbm"]).status === 0
 describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not installed" }, () => {
   let cf: TestCloudfriend;
   async function run() {
-    cf.worker.parseNew();
-    cf.worker.startDueBatches();
+    await cf.worker.parseNew();
+    await cf.worker.startDueBatches();
     await cf.worker.whenIdle();
   }
   afterEach(async () => {
@@ -697,25 +698,23 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     ];
     for (let i = 0; i < 12; i++) {
       await cf.post("app", round(i));
-      cf.worker.parseNew();
-      cf.worker.startDueBatches();
+      await cf.worker.parseNew();
+      await cf.worker.startDueBatches();
       await cf.worker.whenIdle();
     }
     const asked = jev.calls.flat().length;
-    assert.ok(count(cf, "labels WHERE y = 0") > 50, "Jev's rejections are stored as labels");
-    const before = cf.db.prepare("SELECT route FROM events WHERE data LIKE '%cache refresh%' ORDER BY id DESC LIMIT 1").get() as { route: string };
+    assert.ok(await count(cf, "labels WHERE y = 0") > 50, "Jev's rejections are stored as labels");
+    const [before] = await rows(cf, "SELECT route FROM events WHERE data LIKE '%cache refresh%' ORDER BY id DESC LIMIT 1");
     assert.equal(before.route, "jev", "before training, stage 1 passes the warnings on");
 
     const report = await cf.trainer!.train();
     assert.equal(report.status, "promoted", report.reason);
 
     await cf.post("app", round(99));
-    cf.worker.parseNew();
-    cf.worker.startDueBatches();
+    await cf.worker.parseNew();
+    await cf.worker.startDueBatches();
     await cf.worker.whenIdle();
-    const routes = cf.db
-      .prepare("SELECT data, route FROM events ORDER BY id DESC LIMIT 25")
-      .all() as { data: string; route: string }[];
+    const routes: { data: string; route: string }[] = await rows(cf, "SELECT data, route FROM events ORDER BY id DESC LIMIT 25");
     const warnings = routes.filter((r) => r.data.includes("cache refresh"));
     const payments = routes.filter((r) => r.data.includes("payment"));
     assert.ok(warnings.every((r) => r.route === "drop"), "after training, the rejected kind is dropped by stage 1");
@@ -756,11 +755,11 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     const activeBefore = cf.triage!.classifier!.file.trained_at;
     await cf.post("app", round(50));
     await run();
-    assert.ok(count(cf, "events WHERE shadow_score IS NOT NULL AND shadow_route IS NOT NULL") >= 20);
-    assert.equal(cf.trainer!.checkShadow(), null, "nothing happens before the period ends");
-    const ev = cf.trainer!.shadowEvidence(cf.triage!.shadow!.file.trained_at);
+    assert.ok(await count(cf, "events WHERE shadow_score IS NOT NULL AND shadow_route IS NOT NULL") >= 20);
+    assert.equal(await cf.trainer!.checkShadow(), null, "nothing happens before the period ends");
+    const ev = await cf.trainer!.shadowEvidence(cf.triage!.shadow!.file.trained_at);
     assert.ok(ev.newly_suppressed >= 5 && ev.judged >= 5 && ev.relevant === 0, JSON.stringify(ev));
-    const done = cf.trainer!.checkShadow(Date.now() + 120_000)!;
+    const done = (await cf.trainer!.checkShadow(Date.now() + 120_000))!;
     assert.equal(done.status, "promoted", done.reason);
     assert.match(done.reason, /none of the \d+ judged events it would newly drop was relevant/);
     assert.notEqual(cf.triage!.classifier!.file.trained_at, activeBefore);
@@ -771,11 +770,11 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     cf = await makeCloudfriend({ decider: fakeDecider().adapter, config: { triage: true, modelPath: writeModel(tinyModel()), shadowPeriodMs: 60_000, shadowMinEvidence: 200 } });
     const quiet = writeModel(tinyModel({ drop_below: 0.999, trained_at: "2026-10-27T01:00:00Z" }));
     cf.triage!.loadShadow(quiet);
-    cf.db.prepare("INSERT INTO models (id, created_at, path, status, labels, report) VALUES ('mdl_quiet', ?, ?, 'shadow', 0, ?)").run(
-      Date.now(), quiet, JSON.stringify({ id: "mdl_quiet", status: "shadow", reason: "", model: { trained_at: "2026-10-27T01:00:00Z" } }),
+    await rows(cf, "INSERT INTO models (id, workspace_id, created_at, path, status, labels, report) VALUES ('mdl_quiet', $1, $2, $3, 'shadow', 0, $4)",
+      WS, Date.now(), quiet, JSON.stringify({ id: "mdl_quiet", status: "shadow", reason: "", model: { trained_at: "2026-10-27T01:00:00Z" } }),
     );
-    assert.equal(cf.trainer!.checkShadow(Date.now() + 2 * 3_600_000), null, "past the minimum period, but no evidence yet: keep watching");
-    const done = cf.trainer!.checkShadow(Date.now() + 8 * 86_400_000)!;
+    assert.equal(await cf.trainer!.checkShadow(Date.now() + 2 * 3_600_000), null, "past the minimum period, but no evidence yet: keep watching");
+    const done = (await cf.trainer!.checkShadow(Date.now() + 8 * 86_400_000))!;
     assert.equal(done.status, "rejected");
     assert.match(done.reason, /not enough evidence/);
     assert.equal(cf.triage!.classifier!.file.trained_at, "2026-10-26T00:00:00Z");
@@ -790,13 +789,13 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
     // A candidate that drops everything, in shadow since two minutes ago.
     const bad = writeModel(tinyModel({ drop_below: 0.999, trained_at: "2026-10-27T00:00:00Z" }));
     cf.triage!.loadShadow(bad);
-    cf.db.prepare("INSERT INTO models (id, created_at, path, status, labels, report) VALUES ('mdl_bad', ?, ?, 'shadow', 0, ?)").run(
-      Date.now() - 120_000, bad, JSON.stringify({ id: "mdl_bad", status: "shadow", reason: "", model: { drop_below: 0.999, trained_at: "2026-10-27T00:00:00Z" } }),
+    await rows(cf, "INSERT INTO models (id, workspace_id, created_at, path, status, labels, report) VALUES ('mdl_bad', $1, $2, $3, 'shadow', 0, $4)",
+      WS, Date.now() - 120_000, bad, JSON.stringify({ id: "mdl_bad", status: "shadow", reason: "", model: { drop_below: 0.999, trained_at: "2026-10-27T00:00:00Z" } }),
     );
     // The same error again: the active model still sends it to Jev; the candidate would drop it.
     await cf.post("app", { level: "error", message: "ledger write failed" });
     await run();
-    const ev = cf.db.prepare("SELECT id, route, shadow_route FROM events ORDER BY id DESC LIMIT 1").get() as { id: number; route: string; shadow_route: string };
+    const [ev] = await rows(cf, "SELECT id, route, shadow_route FROM events ORDER BY id DESC LIMIT 1");
     assert.deepEqual([ev.route, ev.shadow_route], ["jev", "drop"]);
     // A person says it mattered.
     await cf.app.request(`/events/${ev.id}/feedback`, {
@@ -804,7 +803,7 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
       headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
       body: JSON.stringify({ escalate: true }),
     });
-    const done = cf.trainer!.checkShadow()!;
+    const done = (await cf.trainer!.checkShadow())!;
     assert.equal(done.status, "rejected");
     assert.match(done.reason, /would have dropped 1 event\(s\) judged relevant/);
     assert.equal(cf.triage!.classifier!.file.trained_at, "2026-10-26T00:00:00Z", "the active model stays");
@@ -826,57 +825,62 @@ describe("the runtime follows the model's feature version", () => {
     return file;
   };
 
-  it("computes v2 features for a v2 model, and switches with the model", () => {
-    const db = openDb(path.join(tempDir(), "db.sqlite"));
-    const t = new Triage(db, opts);
-    assert.ok(t.load(model(2)));
+  it("computes v2 features for a v2 model, and switches with the model", async () => {
+    const db = await openDb(await freshDatabase());
+    const t = await Triage.open(db, opts);
+    assert.ok(await t.load(model(2)));
     assert.equal(t.featurizer.version, 2);
     assert.equal(t.loadShadow(model(3)), false, "a shadow must use the active version");
-    assert.ok(t.load(model(3)));
+    assert.ok(await t.load(model(3)));
     assert.equal(t.featurizer.version, 3);
-    db.close();
+    await db.end();
   });
 
-  it("drops benign permissions from labels of the old version on upgrade, keeping escalations", () => {
-    const db = openDb(path.join(tempDir(), "db.sqlite"));
-    const ins = db.prepare(
-      `INSERT INTO labels (event_id, y, source, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, severity, ctx_rate, ctx_service_errors)
-       VALUES (?, ?, 'jev', ?, 2, 'app', ?, '{}', ?, ?, 'review', 'i', 1, 0)`,
-    );
+  it("drops benign permissions from labels of the old version on upgrade, keeping escalations", async () => {
+    const db = await openDb(await freshDatabase());
+    const ins = (...args: unknown[]) =>
+      db.query(
+        `INSERT INTO labels (workspace_id, event_id, y, source, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, severity, ctx_rate, ctx_service_errors)
+         VALUES ($1, $2, $3, 'jev', $4, 2, 'app', $5, '{}', $6, $7, 'review', 'i', 1, 0)`,
+        [WS, ...args],
+      );
     const now = Date.now();
-    ins.run(1, 0, encodeFeatures([0]), now, now, "app|web|GET /");
-    ins.run(2, 1, encodeFeatures([0]), now, now, "app|pay|failed");
-    const t = new Triage(db, opts);
-    t.load(model(2));
+    await ins(1, 0, encodeFeatures([0]), now, now, "app|web|GET /");
+    await ins(2, 1, encodeFeatures([0]), now, now, "app|pay|failed");
+    const t = await Triage.open(db, opts);
+    await t.load(model(2));
     const facts = (template: string) => ({ template, severity: "i", novel: false, rate: 1, serviceErrors: 0 });
     const route = { dropBelow: 0.5, escalateAbove: 2, threshold: 0.9, hasJev: true, auditRate: 0 };
     assert.equal(t.routing.route(0.01, route, facts("app|web|GET /"), now + 1000), "drop", "v2 model, v2 permission");
-    t.load(model(3));
+    await t.load(model(3));
     assert.equal(t.routing.route(0.01, route, facts("app|web|GET /"), now + 1000), "review", "v3: the kind must be judged again");
     assert.equal(t.routing.route(0.01, route, facts("app|pay|failed"), now + 1000), "known", "the escalation is kept");
-    db.close();
+    await db.end();
   });
 });
 
 describe("shadow evidence", () => {
-  it("counts only direct judgments as evidence, but any relevant label as a reason to reject", () => {
-    const db = openDb(path.join(tempDir(), "db.sqlite"));
-    const triage = new Triage(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
+  it("counts only direct judgments as evidence, but any relevant label as a reason to reject", async () => {
+    const db = await openDb(await freshDatabase());
+    const triage = await Triage.open(db, { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true });
     const trainer = new Trainer(db, triage, { dataDir: tempDir(), python: "python3", minLabels: 1, humanWeight: 1, recall: 0.99 });
-    const ev = db.prepare("INSERT INTO events (id, queue_id, source, received_at, data, route, shadow_route, shadow_model) VALUES (?, 0, 'app', 0, '{}', 'jev', 'drop', 'm1')");
-    const label = db.prepare(
-      "INSERT INTO labels (event_id, y, source, features, featurizer_version, event_source, received_at, data, created_at, provenance) VALUES (?, ?, 'jev', ?, 3, 'app', 0, '{}', 0, ?)",
-    );
-    for (let i = 1; i <= 6; i++) ev.run(i);
-    label.run(1, 0, encodeFeatures([0]), "review");
-    label.run(2, 0, encodeFeatures([0]), "threshold");
-    label.run(3, 0, encodeFeatures([0]), "follower");
-    label.run(4, 0, encodeFeatures([0]), "follower");
-    label.run(5, 1, encodeFeatures([0]), "follower");
-    const r = trainer.shadowEvidence("m1");
+    const ev = (id: number) =>
+      db.query("INSERT INTO events (id, workspace_id, queue_id, source, received_at, data, route, shadow_route, shadow_model) VALUES ($1, $2, 0, 'app', 0, '{}', 'jev', 'drop', 'm1')", [id, WS]);
+    const label = (...args: unknown[]) =>
+      db.query(
+        "INSERT INTO labels (workspace_id, event_id, y, source, features, featurizer_version, event_source, received_at, data, created_at, provenance) VALUES ($1, $2, $3, 'jev', $4, 3, 'app', 0, '{}', 0, $5)",
+        [WS, ...args],
+      );
+    for (let i = 1; i <= 6; i++) await ev(i);
+    await label(1, 0, encodeFeatures([0]), "review");
+    await label(2, 0, encodeFeatures([0]), "threshold");
+    await label(3, 0, encodeFeatures([0]), "follower");
+    await label(4, 0, encodeFeatures([0]), "follower");
+    await label(5, 1, encodeFeatures([0]), "follower");
+    const r = await trainer.shadowEvidence("m1");
     assert.equal(r.newly_suppressed, 6);
     assert.equal(r.judged, 2, "followers only copy their group's answer");
     assert.equal(r.relevant, 1, "a copied yes still rejects");
-    db.close();
+    await db.end();
   });
 });

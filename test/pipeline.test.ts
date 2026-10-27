@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createCloudfriend } from "../src/cloudfriend.ts";
 import { deliveryBackoff, MAX_DELIVERY_ATTEMPTS } from "../src/worker.ts";
-import { count, fakeAction, fakeDecider, makeCloudfriend, testAdapters, testConfig, waitFor, type TestCloudfriend } from "./helpers.ts";
+import pg from "pg";
+import { DEFAULT_WORKSPACE as WS } from "../src/db.ts";
+import { count, fakeAction, fakeDecider, makeCloudfriend, rows, testAdapters, testConfig, waitFor, type TestCloudfriend } from "./helpers.ts";
 
 let cloudfriend: TestCloudfriend;
 afterEach(async () => {
@@ -16,9 +18,9 @@ describe("parse stage", () => {
     cloudfriend = await makeCloudfriend();
     await cloudfriend.post("myapp", [{ a: 1 }, { a: 2 }]);
     await cloudfriend.post("sentry", { action: "created", data: { issue: { id: "7" } } });
-    assert.equal(cloudfriend.worker.parseNew(), 2);
-    assert.equal(count(cloudfriend, "queue WHERE status = 'done'"), 2);
-    const events = cloudfriend.db.prepare("SELECT source, data, type, group_key FROM events ORDER BY id").all() as any[];
+    assert.equal(await cloudfriend.worker.parseNew(), 2);
+    assert.equal(await count(cloudfriend, "queue WHERE status = 'done'"), 2);
+    const events = await rows(cloudfriend, "SELECT source, data, type, group_key FROM events ORDER BY id");
     assert.deepEqual(
       events.map((e) => [e.source, JSON.parse(e.data), e.type, e.group_key]),
       [
@@ -33,22 +35,22 @@ describe("parse stage", () => {
   it("drops a request when parse returns []", async () => {
     cloudfriend = await makeCloudfriend();
     await cloudfriend.post("sentry", { action: "created", data: { installation: { uuid: "x" } }, installation: { uuid: "x" } });
-    cloudfriend.worker.parseNew();
-    assert.equal(count(cloudfriend, "events"), 0);
-    assert.equal(count(cloudfriend, "queue WHERE status = 'done'"), 1);
+    await cloudfriend.worker.parseNew();
+    assert.equal(await count(cloudfriend, "events"), 0);
+    assert.equal(await count(cloudfriend, "queue WHERE status = 'done'"), 1);
   });
 
   it("keeps a request as 'failed' when its adapter throws", async () => {
     const adapters = await testAdapters(null);
     adapters.sources = new Map([...adapters.sources, ["broken", { parse: () => { throw new Error("nope"); } }]]);
-    const s = await createCloudfriend(testConfig({ decider: "test" }), {}, adapters);
+    const s = await createCloudfriend(await testConfig({ decider: "test" }), {}, adapters);
     try {
-      s.db.prepare("INSERT INTO queue (source, received_at, body) VALUES ('broken', ?, ?)").run(Date.now(), Buffer.from("{}"));
-      s.db.prepare("INSERT INTO queue (source, received_at, body) VALUES ('myapp', ?, ?)").run(Date.now(), Buffer.from("{}"));
-      s.worker.parseNew();
-      const statuses = s.db.prepare("SELECT source, status FROM queue ORDER BY id").all() as any[];
+      await rows(s, "INSERT INTO queue (workspace_id, source, received_at, body) VALUES ($1, 'broken', $2, $3)", WS, Date.now(), Buffer.from("{}"));
+      await rows(s, "INSERT INTO queue (workspace_id, source, received_at, body) VALUES ($1, 'myapp', $2, $3)", WS, Date.now(), Buffer.from("{}"));
+      await s.worker.parseNew();
+      const statuses = await rows(s, "SELECT source, status FROM queue ORDER BY id");
       assert.deepEqual(statuses.map((r) => [r.source, r.status]), [["broken", "failed"], ["myapp", "done"]]);
-      assert.equal((s.db.prepare("SELECT count(*) AS n FROM events").get() as any).n, 1);
+      assert.equal(await count(s, "events"), 1);
     } finally {
       await s.close(0);
     }
@@ -60,29 +62,29 @@ describe("decide stage", () => {
     const d = fakeDecider();
     cloudfriend = await makeCloudfriend({ decider: d.adapter, config: { batchSize: 3, batchWaitMs: 60_000 } });
     for (let i = 0; i < 2; i++) await cloudfriend.post("myapp", { i });
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
     assert.equal(d.calls.length, 0, "two events, under the size limit and the wait: no call yet");
 
     await cloudfriend.post("myapp", { i: 2 });
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
     assert.equal(d.calls.length, 1);
     assert.deepEqual(d.calls[0]!.map((e) => (e.data as any).i), [0, 1, 2]);
-    assert.equal(count(cloudfriend, "events WHERE decided = 0"), 0);
+    assert.equal(await count(cloudfriend, "events WHERE NOT decided"), 0);
   });
 
   it("decides a partial batch once the oldest event has waited long enough", async () => {
     const d = fakeDecider();
     cloudfriend = await makeCloudfriend({ decider: d.adapter, config: { batchSize: 100, batchWaitMs: 10_000 } });
     await cloudfriend.post("myapp", {});
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches(Date.now() + 9_000);
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches(Date.now() + 9_000);
     await cloudfriend.worker.whenIdle();
     assert.equal(d.calls.length, 0);
-    cloudfriend.worker.startDueBatches(Date.now() + 10_001);
+    await cloudfriend.worker.startDueBatches(Date.now() + 10_001);
     await cloudfriend.worker.whenIdle();
     assert.equal(d.calls.length, 1);
   });
@@ -91,10 +93,11 @@ describe("decide stage", () => {
     const d = fakeDecider();
     cloudfriend = await makeCloudfriend({ decider: d.adapter, config: { batchSize: 3, deciderConcurrency: 4 } });
     await cloudfriend.post("myapp", Array.from({ length: 8 }, (_, i) => ({ i })));
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches(Date.now() + 60_000);
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches(Date.now() + 60_000);
     await cloudfriend.worker.whenIdle();
-    assert.deepEqual(d.calls.map((c) => c.length), [3, 3, 2]);
+    // The three calls run concurrently, so they may reach the decider in any order.
+    assert.deepEqual(d.calls.map((c) => c.length).sort((a, b) => b - a), [3, 3, 2]);
     const seen = d.calls.flat().map((e) => e.id);
     assert.equal(new Set(seen).size, 8, "no event is decided twice");
   });
@@ -103,8 +106,8 @@ describe("decide stage", () => {
     const d = fakeDecider();
     cloudfriend = await makeCloudfriend({ decider: d.adapter, config: { batchSize: 1 } });
     await cloudfriend.post("myapp", { msg: "hi" });
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
     const [e] = d.calls[0]!;
     assert.deepEqual(Object.keys(e!).sort(), ["data", "id", "received_at", "source"]);
@@ -115,16 +118,16 @@ describe("decide stage", () => {
     const act = fakeAction();
     cloudfriend = await makeCloudfriend({ decider: flagFirst.adapter, actions: { a: act.adapter, b: act.adapter }, config: { batchSize: 2 } });
     await cloudfriend.post("myapp", [{ n: 1 }, { n: 2 }]);
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
-    const flag = cloudfriend.db.prepare("SELECT * FROM flags").get() as any;
+    const [flag] = await rows(cloudfriend, "SELECT * FROM flags");
     assert.equal(flag.reason, "boom");
     assert.equal(flag.severity, "high");
     assert.equal(flag.decider, "test");
     assert.match(flag.id, /^flg_[0-9a-f]{20}$/);
-    assert.equal(JSON.parse(flag.event_ids).length, 1);
-    assert.equal(count(cloudfriend, "deliveries WHERE status = 'pending'"), 2);
+    assert.equal(flag.event_ids.length, 1);
+    assert.equal(await count(cloudfriend, "deliveries WHERE status = 'pending'"), 2);
   });
 
   it("ignores flags that point at events outside the batch", async () => {
@@ -134,11 +137,11 @@ describe("decide stage", () => {
     ]);
     cloudfriend = await makeCloudfriend({ decider: d.adapter, config: { batchSize: 1 } });
     await cloudfriend.post("myapp", {});
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
-    assert.equal(count(cloudfriend, "flags"), 0);
-    assert.equal(count(cloudfriend, "events WHERE decided = 1"), 1);
+    assert.equal(await count(cloudfriend, "flags"), 0);
+    assert.equal(await count(cloudfriend, "events WHERE decided"), 1);
   });
 
   it("keeps events queued when the decider fails, and retries after a backoff", async () => {
@@ -149,28 +152,28 @@ describe("decide stage", () => {
     });
     cloudfriend = await makeCloudfriend({ decider: d.adapter, config: { batchSize: 1 } });
     await cloudfriend.post("myapp", {});
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
-    assert.equal(count(cloudfriend, "events WHERE decided = 0"), 1);
+    assert.equal(await count(cloudfriend, "events WHERE NOT decided"), 1);
 
     fail = false;
-    cloudfriend.worker.startDueBatches(); // still backing off
+    await cloudfriend.worker.startDueBatches(); // still backing off
     await cloudfriend.worker.whenIdle();
     assert.equal(d.calls.length, 1);
-    cloudfriend.worker.startDueBatches(Date.now() + 1_500);
+    await cloudfriend.worker.startDueBatches(Date.now() + 1_500);
     await cloudfriend.worker.whenIdle();
     assert.equal(d.calls.length, 2);
-    assert.equal(count(cloudfriend, "events WHERE decided = 0"), 0);
+    assert.equal(await count(cloudfriend, "events WHERE NOT decided"), 0);
   });
 
   it("stores events without deciding when no decider is configured", async () => {
     cloudfriend = await makeCloudfriend({ decider: null, config: { batchSize: 1 } });
     assert.equal(cloudfriend.decider, null);
     await cloudfriend.post("myapp", {});
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches(Date.now() + 60_000);
-    assert.equal(count(cloudfriend, "events WHERE decided = 0"), 1);
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches(Date.now() + 60_000);
+    assert.equal(await count(cloudfriend, "events WHERE NOT decided"), 1);
   });
 });
 
@@ -178,10 +181,10 @@ describe("deliver stage", () => {
   async function flagged(actions: Record<string, any>) {
     cloudfriend = await makeCloudfriend({ decider: flagFirst.adapter, actions, config: { batchSize: 1 } });
     await cloudfriend.post("myapp", { msg: "x" });
-    cloudfriend.worker.parseNew();
-    cloudfriend.worker.startDueBatches();
+    await cloudfriend.worker.parseNew();
+    await cloudfriend.worker.startDueBatches();
     await cloudfriend.worker.whenIdle();
-    return (cloudfriend.db.prepare("SELECT id FROM flags").get() as any).id as string;
+    return (await rows(cloudfriend, "SELECT id FROM flags"))[0].id as string;
   }
 
   it("runs each action with the flag and its events, then marks it ok", async () => {
@@ -189,7 +192,7 @@ describe("deliver stage", () => {
     const flagId = await flagged({ slack: act.adapter });
     await cloudfriend.worker.deliverDue();
     assert.deepEqual(act.calls, [{ flagId, eventIds: ["1"] }]);
-    const d = cloudfriend.db.prepare("SELECT status, attempts FROM deliveries").get() as any;
+    const [d] = await rows(cloudfriend, "SELECT status, attempts FROM deliveries");
     assert.deepEqual({ ...d }, { status: "ok", attempts: 1 });
     await cloudfriend.worker.deliverDue();
     assert.equal(act.calls.length, 1, "an ok delivery is not repeated");
@@ -201,7 +204,7 @@ describe("deliver stage", () => {
     });
     await flagged({ slack: act.adapter });
     await cloudfriend.worker.deliverDue();
-    let d = cloudfriend.db.prepare("SELECT * FROM deliveries").get() as any;
+    let [d] = await rows(cloudfriend, "SELECT * FROM deliveries");
     assert.equal(d.status, "pending");
     assert.equal(d.attempts, 1);
     assert.equal(d.last_error, "slack down");
@@ -211,7 +214,7 @@ describe("deliver stage", () => {
     assert.equal(act.calls.length, 1, "not retried before the backoff");
 
     for (let i = 1; i < MAX_DELIVERY_ATTEMPTS; i++) await cloudfriend.worker.deliverDue(Date.now() + 10 * 3_600_000);
-    d = cloudfriend.db.prepare("SELECT * FROM deliveries").get() as any;
+    [d] = await rows(cloudfriend, "SELECT * FROM deliveries");
     assert.equal(d.status, "failed");
     assert.equal(d.attempts, MAX_DELIVERY_ATTEMPTS);
     assert.equal(act.calls.length, MAX_DELIVERY_ATTEMPTS);
@@ -221,7 +224,7 @@ describe("deliver stage", () => {
     const act = fakeAction(async () => false);
     await flagged({ hook: act.adapter });
     await cloudfriend.worker.deliverDue();
-    assert.equal((cloudfriend.db.prepare("SELECT last_error FROM deliveries").get() as any).last_error, "run() returned false");
+    assert.equal((await rows(cloudfriend, "SELECT last_error FROM deliveries"))[0].last_error, "run() returned false");
   });
 
   it("isolates actions: one failing does not block another", async () => {
@@ -231,18 +234,85 @@ describe("deliver stage", () => {
     });
     await flagged({ ok: ok.adapter, bad: bad.adapter });
     await cloudfriend.worker.deliverDue();
-    const rows = cloudfriend.db.prepare("SELECT action, status FROM deliveries ORDER BY action").all() as any[];
-    assert.deepEqual(rows.map((r) => [r.action, r.status]), [["bad", "pending"], ["ok", "ok"]]);
+    const ds = await rows(cloudfriend, "SELECT action, status FROM deliveries ORDER BY action");
+    assert.deepEqual(ds.map((r) => [r.action, r.status]), [["bad", "pending"], ["ok", "ok"]]);
+  });
+});
+
+describe("delivery claims", () => {
+  /** `n` flags, each with one due delivery to action `a`. */
+  async function dueDeliveries(cf: TestCloudfriend, n: number) {
+    await rows(cf, "INSERT INTO flags (id, workspace_id, created_at, reason, severity, event_ids, decider) SELECT 'flg_' || i, $1, $2, 'r', 'low', '[]', 'test' FROM generate_series(1, $3::int) i", WS, Date.now(), n);
+    await rows(cf, "INSERT INTO deliveries (flag_id, workspace_id, action, next_attempt_at, updated_at) SELECT id, $1, 'a', $2, $2 FROM flags", WS, Date.now());
+  }
+
+  it("runs each delivery once when two workers claim at the same time", async () => {
+    const slow = async () => void (await new Promise((r) => setTimeout(r, 5)));
+    const mine = fakeAction(slow);
+    const theirs = fakeAction(slow);
+    cloudfriend = await makeCloudfriend({ decider: null, actions: { a: mine.adapter } });
+    await dueDeliveries(cloudfriend, 120);
+    // A second process on the same database.
+    const other = await createCloudfriend(cloudfriend.config, {}, await testAdapters(null, { a: theirs.adapter }));
+    try {
+      for (let round = 0; round < 4; round++) await Promise.all([cloudfriend.worker.deliverDue(), other.worker.deliverDue()]);
+      const a = mine.calls.map((c) => c.flagId);
+      const b = theirs.calls.map((c) => c.flagId);
+      assert.ok(a.length && b.length, `both claimed some (${a.length} and ${b.length})`);
+      assert.equal(a.length + b.length, 120, "every delivery ran once");
+      assert.equal(new Set([...a, ...b]).size, 120, "and none twice");
+      assert.equal(await count(cloudfriend, "deliveries WHERE status = 'ok' AND attempts = 1"), 120);
+    } finally {
+      await other.close(0);
+    }
+  });
+
+  it("skips deliveries another claimer has locked instead of waiting for them", async () => {
+    cloudfriend = await makeCloudfriend({ decider: null, actions: { a: fakeAction().adapter } });
+    await dueDeliveries(cloudfriend, 4);
+    const holder = new pg.Client({ connectionString: cloudfriend.config.databaseUrl });
+    await holder.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM deliveries WHERE flag_id IN ('flg_1', 'flg_2') FOR UPDATE");
+      const claimed = await cloudfriend.worker.claimDeliveries();
+      assert.deepEqual(claimed.map((d) => d.flag_id).sort(), ["flg_3", "flg_4"]);
+      await holder.query("ROLLBACK");
+      const rest = await cloudfriend.worker.claimDeliveries();
+      assert.deepEqual(rest.map((d) => d.flag_id).sort(), ["flg_1", "flg_2"], "once released; the claimed ones are not due again");
+    } finally {
+      await holder.end();
+    }
+  });
+
+  it("hands a claim back when shutdown interrupts the delivery", async () => {
+    let started!: () => void;
+    const running = new Promise<void>((r) => (started = r));
+    const hang = fakeAction((_flag, ctx) => {
+      started();
+      return new Promise((_, reject) => ctx.signal.addEventListener("abort", () => reject(new Error("aborted"))));
+    });
+    cloudfriend = await makeCloudfriend({ decider: null, actions: { a: hang.adapter } });
+    await dueDeliveries(cloudfriend, 1);
+    const due = (await rows(cloudfriend, "SELECT next_attempt_at FROM deliveries"))[0].next_attempt_at;
+    cloudfriend.worker.start();
+    await running;
+    await cloudfriend.close(0);
+    const db = new pg.Client({ connectionString: cloudfriend.config.databaseUrl });
+    await db.connect();
+    const [d] = (await db.query("SELECT status, attempts, next_attempt_at::float8 AS due FROM deliveries")).rows;
+    await db.end();
+    assert.deepEqual({ ...d }, { status: "pending", attempts: 0, due }, "due again at once, not after the claim expires");
   });
 });
 
 describe("durability", () => {
   it("processes requests left 'new' by a crash when it starts again", async () => {
-    const config = testConfig({ decider: "test", batchSize: 2 });
+    const config = await testConfig({ decider: "test", batchSize: 2 });
     const first = await createCloudfriend(config, {}, await testAdapters(null));
-    first.db.prepare("INSERT INTO queue (source, received_at, body) VALUES ('myapp', ?, ?)").run(Date.now(), Buffer.from('{"n":1}'));
-    first.db.prepare("INSERT INTO queue (source, received_at, body) VALUES ('myapp', ?, ?)").run(Date.now(), Buffer.from('{"n":2}'));
-    first.db.close(); // simulate a crash: no worker ran, nothing marked done
+    await rows(first, "INSERT INTO queue (workspace_id, source, received_at, body) VALUES ($1, 'myapp', $2, $3)", WS, Date.now(), Buffer.from('{"n":1}'));
+    await rows(first, "INSERT INTO queue (workspace_id, source, received_at, body) VALUES ($1, 'myapp', $2, $3)", WS, Date.now(), Buffer.from('{"n":2}'));
+    await first.db.end(); // simulate a crash: no worker ran, nothing marked done
 
     const act = fakeAction();
     const second = await createCloudfriend(config, {}, await testAdapters(flagFirst.adapter, { a: act.adapter }));
@@ -251,14 +321,14 @@ describe("durability", () => {
       assert.equal(second.intake.backlog, 2);
       second.worker.start();
       await waitFor(() => act.calls.length === 1);
-      assert.equal((second.db.prepare("SELECT count(*) AS n FROM queue WHERE status = 'new'").get() as any).n, 0);
+      assert.equal(await count(second, "queue WHERE status = 'new'"), 0);
     } finally {
       await second.close(0);
     }
   });
 
   it("re-decides events whose decision was interrupted", async () => {
-    const config = testConfig({ decider: "test", batchSize: 1 });
+    const config = await testConfig({ decider: "test", batchSize: 1 });
     let release!: () => void;
     const hang = fakeDecider(() => new Promise((r) => (release = () => r([]))));
     const first = await createCloudfriend(config, {}, await testAdapters(hang.adapter));
@@ -267,8 +337,8 @@ describe("durability", () => {
       headers: { authorization: `Bearer ${first.bootSecret}` },
       body: "{}",
     });
-    first.worker.parseNew();
-    first.worker.startDueBatches();
+    await first.worker.parseNew();
+    await first.worker.startDueBatches();
     assert.equal(hang.calls.length, 1);
     await first.close(0); // shut down mid-decision
     release();
@@ -276,7 +346,7 @@ describe("durability", () => {
     const d = fakeDecider();
     const second = await createCloudfriend(config, {}, await testAdapters(d.adapter));
     try {
-      second.worker.startDueBatches();
+      await second.worker.startDueBatches();
       await second.worker.whenIdle();
       assert.equal(d.calls.length, 1);
     } finally {
@@ -305,29 +375,33 @@ describe("cleanup", () => {
   it("deletes processed requests and decided events past the window, keeps the rest", async () => {
     cloudfriend = await makeCloudfriend({ config: { retentionMs: 1_000, batchSize: 1 } });
     const old = Date.now() - 5_000;
-    const insert = cloudfriend.db.prepare("INSERT INTO queue (source, received_at, body, status) VALUES ('x', ?, ?, ?)");
-    insert.run(old, Buffer.from("{}"), "done");
-    insert.run(old, Buffer.from("{}"), "failed");
-    insert.run(old, Buffer.from("{}"), "new"); // never delete unprocessed requests
-    insert.run(Date.now(), Buffer.from("{}"), "done");
-    const ev = cloudfriend.db.prepare("INSERT INTO events (queue_id, source, received_at, data, decided) VALUES (0, 'x', ?, '{}', ?)");
-    ev.run(old, 1);
-    ev.run(old, 0); // undecided events wait for the decider
-    ev.run(Date.now(), 1);
-    cloudfriend.db.prepare("INSERT INTO flags (id, created_at, reason, severity, event_ids, decider) VALUES ('flg_1', ?, 'r', 'low', '[\"1\"]', 'test')").run(old);
+    const insert = (t: number, status: string) =>
+      rows(cloudfriend, "INSERT INTO queue (workspace_id, source, received_at, body, status) VALUES ($1, 'x', $2, $3, $4)", WS, t, Buffer.from("{}"), status);
+    await insert(old, "done");
+    await insert(old, "failed");
+    await insert(old, "new"); // never delete unprocessed requests
+    await insert(Date.now(), "done");
+    const ev = (t: number, decided: boolean) =>
+      rows(cloudfriend, "INSERT INTO events (workspace_id, queue_id, source, received_at, data, decided) VALUES ($1, 0, 'x', $2, '{}', $3)", WS, t, decided);
+    await ev(old, true);
+    await ev(old, false); // undecided events wait for the decider
+    await ev(Date.now(), true);
+    await rows(cloudfriend, "INSERT INTO flags (id, workspace_id, created_at, reason, severity, event_ids, decider) VALUES ('flg_1', $1, $2, 'r', 'low', '[\"1\"]', 'test')", WS, old);
 
     assert.deepEqual(await cloudfriend.worker.cleanup(), { queue: 2, events: 1 });
-    assert.equal(count(cloudfriend, "queue"), 2);
-    assert.equal(count(cloudfriend, "events"), 2);
-    assert.equal(count(cloudfriend, "flags"), 1, "flags are kept until deleted");
+    assert.equal(await count(cloudfriend, "queue"), 2);
+    assert.equal(await count(cloudfriend, "events"), 2);
+    assert.equal(await count(cloudfriend, "flags"), 1, "flags are kept until deleted");
   });
 
   it("deletes in chunks", async () => {
     cloudfriend = await makeCloudfriend({ config: { retentionMs: 1_000 } });
-    const insert = cloudfriend.db.prepare("INSERT INTO queue (source, received_at, body, status) VALUES ('x', ?, x'', 'done')");
-    cloudfriend.db.exec("BEGIN");
-    for (let i = 0; i < 2_500; i++) insert.run(Date.now() - 5_000);
-    cloudfriend.db.exec("COMMIT");
+    await rows(
+      cloudfriend,
+      "INSERT INTO queue (workspace_id, source, received_at, body, status) SELECT $1, 'x', $2, '', 'done' FROM generate_series(1, 2500)",
+      WS,
+      Date.now() - 5_000,
+    );
     assert.deepEqual(await cloudfriend.worker.cleanup(), { queue: 2_500, events: 0 });
   });
 });

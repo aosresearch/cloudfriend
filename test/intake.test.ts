@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
-import { ADMIN, count, makeCloudfriend, type TestCloudfriend } from "./helpers.ts";
+import { spawn } from "node:child_process";
+import pg from "pg";
+import { ADMIN, count, makeCloudfriend, tempDir, waitFor, type TestCloudfriend } from "./helpers.ts";
+import { freshDatabase } from "./pg.ts";
 
 let cloudfriend: TestCloudfriend;
 afterEach(async () => {
@@ -14,7 +17,11 @@ describe("ingest", () => {
     const res = await cloudfriend.post("myapp", '{"level":"error"}');
     assert.equal(res.status, 202);
     assert.equal(await res.text(), "accepted");
-    const row = cloudfriend.db.prepare("SELECT source, body, status FROM queue").get() as any;
+    // Read on a connection of its own: committed, not just written inside a transaction.
+    const other = new pg.Client({ connectionString: cloudfriend.config.databaseUrl });
+    await other.connect();
+    const row = (await other.query("SELECT source, body, status FROM queue")).rows[0];
+    await other.end();
     assert.equal(row.source, "myapp");
     assert.equal(Buffer.from(row.body).toString(), '{"level":"error"}');
     assert.equal(row.status, "new");
@@ -24,28 +31,23 @@ describe("ingest", () => {
     cloudfriend = await makeCloudfriend();
     const res = await cloudfriend.post("myapp", "not json at all {");
     assert.equal(res.status, 202);
-    assert.equal(count(cloudfriend, "queue"), 1);
+    assert.equal(await count(cloudfriend, "queue"), 1);
   });
 
   it("group-commits concurrent requests in one transaction", async () => {
     cloudfriend = await makeCloudfriend({ config: { commitWindowMs: 20 } });
-    let transactions = 0;
-    const exec = cloudfriend.db.exec.bind(cloudfriend.db);
-    cloudfriend.db.exec = (sql: string) => {
-      if (sql === "BEGIN IMMEDIATE") transactions++;
-      return exec(sql);
-    };
     const results = await Promise.all(Array.from({ length: 50 }, (_, i) => cloudfriend.post("myapp", { i })));
     assert.ok(results.every((r) => r.status === 202));
-    assert.equal(count(cloudfriend, "queue"), 50);
-    assert.equal(transactions, 1);
+    assert.equal(await count(cloudfriend, "queue"), 50);
+    // xmin is the id of the transaction that wrote the row: one commit for all 50.
+    assert.equal(await count(cloudfriend, "(SELECT DISTINCT xmin::text FROM queue) t"), 1);
   });
 
   it("records when a secret was last used", async () => {
     cloudfriend = await makeCloudfriend();
-    assert.equal(cloudfriend.secrets.list()[0]!.last_used_at, null);
+    assert.equal((await cloudfriend.secrets.list())[0]!.last_used_at, null);
     await cloudfriend.post("myapp", {});
-    assert.ok(cloudfriend.secrets.list()[0]!.last_used_at);
+    assert.ok((await cloudfriend.secrets.list())[0]!.last_used_at);
   });
 
   it("accepts the secret as a ?secret= query parameter for senders that can't set headers", async () => {
@@ -58,10 +60,10 @@ describe("ingest", () => {
     cloudfriend = await makeCloudfriend();
     assert.equal((await cloudfriend.app.request("/in/myapp", { method: "POST", body: "{}" })).status, 401);
     assert.equal((await cloudfriend.post("myapp", {}, { authorization: "Bearer cloudfriend_wrong" })).status, 401);
-    const id = cloudfriend.secrets.list()[0]!.id;
-    cloudfriend.secrets.revoke(id);
+    const id = (await cloudfriend.secrets.list())[0]!.id;
+    await cloudfriend.secrets.revoke(id);
     assert.equal((await cloudfriend.post("myapp", {})).status, 401);
-    assert.equal(count(cloudfriend, "queue"), 0);
+    assert.equal(await count(cloudfriend, "queue"), 0);
   });
 
   it("never accepts the admin key for sending events", async () => {
@@ -71,7 +73,7 @@ describe("ingest", () => {
 
   it("limits a source-scoped secret to its source", async () => {
     cloudfriend = await makeCloudfriend();
-    const scoped = cloudfriend.secrets.create("sentry-prod", "sentry").secret;
+    const scoped = (await cloudfriend.secrets.create("sentry-prod", "sentry")).secret;
     const auth = { authorization: `Bearer ${scoped}` };
     assert.equal((await cloudfriend.post("sentry", {}, auth)).status, 202);
     assert.equal((await cloudfriend.post("posthog", {}, auth)).status, 401);
@@ -95,13 +97,13 @@ describe("ingest", () => {
     const res = await cloudfriend.post("myapp", {});
     assert.equal(res.status, 503);
     assert.equal(res.headers.get("retry-after"), "5");
-    cloudfriend.worker.parseNew(); // draining the queue makes room again
+    await cloudfriend.worker.parseNew(); // draining the queue makes room again
     assert.equal((await cloudfriend.post("myapp", {})).status, 202);
   });
 
   it("replies 503 when the write fails, so the sender retries", async () => {
     cloudfriend = await makeCloudfriend();
-    cloudfriend.db.exec("DROP TABLE queue");
+    await cloudfriend.db.query("DROP TABLE queue");
     const res = await cloudfriend.post("myapp", {});
     assert.equal(res.status, 503);
   });
@@ -125,5 +127,67 @@ describe("ingest", () => {
     await cloudfriend.post("myapp", {});
     const res = await cloudfriend.app.request("/healthz");
     assert.deepEqual(await res.json(), { ok: true, queued: 1 });
+  });
+});
+
+describe("crash safety", () => {
+  it("commits a batch whole or not at all, and answers every request in it accordingly", async () => {
+    cloudfriend = await makeCloudfriend({ config: { commitWindowMs: 20 } });
+    // A row the database refuses fails the commit it is in.
+    await cloudfriend.db.query(`CREATE FUNCTION reject_poison() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF convert_from(NEW.body, 'UTF8') LIKE '%poison%' THEN RAISE EXCEPTION 'poison'; END IF; RETURN NEW; END $$`);
+    await cloudfriend.db.query("CREATE TRIGGER reject_poison BEFORE INSERT ON queue FOR EACH ROW EXECUTE FUNCTION reject_poison()");
+    const results = await Promise.all([...Array.from({ length: 9 }, (_, i) => cloudfriend.post("myapp", { i })), cloudfriend.post("myapp", { poison: true })]);
+    assert.deepEqual(results.map((r) => r.status), Array(10).fill(503), "no request is acknowledged for a commit that failed");
+    assert.equal(await count(cloudfriend, "queue"), 0, "and none of the batch is stored");
+    assert.equal(cloudfriend.intake.backlog, 0);
+    assert.equal((await cloudfriend.post("myapp", { i: 10 })).status, 202, "the next commit goes through");
+    assert.equal(await count(cloudfriend, "queue"), 1);
+  });
+
+  it("loses no acknowledged request when the process is killed mid-stream", async () => {
+    const url = await freshDatabase();
+    const port = 19000 + Math.floor(Math.random() * 1000);
+    let logs = "";
+    const proc = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "src/main.ts"], {
+      env: { PATH: process.env.PATH, PORT: String(port), HOST: "127.0.0.1", CLOUDFRIEND_DATABASE_URL: url, CLOUDFRIEND_DATA_DIR: tempDir(), CLOUDFRIEND_POLL_INTERVAL: "5ms" },
+    });
+    proc.stdout!.on("data", (d) => (logs += d));
+    proc.stderr!.on("data", (d) => (logs += d));
+    const exited = new Promise((r) => proc.once("exit", r));
+    try {
+      await waitFor(() => logs.includes("cloudfriend listening"), 15_000);
+      const secret = /cloudfriend_[A-Za-z0-9_-]{43}/.exec(logs)![0];
+      const accepted: number[] = [];
+      let next = 0;
+      let killed = false;
+      // 20 senders, each posting one request after another until the process dies.
+      const sender = async () => {
+        while (!killed) {
+          const n = next++;
+          try {
+            const res = await fetch(`http://127.0.0.1:${port}/in/myapp`, { method: "POST", headers: { authorization: `Bearer ${secret}` }, body: JSON.stringify({ n }) });
+            if (res.status === 202) accepted.push(n);
+          } catch {
+            return; // connection refused or reset: the process is gone
+          }
+        }
+      };
+      const senders = Array.from({ length: 20 }, sender);
+      await waitFor(() => accepted.length >= 300, 15_000);
+      proc.kill("SIGKILL");
+      killed = true;
+      await Promise.all(senders);
+      await exited;
+
+      const db = new pg.Client({ connectionString: url });
+      await db.connect();
+      const stored = new Set((await db.query("SELECT body FROM queue")).rows.map((r) => JSON.parse(String(r.body)).n as number));
+      await db.end();
+      const lost = accepted.filter((n) => !stored.has(n));
+      assert.deepEqual(lost, [], `${lost.length} of ${accepted.length} acknowledged requests are missing`);
+    } finally {
+      proc.kill("SIGKILL");
+    }
   });
 });
