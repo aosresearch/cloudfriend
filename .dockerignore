@@ -1,6 +1,19 @@
-node_modules
-data
-test
-*.db*
+# The Dockerfile copies package*.json, bin, models, regression, ml/train.py and src.
+# Everything else stays out of the build context, secrets in .env above all.
+**/node_modules
 .git
+.claude
+.env
+.env.*
+data
 docs
+design
+benchmarks
+test
+ml/*
+!ml/train.py
+src/ui/dev
+**/__pycache__
+**/.DS_Store
+**/*.md
+docker-compose*.yml
