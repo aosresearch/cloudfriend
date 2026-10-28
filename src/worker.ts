@@ -1004,13 +1004,22 @@ export class Worker {
     if (!adapter) {
       attempts = MAX_DELIVERY_ATTEMPTS - 1; // no point retrying
     } else {
+      // last_error is shown to the workspace's members: a database error's text stays in the log.
+      let events: CloudfriendEvent[] | null = null;
       try {
-        const events = await eventsByIds(this.#db, ws, flag.event_ids);
-        const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(DELIVERY_TIMEOUT_MS)]);
-        const ok = await adapter.run(flag, { events, env: this.#o.env, signal, ...(dest ? { config: dest.config ?? {} } : {}) });
-        if (ok === false) error = "run() returned false";
+        events = await eventsByIds(this.#db, ws, flag.event_ids);
       } catch (err) {
-        error = errMsg(err);
+        log.error("loading a flag's events for delivery failed", { workspace: ws, flag: flagId, action, error: errMsg(err) });
+        error = "internal error loading the flag's events";
+      }
+      if (events) {
+        try {
+          const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(DELIVERY_TIMEOUT_MS)]);
+          const ok = await adapter.run(flag, { events, env: this.#o.env, signal, ...(dest ? { config: dest.config ?? {} } : {}) });
+          if (ok === false) error = "run() returned false";
+        } catch (err) {
+          error = errMsg(err);
+        }
       }
     }
     // Where: still ours. Claims expire, and an expired one may have been taken by another worker.

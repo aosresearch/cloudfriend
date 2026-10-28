@@ -227,6 +227,22 @@ describe("deliver stage", () => {
     assert.equal((await rows(cloudfriend, "SELECT last_error FROM deliveries"))[0].last_error, "run() returned false");
   });
 
+  it("keeps a database error's text out of the error members see, and retries", async (t) => {
+    const act = fakeAction();
+    await flagged({ hook: act.adapter });
+    const db = cloudfriend.db;
+    const query = db.query.bind(db) as (...a: unknown[]) => unknown;
+    t.mock.method(db, "query", (...args: unknown[]) => {
+      if (typeof args[0] === "string" && args[0].includes("AND id = ANY($2::bigint[]) ORDER BY id")) return Promise.reject(new Error('relation "events" is on fire at 10.0.0.7'));
+      return query(...args);
+    });
+    await cloudfriend.worker.deliverDue();
+    t.mock.restoreAll();
+    const [d] = await rows(cloudfriend, "SELECT status, attempts, last_error FROM deliveries");
+    assert.deepEqual({ ...d }, { status: "pending", attempts: 1, last_error: "internal error loading the flag's events" });
+    assert.equal(act.calls.length, 0);
+  });
+
   it("isolates actions: one failing does not block another", async () => {
     const ok = fakeAction();
     const bad = fakeAction(async () => {
