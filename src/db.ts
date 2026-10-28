@@ -38,6 +38,10 @@ export async function openDb(url: string, opts: OpenOptions = {}): Promise<DB> {
   // An idle client can lose its connection (a restarted server, a dropped socket). Without a
   // listener that is an unhandled 'error' event and kills the process; the pool replaces it.
   db.on("error", (err) => log.warn("idle database connection failed", { error: errMsg(err) }));
+  // The pool listens only while a client is idle. One that is checked out (a transaction between
+  // two queries) would crash the process the same way; its next query fails instead, and the
+  // caller sees that.
+  db.on("connect", (client) => client.on("error", (err) => log.debug("database connection lost", { error: errMsg(err) })));
   try {
     await migrate(db);
     await db.query("INSERT INTO workspaces (id, name, created_at) VALUES ($1, 'default', $2) ON CONFLICT (id) DO NOTHING", [DEFAULT_WORKSPACE, Date.now()]);

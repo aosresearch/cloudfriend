@@ -56,6 +56,30 @@ describe("database", () => {
     }
   });
 
+  // As when Postgres restarts (`docker compose restart` stops both containers at once) while a
+  // transaction is between two queries: the connection drops under a checked-out client.
+  it("survives losing the connection of a client that is checked out", async () => {
+    const db = await openDb(await freshDatabase());
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => uncaught.push(err);
+    process.on("uncaughtException", onUncaught);
+    try {
+      await assert.rejects(
+        tx(db, async (c) => {
+          const pid = (await c.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+          await db.query("SELECT pg_terminate_backend($1)", [pid]);
+          await new Promise((r) => setTimeout(r, 200)); // the 'error' event arrives in between
+          await c.query("SELECT 1");
+        }),
+      );
+      assert.deepEqual(uncaught, []);
+      assert.equal((await db.query("SELECT 1 AS one")).rows[0].one, 1, "the pool still works");
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      await db.end();
+    }
+  });
+
   it("fails fast without a database URL", () => {
     assert.throws(() => loadConfig({}), /CLOUDFRIEND_DATABASE_URL is not set/);
     assert.equal(loadConfig({ DATABASE_URL: "postgres://x" }).databaseUrl, "postgres://x");
