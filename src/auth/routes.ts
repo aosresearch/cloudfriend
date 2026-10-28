@@ -227,7 +227,7 @@ export function registerAuthRoutes(app: Hono<any>, deps: AuthDeps): Auth {
 
   // --- OIDC ----------------------------------------------------------------------------
 
-  const fail = (c: Context, code: "sso_failed" | "sso_denied") => c.redirect(`${home}?auth_error=${code}`, 302);
+  const fail = (c: Context, code: "sso_failed" | "sso_denied" | "sso_unverified") => c.redirect(`${home}?auth_error=${code}`, 302);
 
   app.get("/auth/oidc/login", async (c) => {
     if (!auth.oidc) return c.json({ error: "SSO is not configured" }, 404);
@@ -274,9 +274,9 @@ export function registerAuthRoutes(app: Hono<any>, deps: AuthDeps): Auth {
     }
 
     const user = await userForClaims(store, claims, now());
-    if (typeof user === "string") {
-      log.warn("oidc: sign-in denied", { reason: user, issuer: claims.issuer, sub: claims.subject });
-      return fail(c, "sso_denied");
+    if ("denied" in user) {
+      log.warn("oidc: sign-in denied", { reason: user.denied, issuer: claims.issuer, sub: claims.subject });
+      return fail(c, user.code);
     }
     await auth.sessions.destroy(getCookie(c, SESSION_COOKIE));
     const { token } = await auth.sessions.create(user.id);
@@ -302,20 +302,29 @@ function readTx(raw: string | undefined, now: number): OidcTransaction | null {
 }
 
 /**
- * Finds or provisions the user for a verified ID token. Matching is by (issuer, sub) only. A new identity is
- * linked to an existing account with the same email only when the provider says the email is verified;
- * otherwise sign-in is refused (returns the reason) rather than creating a second account or taking one over.
+ * Finds or provisions the user for a verified ID token. Matching is by (issuer, sub) only. A new identity
+ * (first sign-in) needs an email the provider verified, whether it creates an account or links to an
+ * existing one with that email; otherwise sign-in is refused (returns the reason).
+ *
+ * Why creation needs it too: an account's email is what later verified sign-ins (and the bootstrap admin)
+ * link to. If an unverified identity could create the account for victim@example.com, the real owner's
+ * verified sign-in would later be linked to the attacker's account (pre-account hijack). So every account's
+ * email comes from a verified source: an admin (password) or a provider that verified it.
  */
-async function userForClaims(store: AuthStore, claims: OidcClaims, now: number): Promise<UserRecord | string> {
+async function userForClaims(
+  store: AuthStore,
+  claims: OidcClaims,
+  now: number,
+): Promise<UserRecord | { denied: string; code: "sso_denied" | "sso_unverified" }> {
   const linked = await store.findUserByIdentity(claims.issuer, claims.subject);
   if (linked) return linked;
-  if (!claims.email) return "the provider returned no email address (request the email scope)";
+  if (!claims.email) return { denied: "the provider returned no email address (request the email scope)", code: "sso_denied" };
+  if (!claims.emailVerified) return { denied: `the provider did not verify the email ${claims.email}`, code: "sso_unverified" };
   const identity = { issuer: claims.issuer, subject: claims.subject, email: claims.email, created_at: new Date(now) };
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const existing = await store.getUserByEmail(claims.email);
     if (existing) {
-      if (!claims.emailVerified) return `email ${claims.email} belongs to an existing account and the provider did not verify it`;
       try {
         await store.addIdentity({ ...identity, user_id: existing.id });
       } catch (err) {
@@ -337,5 +346,5 @@ async function userForClaims(store: AuthStore, claims: OidcClaims, now: number):
       // Someone created this email concurrently: loop once to link instead.
     }
   }
-  return "could not provision the user";
+  return { denied: "could not provision the user", code: "sso_denied" };
 }

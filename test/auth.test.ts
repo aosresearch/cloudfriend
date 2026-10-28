@@ -402,6 +402,18 @@ describe("bootstrap admin", () => {
     assert.equal((await t.login("root@example.com", "second password 456")).status, 200);
   });
 
+  it("refuses to make an account created by SSO sign-in the env admin", async () => {
+    const t = await setup();
+    // An SSO-only account (no password). Adopting it would give its linked identities the admin's password
+    // and, at boot, the default workspace.
+    await t.store.createUser({ id: "usr_sso", email: "boss@example.com", name: null, password_hash: null, created_at: new Date() });
+    await assert.rejects(
+      ensureBootstrapAdmin(t.store, loadAuthConfig({ CLOUDFRIEND_ADMIN_EMAIL: "boss@example.com", CLOUDFRIEND_ADMIN_PASSWORD: "a brand new password" })),
+      (err: Error) => err instanceof AuthConfigError && /created by SSO sign-in/.test(err.message),
+    );
+    assert.equal((await t.store.getUserById("usr_sso"))!.password_hash, null);
+  });
+
   it("sets a password on an existing user named by the env", async () => {
     const t = await setup();
     const res = await ensureBootstrapAdmin(t.store, loadAuthConfig({ CLOUDFRIEND_ADMIN_EMAIL: t.user.email, CLOUDFRIEND_ADMIN_PASSWORD: "a brand new password" }));

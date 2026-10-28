@@ -97,7 +97,7 @@ Set `CLOUDFRIEND_OIDC_ISSUER`, `CLOUDFRIEND_OIDC_CLIENT_ID`, `CLOUDFRIEND_OIDC_C
 - **Auth0:** create a *Regular Web Application*, add the redirect URI under *Allowed Callback URLs*, and use `https://<tenant>.auth0.com/` (with the trailing slash) as the issuer.
 - **Google:** create an *OAuth client ID* of type *Web application* in Google Cloud, add the redirect URI under *Authorized redirect URIs*, and use `https://accounts.google.com` as the issuer. Set `CLOUDFRIEND_OIDC_ALLOWED_DOMAINS=yourcompany.com`, or any Google account can sign in.
 
-People are matched by the provider's subject id, not by email. The first sign-in creates the account; it is linked to an existing account with the same email only when the provider says the email is verified. New accounts are members of no workspace until they create one.
+People are matched by the provider's subject id, not by email. A first sign-in needs an email the provider says is verified (`email_verified`): it creates the account, or links to an existing account with the same email. Without it, sign-in is refused (`?auth_error=sso_unverified`, and a warning in the logs), so nobody can claim an address for someone else's later sign-in. New accounts are members of no workspace until they create one. `CLOUDFRIEND_ADMIN_EMAIL` can't name an account created by SSO sign-in: boot fails with a message saying so.
 
 ## How it works
 

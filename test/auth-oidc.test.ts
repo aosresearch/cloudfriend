@@ -107,7 +107,7 @@ describe("OIDC sign-in", () => {
 
     // Same email but another subject is a different identity, and not verified: refused, not merged.
     idp.next = { sub: "auth0|other", email: "jo@example.com", email_verified: false };
-    failedWith(await t.signIn(), "sso_denied");
+    failedWith(await t.signIn(), "sso_unverified");
     assert.equal(t.store.users.size, 1);
   });
 
@@ -177,7 +177,7 @@ describe("OIDC sign-in", () => {
     await t.store.createUser({ id: "usr_admin", email: "jo@example.com", name: "Jo", password_hash: await hashPassword("password password"), created_at: new Date() });
 
     idp.next = { sub: "s1", email_verified: false };
-    failedWith(await t.signIn(), "sso_denied");
+    failedWith(await t.signIn(), "sso_unverified");
     assert.equal(t.store.identities.size, 0);
 
     idp.next = { sub: "s1", email_verified: true };
@@ -185,6 +185,26 @@ describe("OIDC sign-in", () => {
     assert.equal((await t.me(t.session(ok)!)).user.id, "usr_admin");
     assert.equal(t.store.users.size, 1);
     assert.equal(t.store.identities.size, 1);
+  });
+
+  it("refuses a first sign-in with an unverified email, so it can't claim the address for a later verified sign-in", async () => {
+    const t = setup();
+    // Pre-account hijack: an unverified identity must not create the account for victim@example.com
+    // that the victim's verified identity would later be linked to.
+    idp.next = { sub: "attacker-sub", email: "victim@example.com", email_verified: false };
+    failedWith(await t.signIn(), "sso_unverified");
+    assert.equal(t.store.users.size, 0);
+    assert.equal(t.store.identities.size, 0);
+
+    idp.next = { sub: "victim-sub", email: "victim@example.com", email_verified: true };
+    const victim = await t.signIn();
+    const me = await t.me(t.session(victim)!);
+    assert.equal(me.user.email, "victim@example.com");
+    assert.deepEqual([...t.store.identities.values()].map((i) => [i.subject, i.user_id]), [["victim-sub", me.user.id]]);
+
+    // An identity that is already linked keeps signing in, whatever the provider now says about the email.
+    idp.next = { sub: "victim-sub", email: "victim@example.com", email_verified: false };
+    assert.equal((await t.me(t.session(await t.signIn())!)).user.id, me.user.id);
   });
 
   it("turns a provider error on the callback into a failed sign-in", async () => {
