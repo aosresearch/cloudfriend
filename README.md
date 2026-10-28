@@ -22,18 +22,74 @@ Try it: [cloudfriend.dev/demo](https://cloudfriend.dev/demo) replays real incide
 
 ## Quick start
 
-cloudfriend needs a Postgres database (tested with Postgres 14) that its user can create tables in. It creates its schema on first boot and migrates it on later ones.
+cloudfriend ships with a Docker Compose file that runs it next to its own Postgres. From a checkout of this repository:
 
 ```bash
-docker run -p 8080:8080 -v cloudfriend-models:/data \
-  -e CLOUDFRIEND_DATABASE_URL=postgres://cloudfriend:secret@db.internal:5432/cloudfriend \
-  -e CLOUDFRIEND_ADMIN_KEY=change-me \
-  -e JEV_API_KEY=sk-or-... \
-  -e SLACK_WEBHOOK_URL=https://hooks.slack.com/... \
-  ghcr.io/aosresearch/cloudfriend
+cp .env.example .env
+# In .env, set POSTGRES_PASSWORD (e.g. the output of `openssl rand -hex 24`)
+# and JEV_API_KEY to an OpenRouter key. Without a key, the classifier decides alone.
+docker compose up -d
+docker compose logs cloudfriend
 ```
 
-On first boot cloudfriend creates an ingest secret and prints it to the logs once:
+The first `up` builds the image from the checkout and starts Postgres, then cloudfriend once Postgres is healthy. On first boot cloudfriend creates the dashboard admin and prints its password once, unless `.env` sets `CLOUDFRIEND_ADMIN_EMAIL` and `CLOUDFRIEND_ADMIN_PASSWORD`, in which case that account is used:
+
+```
+========================================================================
+First boot: created a dashboard admin. The password is shown only once:
+
+  email:     admin@localhost
+  password:  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+...
+```
+
+Open `http://localhost:8080`, sign in, and follow the setup checklist:
+
+1. **Connect a source.** It gets an endpoint and a secret, and the page shows a `curl` command that sends it an event.
+2. **Add a destination**, a Slack incoming webhook or your own webhook, and send it a test message.
+3. **Send a test exception.** It goes through the same path as real events (stored, scored, routed, judged by Jev), and the page follows it into the queue.
+
+The queue, the flag's detail, events and usage are in the dashboard's menu. Every setting is described in [Configuration](#configuration) and in [`.env.example`](.env.example); change `.env`, then run `docker compose up -d` again to apply it.
+
+Data lives in two named volumes: `postgres` (the database: events, flags, labels, secrets, accounts) and `models` (trained model files). `docker compose down` keeps them; `docker compose down -v` deletes them. Postgres is not published to the host.
+
+| | |
+| --- | --- |
+| Upgrade | `git pull && docker compose up -d --build`, or with the published image `docker compose pull && docker compose up -d` (`CLOUDFRIEND_VERSION` picks the tag of `ghcr.io/aosresearch/cloudfriend`). Migrations run at boot. |
+| Back up | `docker compose exec postgres pg_dump -U cloudfriend cloudfriend > cloudfriend.sql` |
+| CLI | `docker compose exec cloudfriend cloudfriend secrets list` (see [Secrets](#secrets)) |
+| Restart the app | `docker compose restart cloudfriend`. Restarting Postgres at the same time (`docker compose restart`) keeps the app from releasing its hold on the workspaces, so events wait up to `CLOUDFRIEND_LEASE_TTL` (30 s) before they are processed again. |
+
+Put cloudfriend behind TLS and set `CLOUDFRIEND_PUBLIC_URL` to its https address; Sentry, PostHog and most SaaS webhooks need https. With a reverse proxy on the same host, set `CLOUDFRIEND_PORT=127.0.0.1:8080` so the plain HTTP port is not reachable from outside.
+
+### Separate web and worker processes
+
+The same image runs as HTTP and intake only (`CLOUDFRIEND_ROLE=web`) or as a worker only (`CLOUDFRIEND_ROLE=worker`), on one database. To run them apart with Compose, add to `.env`:
+
+```bash
+CLOUDFRIEND_ROLE=web
+COMPOSE_PROFILES=split
+```
+
+Then `docker compose up -d` runs the `cloudfriend` service as the web process and a `worker` service next to it; `docker compose up -d --scale worker=3` runs three. Each workspace is processed by one worker at a time, under a lease; when a worker dies, another takes its workspaces over once the lease runs out (`CLOUDFRIEND_LEASE_TTL`). On first boot the admin password is printed by whichever process creates the admin first, so read it with `docker compose logs`.
+
+### With your own Postgres
+
+cloudfriend needs a Postgres database (tested with Postgres 14 and 17) that its user can create tables in. It creates its schema on first boot and migrates it on later ones.
+
+```bash
+docker run -d --name cloudfriend -p 8080:8080 -v cloudfriend-models:/data \
+  -e CLOUDFRIEND_DATABASE_URL=postgres://cloudfriend:secret@db.internal:5432/cloudfriend \
+  -e JEV_API_KEY=sk-or-... \
+  ghcr.io/aosresearch/cloudfriend
+docker logs cloudfriend
+```
+
+The first boot prints the admin password as above. To build the image yourself, run `docker build -t cloudfriend .`.
+
+### Sending events without the dashboard
+
+The first boot also creates an ingest secret for the default workspace and prints it once:
 
 ```
 ========================================================================
@@ -43,7 +99,7 @@ First boot: created an ingest secret named 'default'. It is shown only once:
 ...
 ```
 
-Send an event:
+It works on any `/in/<name>`:
 
 ```bash
 curl -X POST http://localhost:8080/in/myapp \
@@ -52,16 +108,12 @@ curl -X POST http://localhost:8080/in/myapp \
 # accepted (202)
 ```
 
-The classifier scores the event at once. If it might matter, it goes to Jev within about 10 seconds. If Jev escalates it, a flag is posted to Slack and appears in `GET /queue`.
-
-Open `http://localhost:8080` for the dashboard. Without `CLOUDFRIEND_ADMIN_EMAIL` and `CLOUDFRIEND_ADMIN_PASSWORD`, the first boot also prints a generated password for `admin@localhost`; see [Dashboard and sign-in](#dashboard-and-sign-in).
-
-To build the image yourself, run `docker build -t cloudfriend .`.
+The classifier scores the event at once. If it might matter, it goes to Jev within about 10 seconds. If Jev escalates it, the flag goes to the workspace's destinations and appears in the queue.
 
 ### Point Sentry at it
 
-1. Create a secret for Sentry: `docker exec <container> cloudfriend secrets create sentry-prod --source sentry`.
-2. In Sentry, go to **Settings → Developer Settings → Custom Integrations → New Internal Integration**. Set the webhook URL to `https://<your-host>/in/sentry?secret=<secret>`, turn on **Alert Rule Action**, and subscribe to the **issue** and **error** webhooks you want.
+1. In the dashboard, create a source of kind `sentry` and copy its secret. Or create a secret with the CLI: `docker compose exec cloudfriend cloudfriend secrets create sentry-prod --source sentry`.
+2. In Sentry, go to **Settings → Developer Settings → Custom Integrations → New Internal Integration**. Set the webhook URL to the source's endpoint with the secret added, `https://<your-host>/in/<source id>?secret=<secret>` (`/in/sentry?secret=<secret>` for a CLI secret), turn on **Alert Rule Action**, and subscribe to the **issue** and **error** webhooks you want.
 3. Optionally set `SENTRY_CLIENT_SECRET` to the integration's client secret. cloudfriend then also checks the `Sentry-Hook-Signature` header.
 
 The legacy **WebHooks** alert plugin works too: use the same URL.
@@ -430,7 +482,7 @@ cloudfriend needs Node 22.18 or later and a Postgres database. It runs the TypeS
 npm install
 CLOUDFRIEND_DATABASE_URL=postgres://localhost/cloudfriend npm run dev   # restarts on change
 npm test             # unit tests, plus an end-to-end run with mock OpenRouter and Slack
-npm run test:docker  # builds the image and tests it in Docker (needs a running Docker daemon)
+npm run test:docker  # builds the image and tests docker-compose.yml (needs a running Docker daemon)
 npm run typecheck
 npm run cloudfriend -- secrets list
 python3 -m pip install lightgbm numpy  # only for training; see ml/README.md
@@ -438,17 +490,19 @@ python3 -m pip install lightgbm numpy  # only for training; see ml/README.md
 
 `npm test` needs no Docker. With `TEST_DATABASE_URL` set, it uses that server (its user needs `CREATEDB`). Otherwise it starts a throwaway Postgres cluster from the local binaries (`initdb` and `pg_ctl`, from Homebrew or `PG_BIN`) in a temporary directory on a free port, and removes it afterwards. Every test gets a fresh database.
 
-`npm run test:docker` runs the image against a mock OpenRouter and Slack on the host. It has not been updated for Postgres yet (it starts the container without a database), so it fails until it is. It checks that:
+`npm run test:docker` builds the image and runs `docker-compose.yml` the way the Quick start does (a `.env` made from `.env.example`, `docker compose up -d`), under unique project names, against a mock OpenRouter and a mock webhook receiver on the host. It removes the containers, networks and volumes it creates. It checks that:
 
-- the container runs as a non-root user and reports healthy
-- the first-boot secret appears in `docker logs`
-- a Sentry webhook becomes a flag in Slack
-- the CLI works through `docker exec`
-- data survives `docker restart` and container replacement
+- Postgres and the app come up healthy, the app as a non-root user, and Postgres is not published to the host
+- the first boot prints an admin password once, and it signs in and sees the default workspace
+- a Sentry webhook sent to a dashboard source becomes a flag at a webhook destination and in the queue, with Jev's judgment on the event
+- the setup page's test exception goes through to a decided event
+- data and sessions survive `docker compose restart` and replaced containers (`down`, then `up`)
 - no accepted event is lost to a `SIGKILL` while requests are still unparsed
-- `docker stop` exits 0 promptly
+- the app restarts by itself when its process dies, and keeps running through a Postgres restart
+- `docker compose stop` exits 0 promptly
+- with `CLOUDFRIEND_ROLE=web` and `COMPOSE_PROFILES=split`, web and worker process events end to end, and a new worker takes over from a killed one once its lease runs out
 
-To test an existing image instead of building one, set `CLOUDFRIEND_IMAGE=ghcr.io/aosresearch/cloudfriend:tag`.
+To test an existing image instead of building one, set `CLOUDFRIEND_IMAGE=ghcr.io/aosresearch/cloudfriend:tag`. It needs Compose v2.24 or later; `TRACE_DOCKER=1` prints each docker command with its duration.
 
 ## Benchmarks
 
