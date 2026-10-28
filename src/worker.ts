@@ -4,7 +4,7 @@ import { setImmediate as yieldToLoop } from "node:timers/promises";
 import type pg from "pg";
 import { all, DEFAULT_WORKSPACE, one, pgText, run, tx, type DB, type Queryable } from "./db.ts";
 import type { Intake } from "./intake.ts";
-import { LeaseLost, Leases, type Held } from "./leases.ts";
+import { DB_NOW, LeaseLost, Leases, type Held } from "./leases.ts";
 import { errMsg, log } from "./log.ts";
 import { EVENT_COLUMNS, eventsByIds, FLAG_COLUMNS, getFlagRow, toEvent, toFlag, type EventRow, type FlagRow } from "./store.ts";
 import { applyVerdicts, labelProvenance, planBatch, verdictKey, type Outcome, type Pending, type Plan } from "./triage/cascade.ts";
@@ -90,9 +90,9 @@ const INSERT_EVENTS = `INSERT INTO events (workspace_id, queue_id, source, recei
 const INSERT_FLAG = `INSERT INTO flags (id, workspace_id, created_at, reason, severity, event_ids, decider, status, updated_at, event_count, users)
   VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10)`;
 
-/** One delivery per destination of the workspace that isn't deleted, plus the named actions in $4. */
+/** One delivery per destination of the workspace that isn't deleted, plus the named actions in $4. Due now by the database's clock (see claimDeliveries). */
 const INSERT_DELIVERIES = `INSERT INTO deliveries (flag_id, workspace_id, action, next_attempt_at, updated_at)
-  SELECT $1, $2, a, $3, $3 FROM (SELECT id AS a FROM destinations WHERE workspace_id = $2 AND deleted_at IS NULL UNION SELECT unnest($4::text[])) x`;
+  SELECT $1, $2, a, ${DB_NOW}, $3 FROM (SELECT id AS a FROM destinations WHERE workspace_id = $2 AND deleted_at IS NULL UNION SELECT unnest($4::text[])) x`;
 
 /** $1 y, $2 created_at, $3 provenance, $4 weight, $5 decision id, $6 rate, $7 service errors, $8 workspace, $9 event id. */
 const INSERT_LABEL = `INSERT INTO labels (workspace_id, event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, weight, decision_id, severity, ctx_rate, ctx_service_errors)
@@ -939,23 +939,28 @@ export class Worker {
    * skipped, and a claimed row's next_attempt_at moves forward by DELIVERY_CLAIM_MS, so once this
    * commits no one else finds it due: each delivery runs once per attempt, with no transaction
    * held while it runs.
+   *
+   * "Due" and the claim are the database's clock, like leases: every worker compares against the
+   * same clock, so one whose own clock runs behind can't make its claims expire early for the
+   * others (and run a delivery twice). `now` overrides it, for tests that move time forward.
    */
-  async claimDeliveries(now = Date.now(), limit = DELIVERY_CHUNK): Promise<Claimed[]> {
+  async claimDeliveries(now?: number, limit = DELIVERY_CHUNK): Promise<Claimed[]> {
     if (!this.#enabled) return [];
+    const clock = `coalesce($1::bigint, ${DB_NOW})`;
     return all<Claimed>(
       this.#db,
-      `UPDATE deliveries d SET next_attempt_at = $2
+      `UPDATE deliveries d SET next_attempt_at = ${clock} + $2
        FROM (SELECT flag_id, action, next_attempt_at FROM deliveries
-             WHERE status = 'pending' AND next_attempt_at <= $1
+             WHERE status = 'pending' AND next_attempt_at <= ${clock}
              ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED) due
        WHERE d.flag_id = due.flag_id AND d.action = due.action
        RETURNING d.flag_id, d.workspace_id, d.action, d.attempts, due.next_attempt_at AS was_due, d.next_attempt_at AS claimed_until`,
-      [now, now + DELIVERY_CLAIM_MS, limit],
+      [now ?? null, DELIVERY_CLAIM_MS, limit],
     );
   }
 
-  /** Run every delivery that is due. Returns how many were attempted. */
-  async deliverDue(now = Date.now()): Promise<number> {
+  /** Run every delivery that is due. Returns how many were attempted. `now`: see claimDeliveries. */
+  async deliverDue(now?: number): Promise<number> {
     const due = await this.claimDeliveries(now);
     await Promise.all(due.map((d) => this.#deliver(d)));
     return due.length;
@@ -1015,8 +1020,9 @@ export class Worker {
     const giveUp = n >= MAX_DELIVERY_ATTEMPTS;
     const changed = await run(
       this.#db,
-      `UPDATE deliveries SET status = $4, attempts = $5, last_error = $6, next_attempt_at = $7, updated_at = $8 ${mine}`,
-      [flagId, action, d.claimed_until, giveUp ? "failed" : "pending", n, pgText(error), now + deliveryBackoff(n), now],
+      // The retry is scheduled on the database's clock, like the claim.
+      `UPDATE deliveries SET status = $4, attempts = $5, last_error = $6, next_attempt_at = ${DB_NOW} + $7, updated_at = $8 ${mine}`,
+      [flagId, action, d.claimed_until, giveUp ? "failed" : "pending", n, pgText(error), deliveryBackoff(n), now],
     );
     if (changed && live) await run(this.#db, "UPDATE destinations SET last_error = $3 WHERE workspace_id = $1 AND id = $2", [ws, action, pgText(error)]);
     log.warn(giveUp ? "action failed; giving up" : "action failed; will retry", {

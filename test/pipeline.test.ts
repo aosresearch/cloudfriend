@@ -267,6 +267,25 @@ describe("delivery claims", () => {
     }
   });
 
+  it("claims on the database's clock, so a worker whose clock runs behind can't free a claim early", async (t) => {
+    cloudfriend = await makeCloudfriend({ decider: null, actions: { a: fakeAction().adapter } });
+    await dueDeliveries(cloudfriend, 1);
+    await rows(cloudfriend, "UPDATE deliveries SET next_attempt_at = next_attempt_at - 180000");
+    const other = await createCloudfriend(cloudfriend.config, {}, await testAdapters(null, { a: fakeAction().adapter }));
+    try {
+      // This worker's clock is two minutes behind while it claims; its claim must still hold for the other.
+      const real = Date.now.bind(Date);
+      const behind = t.mock.method(Date, "now", () => real() - 120_000);
+      const mine = await cloudfriend.worker.claimDeliveries();
+      behind.mock.restore();
+      assert.equal(mine.length, 1);
+      assert.ok(mine[0]!.claimed_until > Date.now(), "the claim runs from the database's now, not the worker's");
+      assert.deepEqual(await other.worker.claimDeliveries(), [], "nobody else finds a claimed delivery due");
+    } finally {
+      await other.close(0);
+    }
+  });
+
   it("skips deliveries another claimer has locked instead of waiting for them", async () => {
     cloudfriend = await makeCloudfriend({ decider: null, actions: { a: fakeAction().adapter } });
     await dueDeliveries(cloudfriend, 4);
