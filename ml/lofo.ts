@@ -156,7 +156,21 @@ async function fold(g: string) {
     for (const c of new Set(gaiaText.split("\n").slice(1).filter(Boolean).map((l) => l.split(",", gc + 1)[gc]!))) {
       if (roleOf(roles, c) !== want) throw new Error(`${c} is ${roleOf(roles, c)}, not ${want}: it can't be in ${gaiaFile}`);
     }
-    fs.writeSync(fd, gaiaText.slice(gaiaText.indexOf("\n") + 1));
+    const rows = gaiaText.slice(gaiaText.indexOf("\n") + 1);
+    if (weak === 1) fs.writeSync(fd, rows);
+    else {
+      // The same down-weighting as the RE3 weak rows.
+      const iw = column(gh, "w");
+      let out = "";
+      for (const line of rows.split("\n")) {
+        if (!line) continue;
+        const c = line.split(",");
+        c[iw] = String(Number(c[iw]) * weak);
+        out += c.join(",") + "\n";
+        if (out.length > 1 << 22) (fs.writeSync(fd, out), (out = ""));
+      }
+      fs.writeSync(fd, out);
+    }
     fs.closeSync(fd);
     return file;
   };

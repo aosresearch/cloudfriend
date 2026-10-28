@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { checkFreeze, roleOf, sha256File, type Roles } from "../ml/roles.ts";
+import { checkFreeze, checkHoldoutCases, HOLDOUT_SETTINGS, roleOf, sha256File, type Freeze, type Roles } from "../ml/roles.ts";
 import { BUILTIN_MODEL } from "../src/triage/runtime.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -38,8 +38,14 @@ describe("data roles", () => {
     const dir = tempDir();
     const r = write(dir, "roles.json", JSON.stringify(roles));
     const model = write(dir, "m.json", fs.readFileSync(BUILTIN_MODEL, "utf8"));
-    const freeze = write(dir, "freeze.json", JSON.stringify({ frozen_at: "x", roles_sha256: sha256File(r), arms: [{ name: "baseline", model, model_sha256: sha256File(model) }], settings: {} }));
+    const frozen = { frozen_at: "x", roles_sha256: sha256File(r), arms: [{ name: "baseline", model, model_sha256: sha256File(model) }], settings: { ...HOLDOUT_SETTINGS } };
+    const freeze = write(dir, "freeze.json", JSON.stringify(frozen));
     assert.doesNotThrow(() => checkFreeze(freeze, model, r));
+    const { decider: _, ...partial } = HOLDOUT_SETTINGS;
+    const incomplete = write(dir, "incomplete.json", JSON.stringify({ ...frozen, settings: partial }));
+    assert.throws(() => checkFreeze(incomplete, model, r), /doesn't set decider/);
+    const notHoldout = write(dir, "bad-unavailable.json", JSON.stringify({ ...frozen, unavailable: { "a-1": "no logs" } }));
+    assert.throws(() => checkFreeze(notHoldout, model, r), /not a holdout case/);
     const other = write(dir, "other.json", fs.readFileSync(BUILTIN_MODEL, "utf8").replace('"note"', '"notes"'));
     assert.throws(() => checkFreeze(freeze, other, r), /not a frozen arm/);
     write(dir, "roles.json", JSON.stringify({ ...roles, version: 2 }));
@@ -53,5 +59,15 @@ describe("data roles", () => {
     const r = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(ROOT, "ml/evaluate.ts"), "--data", dir, "--model", BUILTIN_MODEL, "--split", "all", "--decider", "oracle"], { encoding: "utf8" });
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /holdout cases need --freeze and --roles/);
+  });
+
+  it("a holdout run needs every holdout case, unless a verified absence was frozen", () => {
+    const f: Freeze = { frozen_at: "x", roles_sha256: "", arms: [], settings: { ...HOLDOUT_SETTINGS } };
+    const two: Roles = { version: 1, cases: { "g-15": "holdout", "g-16": "holdout", "c-1": "dev" } };
+    assert.doesNotThrow(() => checkHoldoutCases(f, two, ["g-15", "g-16"]));
+    assert.throws(() => checkHoldoutCases(f, two, ["g-16"]), /g-15 is missing/);
+    const absent = { ...f, unavailable: { "g-15": "no business logs in the source for this day" } };
+    assert.doesNotThrow(() => checkHoldoutCases(absent, two, ["g-16"]));
+    assert.throws(() => checkHoldoutCases(absent, two, ["g-15", "g-16"]), /recorded as unavailable but is in the data/);
   });
 });

@@ -39,11 +39,11 @@ import { labelProvenance, severityBucket, type FullRoute } from "../src/triage/c
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractText, FEATURE_NAMES, Featurizer, levelOf, statusInText, withoutIncidentalNumbers } from "../src/triage/features.ts";
 import { RoutingState } from "../src/triage/routing.ts";
-import { CascadeSim, type SimFlag } from "../src/triage/sim.ts";
+import { CascadeSim, type Reach, type SimFlag } from "../src/triage/sim.ts";
 import { bootstrap, lowerBound, upperBound } from "../src/stats.ts";
 import type { CloudfriendEvent } from "../src/types.ts";
 import { Jev } from "./jev.ts";
-import { checkFreeze } from "./roles.ts";
+import { checkCommitted, checkFreeze, checkHoldoutCases, loadRoles, sha256File } from "./roles.ts";
 import { loadCases, readStream, type Case } from "./streams.ts";
 
 const DAY = 86_400_000;
@@ -249,8 +249,11 @@ async function runCase(dir: string, c: Case) {
   const tplHistory = new Map<string, { count: number; errors: number; lastError: number }>();
   const labels = { pos: 0, neg: 0 };
   const escalatedKinds = { events: 0, by_score: 0 };
-  const safety: { id: string; reached: boolean; route: string }[] = [];
+  /** Must-reach events met in scope: whether and how they reached Jev, and their route. */
+  const safety: { id: string; reached: boolean; how: Reach | null; route: string }[] = [];
   const reachedAt = new Map<string, number>();
+  /** How each event first reached Jev: shown in a prompt, standing behind a shown example, or added to an alert. */
+  const reachedHow = new Map<string, Reach>();
   const censored = new Set<string>();
   const unanswered = new Set<string>();
 
@@ -328,9 +331,10 @@ async function runCase(dir: string, c: Case) {
               }
             : undefined,
           reached: cascade
-            ? (ids, _how, t) => {
+            ? (ids, how, t) => {
                 for (const id of ids) {
                   if (!reachedAt.has(id)) reachedAt.set(id, t);
+                  if (!reachedHow.has(id)) reachedHow.set(id, how);
                   const p = positives.get(id);
                   if (p && p.reached === null) p.reached = t;
                 }
@@ -401,7 +405,7 @@ async function runCase(dir: string, c: Case) {
           }
         }
       }
-      if (safetyIds.has(`${c.id}:${id}`)) safety.push({ id, reached: false, route: routes.get(id) ?? "?" });
+      if (safetyIds.has(`${c.id}:${id}`)) safety.push({ id, reached: false, how: null, route: routes.get(id) ?? "?" });
       if (info.size > 200_000) prune(info, [...sims.values()], e.t);
     }
     h.count++;
@@ -415,7 +419,10 @@ async function runCase(dir: string, c: Case) {
   for (const s of sims.values()) end = Math.max(end, await s.finish(last + N("batch-wait")));
   for (const p of positives.values()) if ((tplCount.get(p.template) ?? 0) <= 2) p.situation = "single";
   if (dropsOut !== null && drops.length) fs.writeSync(dropsOut, drops.join("\n") + "\n");
-  for (const s of safety) s.reached = reachedAt.has(s.id);
+  for (const s of safety) {
+    s.reached = reachedAt.has(s.id);
+    s.how = reachedHow.get(s.id) ?? null;
+  }
 
   const perStrategy: Record<string, unknown> = {};
   for (const [name, s] of sims) perStrategy[name] = summarize(c, name, s, events, positives, windows, name === "cascade" ? censored : new Set(), name === "cascade" ? unanswered : new Set());
@@ -548,15 +555,20 @@ async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Prom
 const only = args.cases ? new RegExp(args.cases) : null;
 const all: Awaited<ReturnType<typeof runCase>>[] = [];
 const selected = args.data.map((dir) => ({ dir, cases: loadCases(dir).filter((c) => (args.split === "all" || c.split === args.split) && (!only || only.test(c.id))) }));
-// Holdout days stay untouched until a candidate is frozen: only a frozen model, with the
-// frozen settings, may run on them (ml/holdout.ts).
+// Holdout days stay untouched until a candidate is frozen: only a frozen model, with every
+// frozen setting, under committed and unchanged roles and freeze, on every holdout case the
+// freeze didn't record as unavailable, may run on them (ml/holdout.ts).
 if (selected.some(({ cases }) => cases.some((c) => c.split === "holdout"))) {
   if (!args.freeze || !args.roles) throw new Error("holdout cases need --freeze and --roles (run them through ml/holdout.ts)");
+  if (args.cases) throw new Error("a holdout run takes every holdout case: --cases can't pick some");
+  checkCommitted(args.freeze, args.roles);
   const f = checkFreeze(args.freeze, args.model, args.roles);
   for (const [k, v] of Object.entries(f.settings)) {
     const got = (args as Record<string, unknown>)[k];
     if (String(got) !== v) throw new Error(`--${k} is ${String(got)}, but the freeze says ${v}`);
   }
+  const present = args.data.flatMap((dir) => loadCases(dir).filter((c) => c.split === "holdout" && c.events > 0).map((c) => c.id));
+  checkHoldoutCases(f, loadRoles(args.roles), present);
 }
 for (const { dir, cases } of selected) all.push(...(await pool(cases, N("concurrency"), (c) => runCase(dir, c))));
 
@@ -623,8 +635,31 @@ for (const s of STRATEGIES) {
 }
 const escalatedKinds = all.reduce((a, r) => ({ events: a.events + r.escalated_kinds.events, by_score: a.by_score + r.escalated_kinds.by_score }), { events: 0, by_score: 0 });
 const safety = all.flatMap((r) => r.safety.map((x) => ({ case: r.case.id, ...x })));
+/**
+ * Must-reach outcome. `encountered` are requested events the replay met in scope; requested
+ * events of a replayed case that were never in scope (outside --windows, say) are listed as
+ * `unobserved`: they were not tested, so they never count as reached. `reached` counts any way of
+ * reaching Jev; `by` splits it into shown in a prompt (`asked`), standing behind a shown example
+ * (`follower`) and added to an existing alert (`attached`).
+ */
+function safetyReport() {
+  const met = new Set(safety.map((x) => `${x.case}:${x.id}`));
+  const replayed = new Set(all.map((r) => r.case.id));
+  const ofReplayed = [...safetyIds].filter((id) => replayed.has(id.slice(0, id.lastIndexOf(":"))));
+  const by = (h: Reach) => safety.filter((x) => x.how === h).length;
+  return {
+    requested: safetyIds.size,
+    requested_in_replayed_cases: ofReplayed.length,
+    must_reach: safety.length,
+    encountered: safety.length,
+    reached: safety.filter((x) => x.reached).length,
+    by: { asked: by("asked"), follower: by("follower"), attached: by("attached") },
+    missed: safety.filter((x) => !x.reached),
+    unobserved: ofReplayed.filter((id) => !met.has(id)).sort(),
+  };
+}
 const summary = {
-  model: { path: args.model, trained_at: m.trained_at, drop_below: m.drop_below, threshold: m.threshold, trees: classifier.gbdt.numTrees },
+  model: { path: args.model, sha256: sha256File(args.model), trained_at: m.trained_at, drop_below: m.drop_below, threshold: m.threshold, trees: classifier.gbdt.numTrees },
   split: args.split,
   settings: { ...simBase, ...routing, decider: args.decider, audit_rate: N("audit-rate"), novel_guard: args["novel-guard"] !== "off", windows: args.windows ?? null },
   labels: "weak (dataset heuristics): see docs/benchmarks.md",
@@ -643,7 +678,7 @@ const summary = {
   // Later events of a kind Jev had judged relevant (protected when they arrived), and how
   // many of them the classifier's score alone would have sent: the rule's share of recall.
   escalated_kinds: escalatedKinds,
-  safety_set: args.safety ? { must_reach: safety.length, reached: safety.filter((x) => x.reached).length, missed: safety.filter((x) => !x.reached) } : null,
+  safety_set: args.safety ? safetyReport() : null,
   cases: all.map((r) => ({ id: r.case.id, split: r.case.split, events: r.events, positives: r.positives, labels: r.labels, ...r.perStrategy })),
 };
 console.log(JSON.stringify({ aggregate, escalated_kinds: escalatedKinds, jev: summary.jev }, null, 1));
