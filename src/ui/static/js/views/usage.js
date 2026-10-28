@@ -57,9 +57,17 @@ export async function render(ctx) {
         "section",
         { class: "card" },
         h("h2", null, "Jev spend today"),
-        h("p", { class: "big" }, fmtMoney(u.jev_spend_usd), h("span", { class: "muted" }, ` of ${fmtMoney(u.jev_budget_usd)} budget`)),
-        meter,
-        h("p", { class: "hint" }, u.budget_exhausted ? "Budget used up." : `${fmtMoney(Math.max(0, u.jev_budget_usd - u.jev_spend_usd))} left today.`),
+        h("p", { class: "big" }, fmtMoney(u.jev_spend_usd), h("span", { class: "muted" }, u.jev_budget_usd == null ? " (no daily budget)" : ` of ${fmtMoney(u.jev_budget_usd)} budget`)),
+        u.jev_budget_usd == null ? null : meter,
+        h(
+          "p",
+          { class: "hint" },
+          u.jev_budget_usd == null
+            ? "Jev calls are not capped. Set CLOUDFRIEND_JEV_DAILY_BUDGET_USD to cap them."
+            : u.budget_exhausted
+              ? "Budget used up."
+              : `${fmtMoney(Math.max(0, u.jev_budget_usd - u.jev_spend_usd))} left today.`,
+        ),
       ),
       h(
         "section",

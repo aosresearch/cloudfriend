@@ -1,6 +1,6 @@
 // Event list with filters (route, source, since) and paging.
 import { api, wsPath } from "../api.js";
-import { h, replace, timeEl, fmtScore, eventSummary, fmtNumber } from "../dom.js";
+import { h, replace, timeEl, fmtScore, fmtSeverity, eventSummary, fmtNumber } from "../dom.js";
 import { routeBadge, judgmentBadge, badge, emptyState, loading, ROUTE_NAMES, ROUTES } from "../components.js";
 import { navigate, wsHash, hashFor } from "../app.js";
 
@@ -77,6 +77,8 @@ export async function loadSources(ws, signal, force = false) {
 }
 
 export function sourceLabel(ws, source) {
+  // Test exceptions arrive on a per-workspace source that GET /sources leaves out.
+  if (typeof source === "string" && source.startsWith("src_test_")) return "cloudfriend-test";
   return (sourceNames.ws === ws && sourceNames.map.get(source)) || source;
 }
 
@@ -97,7 +99,7 @@ export function eventList(ws, events) {
             "span",
             { class: "row-meta" },
             h("span", { title: "Source" }, sourceLabel(ws, e.source)),
-            e.severity ? h("span", { title: "Severity" }, e.severity) : null,
+            e.severity ? h("span", { title: "Severity" }, fmtSeverity(e.severity)) : null,
             h("span", { title: "Classifier score", class: "mono" }, fmtScore(e.score)),
             judgmentBadge(e.judgment),
             e.flag_id ? badge("flagged", "flagged") : null,

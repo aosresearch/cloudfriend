@@ -55,6 +55,15 @@ export function fmtNumber(n) {
   return n === null || n === undefined ? "–" : nf.format(n);
 }
 
+const LEVELS = { e: "error", w: "warning", i: "info", "?": "unknown level" };
+
+/** The classifier's severity bucket ("e5", "w", "i2") in words: "error, 5xx", "warning", "info, 2xx". */
+export function fmtSeverity(bucket) {
+  if (!bucket) return null;
+  const level = LEVELS[bucket[0]] ?? bucket;
+  return bucket.length > 1 ? `${level}, ${bucket.slice(1)}xx` : level;
+}
+
 export function fmtMoney(n) {
   if (n === null || n === undefined) return "–";
   return `$${n < 1 && n > 0 ? n.toFixed(3) : n.toFixed(2)}`;

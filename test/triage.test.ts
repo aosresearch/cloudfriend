@@ -7,7 +7,7 @@ import { applyVerdicts, planBatch, routeEvent, VerdictCache, verdictKey, type Pe
 import { Classifier, type ClassifierFile } from "../src/triage/classifier.ts";
 import { extractEntities, FEATURE_NAMES, Featurizer, FEATURIZER_VERSION, levelOf, maskMessage } from "../src/triage/features.ts";
 import { Gbdt } from "../src/triage/gbdt.ts";
-import { BUILTIN_MODEL, encodeFeatures, Triage } from "../src/triage/runtime.ts";
+import { BUILTIN_MODEL, encodeFeatures, Models, Triage } from "../src/triage/runtime.ts";
 import { DEFAULT_WORKSPACE as WS, openDb } from "../src/db.ts";
 import { gate, limitThreshold, rulesAtTheTime, splitLabels, Trainer } from "../src/training.ts";
 import { count, fakeDecider, makeCloudfriend, rows, tempDir, type TestCloudfriend } from "./helpers.ts";
@@ -882,5 +882,21 @@ describe("shadow evidence", () => {
     assert.equal(r.judged, 2, "followers only copy their group's answer");
     assert.equal(r.relevant, 1, "a copied yes still rejects");
     await db.end();
+  });
+});
+
+describe("model reloading", () => {
+  // A server that never promoted a model checks for /data/models/active.json every 30 s; a file
+  // that isn't there must not count as a change (it used to log "classifier not loaded" each time).
+  it("treats a missing model file as unchanged, and a new or rewritten one as changed", () => {
+    const models = new Models();
+    assert.ok(models.load(BUILTIN_MODEL));
+    const dir = tempDir();
+    const active = path.join(dir, "active.json");
+    assert.equal(models.changed(active), false);
+    fs.copyFileSync(BUILTIN_MODEL, active);
+    assert.equal(models.changed(active), true);
+    assert.ok(models.load(active));
+    assert.equal(models.changed(active), false);
   });
 });

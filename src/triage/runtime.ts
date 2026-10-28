@@ -79,13 +79,15 @@ export class Models {
     }
   }
 
-  /** Whether `file` appeared or changed since it was loaded. */
+  /** Whether `file` appeared or changed since it was loaded. A file that isn't there hasn't changed. */
   changed(file: string): boolean {
+    let mtime: number;
     try {
-      return !(this.modelPath === file && fs.statSync(file).mtimeMs === this.#loadedMtime);
+      mtime = fs.statSync(file).mtimeMs;
     } catch {
       return false;
     }
+    return !(this.modelPath === file && mtime === this.#loadedMtime);
   }
 
   /** The feature version events must be computed in: the active model's. */

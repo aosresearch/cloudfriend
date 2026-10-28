@@ -1,6 +1,6 @@
 // One event: payload, classifier score and route, Jev's judgment, links, and "report as missed".
 import { api, wsPath } from "../api.js";
-import { h, replace, timeEl, fmtAbs, fmtScore, prettyJson, eventSummary } from "../dom.js";
+import { h, replace, timeEl, fmtAbs, fmtScore, fmtSeverity, prettyJson, eventSummary } from "../dom.js";
 import { routeBadge, judgmentBadge, kv, notice, loading, confirmDialog, copyButton, withBusy, ROUTES, JUDGMENTS, JEV_ROUTES } from "../components.js";
 import { wsHash } from "../app.js";
 import { sourceLabel, loadSources } from "./events.js";
@@ -54,7 +54,7 @@ export async function render(ctx) {
         kv([
           ["Route", e.route ? h("span", null, routeBadge(e.route), " ", h("span", { class: "muted" }, ROUTES[e.route]?.text ?? "")) : "Pending"],
           ["Score", h("span", { class: "mono" }, fmtScore(e.score))],
-          ["Severity", e.severity],
+          ["Severity", fmtSeverity(e.severity)],
           ["Template", e.template ? h("code", { class: "break" }, e.template) : null],
           ["Decision", decidedText],
           e.judgment !== undefined && ["Jev's judgment", e.judgment ? h("span", null, judgmentBadge(e.judgment), " ", h("span", { class: "muted" }, JUDGMENTS[e.judgment] ?? "")) : h("span", { class: "muted" }, "Not judged")],
