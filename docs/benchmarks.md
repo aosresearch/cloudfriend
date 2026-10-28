@@ -46,7 +46,37 @@ Training rows: every positive, plus a weighted sample of negatives. That means 5
 
 ## Results
 
-Everything here comes from the run of 2026-10-27 (`benchmarks/2026-10-27/`). Earlier results are at the end, for the record.
+### Round 4: corrections and the dev gate
+
+Round 4 (`benchmarks/2026-10-27-r4/`, see its README) made no Jev calls. It fixed the evidence and tested two retrained candidates against the shipped model. The headline: **candidate A is rejected on the reviewed dev must-reach set, the holdout was not run, and `models/base.json` is unchanged.**
+
+**Corrections to round 3:**
+- **The parsing bug.** Timestamp milliseconds (`15:27:27,500`) were read as HTTP 500, in the weak labels and in the features. With that fixed, the GAIA dev days keep 45 detectable incidents, not 102.
+- **The 8 GAIA "withheld" incidents.** All of them were artefacts of that bug: their only "symptom" was a routine INFO line.
+- **Live RE3 detection.** Jev detected 4 of 6 incidents, not 6 of 6. One got no answer because the budget ran out; Jev dismissed the other. Only the classifier's fallback alerted on either.
+
+**Supervision.** Two independent Claude reviewers and an adjudicator labelled 845 blind packets, giving assistant-reviewed references, not human gold. On those:
+- 0 of 301 sampled drops are relevant (at most 1.0% at 95%).
+- Jev's benign answers were wrong on 2 of 83.
+- Many relevant events are credentials or card data written in plain text in routine lines.
+
+**The gate.** Every reviewed must-reach event has to reach Jev, credential and payment exposures included, under the cautious oracle. That oracle answers from the weak labels but also calls every error-like line relevant, as Jev mostly does.
+
+| Dev, cautious oracle | Must-reach not reached (of 202) | Events to Jev, GAIA / RE3 |
+| --- | --- | --- |
+| Baseline (shipped) | 40 | 16,322 / 9,106 |
+| A: v3 features, corrected weak labels | 65 | 7,717 / 8,602 |
+| B: A plus 4,182 Jev judgments | 64 | 7,615 / 11,365 |
+
+- **A halves GAIA's load on Jev and detects the same incidents**, but newly misses 25 reviewed events: 23 exposures and 2 symptoms.
+- **A's leave-one-group-out:** 0 of 90 incidents withheld (bound 3.3%). That doesn't override the gate.
+- **The baseline fails the gate too.** It is kept, not certified.
+
+**Follow-up:** credential and payment exposures need a redaction rule or an exposure-routing guard, not classifier recall.
+
+### Round 3
+
+Everything below comes from the run of 2026-10-27 (`benchmarks/2026-10-27/`). Earlier results are at the end, for the record. Round 4 corrected some of it: see the notes marked **Corrected**.
 
 ### How it is measured
 
@@ -70,7 +100,7 @@ The shipped model, with the oracle decider:
 | RE3, leave one fault group out (28 models, 84 cases) | 90 | 0 | 3.3% (by group: 0 of 28, 10%) | 0.84% | |
 | GAIA, Aug 11 and 13, incident windows plus 6 quiet hours | 47 | 8 | 29% | 0.34% | 125 s |
 
-All of these are weak. On GAIA, all 8 withheld incidents left only one to three labelled events: memory hogs that barely show in the logs. Of the 30 incidents with four or more, none was withheld (bound 9.5%). Event by event, the cascade sent 99.6% of RE3's labelled incident events to Jev, and 98.4% of GAIA's.
+All of these are weak. On GAIA, all 8 withheld incidents left only one to three labelled events. **Corrected (round 4):** all 8 were artefacts of the timestamp bug (an INFO line ending `,500` or `,504`), not memory hogs that barely show in the logs. Of the 30 incidents with four or more, none was withheld (bound 9.5%). Event by event, the cascade sent 99.6% of RE3's labelled incident events to Jev, and 98.4% of GAIA's.
 
 **Earned suppression costs Jev calls in short replays.** Compared with the previous built-in model (same features), with it off (the old behaviour) Jev read 0.36% of RE3's events instead of 0.91%, and both withheld no incident. In each 25-minute RE3 case, every kind of message is new and gets its first look. On GAIA, which warms up on the day before, the cost was the same either way (0.37% and 0.38%), and so was the miss rate (8 and 9 of 47). With earned suppression on, fewer incident events went unseen on RE3: 84 against 155.
 
@@ -83,7 +113,11 @@ All of these are weak. On GAIA, all 8 withheld incidents left only one to three 
 | RE3, one repetition of each of the 6 held-out fault groups | 6 | 6 | 0 | 0 | 30 s (first event at Jev: 25 s) | 416 calls, $4.04 |
 | GAIA Aug 13, four incident windows | 4 | 4 | 0 | 0 | 13 s to 520 s | 687 calls, $2.50 |
 
-These are small samples: 6 of 6 detected is consistent with a detection rate as low as 61%, at 95%. The budget ran out during both runs. On RE3, three cases were fully answered and three partly, and the classifier's fallback took over for the rest. On GAIA, the four incidents after 09:04 had no Jev answers and aren't counted. Of 97 RE3 alerts, 83 contain no labelled incident event, 80 of them raised before the fault. Most are Sock Shop's real, pre-existing errors, which Jev judges relevant and the weak labels don't.
+**Corrected (round 4):** an offline replay of these recorded runs separates Jev's answers from the classifier's fallback, and Jev unavailable from Jev saying no.
+- **RE3:** Jev detected 4 of the 6. In carts_f4 the events reached Jev only in calls that got no answer. In front-end_f3 Jev saw some events and raised no alert. Only the fallback alerted on either.
+- **GAIA:** the three incidents after 09:04 were unanswered, not dismissed.
+
+These are small samples: even 6 of 6 detected would be consistent with a detection rate as low as 61%, at 95%. The budget ran out during both runs. On RE3, three cases were fully answered and three partly, and the classifier's fallback took over for the rest. On GAIA, the four incidents after 09:04 had no Jev answers and aren't counted. Of 97 RE3 alerts, 83 contain no labelled incident event, 80 of them raised before the fault. Most are Sock Shop's real, pre-existing errors, which Jev judges relevant and the weak labels don't.
 
 **Jev against the weak labels**, over its 12,430 judgments in these runs: of the 213 events the labels call incident events, Jev judged 194 relevant and 19 benign; of the others, it judged 1,320 relevant. That is a disagreement, not an accuracy figure. `benchmarks/review/` holds a stratified sample of Jev's judgments and a uniform sample of drops for people to label, which can settle it.
 

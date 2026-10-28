@@ -11,7 +11,15 @@ Scripts that build, train and evaluate cloudfriend's classifier on public benchm
 | `evaluate.ts` | replays streams through the cascade as the server runs it (`src/triage/sim.ts`), with baselines, and reports per-incident results with bounds |
 | `lofo.ts` | leave one RE3 fault group out: one model per group, replayed on that group |
 | `review-samples.ts` | turns `evaluate.ts --samples-out` into CSVs for people to label: an audit of Jev's judgments, and a sample of drops |
-| `jev.ts` | Jev client for the scripts: cached on disk by prompt hash, with a budget |
+| `jev.ts` | Jev client for the scripts: offline by default (recorded calls only, keyed by everything that shapes the answer); live calls need `--live` and a budget |
+| `no-network.ts` | `node --import` preload that blocks every request and counts attempts, for offline runs |
+| `rekey-cache.ts` | moves recorded calls from the round-3 cache key to the current one, verifying each |
+| `evidence.ts` | rebuilds Jev's direct judgments, per event id, from the recorded calls |
+| `review-packets.ts`, `references.py`, `review-report.ts`, `jev-labels.py` | blind review packets, merging two reviewers and an adjudicator into references, comparing them with Jev and the weak labels, and Jev's labels for training |
+| `trace-incidents.py` | traces GAIA incidents through the weak labels before and after the parsing fix |
+| `combine.py` | weak-label CSVs plus Jev's labels (replacing weak rows by id, fit cases only) |
+| `roles.ts`, `holdout.ts` | data roles, and the frozen holdout run (freeze, commit, then run) |
+| `dev-gate-report.ts` | the dev must-reach gate over saved replays: every reviewed event, exposures included; never approves a release |
 | `replay.ts` | streams a case into a running cloudfriend over HTTP |
 | `export-demo.ts` | records replays for cloudfriend.dev/demo |
 | `safety-candidates.ts` | picks events from the held-out data for the human-labelled safety set (`benchmarks/safety-set/`) |

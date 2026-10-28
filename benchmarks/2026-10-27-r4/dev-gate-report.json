@@ -1,0 +1,1190 @@
+{
+ "decision": {
+  "A": {
+   "dev_must_reach_pass": false,
+   "not_reached_or_unobserved": 65,
+   "verdict": "rejected"
+  },
+  "B": {
+   "dev_must_reach_pass": false,
+   "not_reached_or_unobserved": 64,
+   "verdict": "rejected"
+  },
+  "baseline": {
+   "dev_must_reach_pass": false,
+   "not_reached_or_unobserved": 40,
+   "verdict": "retained, fails the gate, not certified"
+  }
+ },
+ "primary_oracle": "oracle-cautious",
+ "release": {
+  "can_approve": false,
+  "holdout": "not run",
+  "note": "This report audits dev results only. Passing it would allow a frozen holdout run; it never approves a release."
+ },
+ "requested": {
+  "by_dataset": {
+   "gaia": 88,
+   "re3": 114
+  },
+  "by_kind": {
+   "exposure": 63,
+   "symptom": 137,
+   "unknown": 2
+  },
+  "total": 202
+ },
+ "runs": [
+  {
+   "arm": "A",
+   "dataset": "gaia",
+   "events": 11240400,
+   "events_sent": 7717,
+   "incidents": {
+    "detectable": 45,
+    "detected": 44,
+    "withheld": [
+     "gaia-2021-08-14:inc360-memory-dbservice1"
+    ]
+   },
+   "model": {
+    "drop_below": 0.000203715140290298,
+    "path": "cand-A.json",
+    "sha256": "ee41b5e9e8f34fe69c41fac9d639319b9c7220cdea65c3d2edce69bf74d76b67"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 87,
+    "missed": 46,
+    "missed_by_kind": {
+     "exposure": 45,
+     "symptom": 1
+    },
+    "missed_ids": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1322134",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:1911887",
+     "gaia-2021-08-11:2207368",
+     "gaia-2021-08-11:225885",
+     "gaia-2021-08-11:2286079",
+     "gaia-2021-08-11:2319261",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:1641771",
+     "gaia-2021-08-12:169313",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:2598950",
+     "gaia-2021-08-12:3100828",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-12:950850",
+     "gaia-2021-08-12:966193",
+     "gaia-2021-08-13:1063222",
+     "gaia-2021-08-13:1064281",
+     "gaia-2021-08-13:1079078",
+     "gaia-2021-08-13:1142073",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1254677",
+     "gaia-2021-08-13:1255077",
+     "gaia-2021-08-13:1274624",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1304676",
+     "gaia-2021-08-13:1862756",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:2255461",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-13:967170",
+     "gaia-2021-08-14:2113544",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2229348",
+     "gaia-2021-08-14:2382932",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:3183001",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "reached": 41,
+    "reached_by": {
+     "asked": 26,
+     "attached": 15,
+     "follower": 0
+    },
+    "requested": 88,
+    "unobserved": [
+     "gaia-2021-08-11:2119600"
+    ]
+   },
+   "oracle": "oracle-cautious",
+   "primary": true,
+   "result_file": "gaia-A-cautious.json",
+   "vs_baseline": {
+    "events_sent_change_pct": -52.72,
+    "fixed": [],
+    "new_misses": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 19
+    },
+    "newly_withheld": []
+   }
+  },
+  {
+   "arm": "A",
+   "dataset": "gaia",
+   "events": 11240400,
+   "events_sent": 4539,
+   "incidents": {
+    "detectable": 45,
+    "detected": 42,
+    "withheld": [
+     "gaia-2021-08-13:inc348-memory-webservice2",
+     "gaia-2021-08-14:inc360-memory-dbservice1",
+     "gaia-2021-08-14:inc377-memory-mobservice2"
+    ]
+   },
+   "model": {
+    "drop_below": 0.000203715140290298,
+    "path": "cand-A.json",
+    "sha256": "ee41b5e9e8f34fe69c41fac9d639319b9c7220cdea65c3d2edce69bf74d76b67"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 87,
+    "missed": 60,
+    "missed_by_kind": {
+     "exposure": 45,
+     "symptom": 15
+    },
+    "missed_ids": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1322134",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:1911887",
+     "gaia-2021-08-11:2207368",
+     "gaia-2021-08-11:225885",
+     "gaia-2021-08-11:2286079",
+     "gaia-2021-08-11:2319261",
+     "gaia-2021-08-11:770935",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:133837",
+     "gaia-2021-08-12:1621993",
+     "gaia-2021-08-12:1641771",
+     "gaia-2021-08-12:169313",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:2598950",
+     "gaia-2021-08-12:3100828",
+     "gaia-2021-08-12:62962",
+     "gaia-2021-08-12:65709",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-12:950850",
+     "gaia-2021-08-12:966193",
+     "gaia-2021-08-13:1063222",
+     "gaia-2021-08-13:1064281",
+     "gaia-2021-08-13:1079078",
+     "gaia-2021-08-13:1136598",
+     "gaia-2021-08-13:1140037",
+     "gaia-2021-08-13:1140308",
+     "gaia-2021-08-13:1142073",
+     "gaia-2021-08-13:1160653",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1254677",
+     "gaia-2021-08-13:1255077",
+     "gaia-2021-08-13:1274624",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1304676",
+     "gaia-2021-08-13:132499",
+     "gaia-2021-08-13:139679",
+     "gaia-2021-08-13:1862756",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:2255461",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-13:967170",
+     "gaia-2021-08-13:977927",
+     "gaia-2021-08-13:981358",
+     "gaia-2021-08-14:2113544",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2229348",
+     "gaia-2021-08-14:2382932",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:2951264",
+     "gaia-2021-08-14:3183001",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "reached": 27,
+    "reached_by": {
+     "asked": 26,
+     "attached": 1,
+     "follower": 0
+    },
+    "requested": 88,
+    "unobserved": [
+     "gaia-2021-08-11:2119600"
+    ]
+   },
+   "oracle": "oracle",
+   "primary": false,
+   "result_file": "gaia-A.json",
+   "vs_baseline": {
+    "events_sent_change_pct": -64.22,
+    "fixed": [
+     "gaia-2021-08-11:198671",
+     "gaia-2021-08-13:138225"
+    ],
+    "new_misses": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-13:1140037",
+     "gaia-2021-08-13:1140308",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-13:977927",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:2951264",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 19,
+     "symptom": 4
+    },
+    "newly_withheld": [
+     "gaia-2021-08-14:inc377-memory-mobservice2"
+    ]
+   }
+  },
+  {
+   "arm": "B",
+   "dataset": "gaia",
+   "events": 11240400,
+   "events_sent": 7615,
+   "incidents": {
+    "detectable": 45,
+    "detected": 44,
+    "withheld": [
+     "gaia-2021-08-14:inc360-memory-dbservice1"
+    ]
+   },
+   "model": {
+    "drop_below": 0.0006441759759173528,
+    "path": "cand-B.json",
+    "sha256": "cacd1333d53034fdaf62811e92bbd0ab423b3521dd7b32d2c9fe0fff4fbb5db3"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 87,
+    "missed": 46,
+    "missed_by_kind": {
+     "exposure": 45,
+     "symptom": 1
+    },
+    "missed_ids": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1322134",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:1911887",
+     "gaia-2021-08-11:2207368",
+     "gaia-2021-08-11:225885",
+     "gaia-2021-08-11:2286079",
+     "gaia-2021-08-11:2319261",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:1641771",
+     "gaia-2021-08-12:169313",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:2598950",
+     "gaia-2021-08-12:3100828",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-12:950850",
+     "gaia-2021-08-12:966193",
+     "gaia-2021-08-13:1063222",
+     "gaia-2021-08-13:1064281",
+     "gaia-2021-08-13:1079078",
+     "gaia-2021-08-13:1142073",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1254677",
+     "gaia-2021-08-13:1255077",
+     "gaia-2021-08-13:1274624",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1304676",
+     "gaia-2021-08-13:1862756",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:2255461",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-13:967170",
+     "gaia-2021-08-14:2113544",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2229348",
+     "gaia-2021-08-14:2382932",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:3183001",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "reached": 41,
+    "reached_by": {
+     "asked": 26,
+     "attached": 15,
+     "follower": 0
+    },
+    "requested": 88,
+    "unobserved": [
+     "gaia-2021-08-11:2119600"
+    ]
+   },
+   "oracle": "oracle-cautious",
+   "primary": true,
+   "result_file": "gaia-B-cautious.json",
+   "vs_baseline": {
+    "events_sent_change_pct": -53.35,
+    "fixed": [],
+    "new_misses": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 19
+    },
+    "newly_withheld": []
+   }
+  },
+  {
+   "arm": "B",
+   "dataset": "gaia",
+   "events": 11240400,
+   "events_sent": 3842,
+   "incidents": {
+    "detectable": 45,
+    "detected": 42,
+    "withheld": [
+     "gaia-2021-08-13:inc343-cpu-mobservice2",
+     "gaia-2021-08-13:inc348-memory-webservice2",
+     "gaia-2021-08-14:inc360-memory-dbservice1"
+    ]
+   },
+   "model": {
+    "drop_below": 0.0006441759759173528,
+    "path": "cand-B.json",
+    "sha256": "cacd1333d53034fdaf62811e92bbd0ab423b3521dd7b32d2c9fe0fff4fbb5db3"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 87,
+    "missed": 59,
+    "missed_by_kind": {
+     "exposure": 45,
+     "symptom": 14
+    },
+    "missed_ids": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1322134",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:1911887",
+     "gaia-2021-08-11:198671",
+     "gaia-2021-08-11:2207368",
+     "gaia-2021-08-11:225885",
+     "gaia-2021-08-11:2286079",
+     "gaia-2021-08-11:2319261",
+     "gaia-2021-08-11:770935",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:1621993",
+     "gaia-2021-08-12:1641771",
+     "gaia-2021-08-12:169313",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:2598950",
+     "gaia-2021-08-12:3100828",
+     "gaia-2021-08-12:62962",
+     "gaia-2021-08-12:65709",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-12:950850",
+     "gaia-2021-08-12:966193",
+     "gaia-2021-08-13:1063222",
+     "gaia-2021-08-13:1064281",
+     "gaia-2021-08-13:1079078",
+     "gaia-2021-08-13:1136598",
+     "gaia-2021-08-13:1140037",
+     "gaia-2021-08-13:1140308",
+     "gaia-2021-08-13:1142073",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1254677",
+     "gaia-2021-08-13:1255077",
+     "gaia-2021-08-13:1274624",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1304676",
+     "gaia-2021-08-13:132499",
+     "gaia-2021-08-13:138225",
+     "gaia-2021-08-13:139679",
+     "gaia-2021-08-13:1862756",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:2255461",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-13:967170",
+     "gaia-2021-08-13:977927",
+     "gaia-2021-08-13:981358",
+     "gaia-2021-08-14:2113544",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2229348",
+     "gaia-2021-08-14:2382932",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:3183001",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "reached": 28,
+    "reached_by": {
+     "asked": 27,
+     "attached": 1,
+     "follower": 0
+    },
+    "requested": 88,
+    "unobserved": [
+     "gaia-2021-08-11:2119600"
+    ]
+   },
+   "oracle": "oracle",
+   "primary": false,
+   "result_file": "gaia-B.json",
+   "vs_baseline": {
+    "events_sent_change_pct": -69.71,
+    "fixed": [
+     "gaia-2021-08-12:133837",
+     "gaia-2021-08-13:1160653"
+    ],
+    "new_misses": [
+     "gaia-2021-08-11:1167382",
+     "gaia-2021-08-11:1427546",
+     "gaia-2021-08-11:807074",
+     "gaia-2021-08-12:2008544",
+     "gaia-2021-08-12:80259",
+     "gaia-2021-08-13:1140037",
+     "gaia-2021-08-13:1140308",
+     "gaia-2021-08-13:1165682",
+     "gaia-2021-08-13:1176924",
+     "gaia-2021-08-13:1247856",
+     "gaia-2021-08-13:1303750",
+     "gaia-2021-08-13:1304577",
+     "gaia-2021-08-13:1877411",
+     "gaia-2021-08-13:3168690",
+     "gaia-2021-08-13:882533",
+     "gaia-2021-08-13:897016",
+     "gaia-2021-08-13:956162",
+     "gaia-2021-08-13:977927",
+     "gaia-2021-08-14:2184723",
+     "gaia-2021-08-14:2695137",
+     "gaia-2021-08-14:3197723",
+     "gaia-2021-08-14:927883"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 19,
+     "symptom": 3
+    },
+    "newly_withheld": [
+     "gaia-2021-08-13:inc343-cpu-mobservice2"
+    ]
+   }
+  },
+  {
+   "arm": "baseline",
+   "dataset": "gaia",
+   "events": 11240400,
+   "events_sent": 16322,
+   "incidents": {
+    "detectable": 45,
+    "detected": 44,
+    "withheld": [
+     "gaia-2021-08-14:inc360-memory-dbservice1"
+    ]
+   },
+   "model": {
+    "drop_below": 0.0008146906267609244,
+    "path": "base.json",
+    "sha256": "7adaec2b1c278b3cc83ef4794a39f9e6c08523e51ea8560cff40c45e306dada8"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 87,
+    "missed": 27,
+    "missed_by_kind": {
+     "exposure": 26,
+     "symptom": 1
+    },
+    "missed_ids": [
+     "gaia-2021-08-11:1322134",
+     "gaia-2021-08-11:1911887",
+     "gaia-2021-08-11:2207368",
+     "gaia-2021-08-11:225885",
+     "gaia-2021-08-11:2286079",
+     "gaia-2021-08-11:2319261",
+     "gaia-2021-08-12:1641771",
+     "gaia-2021-08-12:169313",
+     "gaia-2021-08-12:2598950",
+     "gaia-2021-08-12:3100828",
+     "gaia-2021-08-12:950850",
+     "gaia-2021-08-12:966193",
+     "gaia-2021-08-13:1063222",
+     "gaia-2021-08-13:1064281",
+     "gaia-2021-08-13:1079078",
+     "gaia-2021-08-13:1142073",
+     "gaia-2021-08-13:1254677",
+     "gaia-2021-08-13:1255077",
+     "gaia-2021-08-13:1274624",
+     "gaia-2021-08-13:1304676",
+     "gaia-2021-08-13:1862756",
+     "gaia-2021-08-13:2255461",
+     "gaia-2021-08-13:967170",
+     "gaia-2021-08-14:2113544",
+     "gaia-2021-08-14:2229348",
+     "gaia-2021-08-14:2382932",
+     "gaia-2021-08-14:3183001"
+    ],
+    "reached": 60,
+    "reached_by": {
+     "asked": 45,
+     "attached": 15,
+     "follower": 0
+    },
+    "requested": 88,
+    "unobserved": [
+     "gaia-2021-08-11:2119600"
+    ]
+   },
+   "oracle": "oracle-cautious",
+   "primary": true,
+   "result_file": "gaia-baseline-cautious.json"
+  },
+  {
+   "arm": "baseline",
+   "dataset": "gaia",
+   "events": 11240400,
+   "events_sent": 12686,
+   "incidents": {
+    "detectable": 45,
+    "detected": 42,
+    "withheld": [
+     "gaia-2021-08-11:inc292-cpu-mobservice2",
+     "gaia-2021-08-13:inc348-memory-webservice2",
+     "gaia-2021-08-14:inc360-memory-dbservice1"
+    ]
+   },
+   "model": {
+    "drop_below": 0.0008146906267609244,
+    "path": "base.json",
+    "sha256": "7adaec2b1c278b3cc83ef4794a39f9e6c08523e51ea8560cff40c45e306dada8"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 87,
+    "missed": 39,
+    "missed_by_kind": {
+     "exposure": 26,
+     "symptom": 13
+    },
+    "missed_ids": [
+     "gaia-2021-08-11:1322134",
+     "gaia-2021-08-11:1911887",
+     "gaia-2021-08-11:198671",
+     "gaia-2021-08-11:2207368",
+     "gaia-2021-08-11:225885",
+     "gaia-2021-08-11:2286079",
+     "gaia-2021-08-11:2319261",
+     "gaia-2021-08-11:770935",
+     "gaia-2021-08-12:133837",
+     "gaia-2021-08-12:1621993",
+     "gaia-2021-08-12:1641771",
+     "gaia-2021-08-12:169313",
+     "gaia-2021-08-12:2598950",
+     "gaia-2021-08-12:3100828",
+     "gaia-2021-08-12:62962",
+     "gaia-2021-08-12:65709",
+     "gaia-2021-08-12:950850",
+     "gaia-2021-08-12:966193",
+     "gaia-2021-08-13:1063222",
+     "gaia-2021-08-13:1064281",
+     "gaia-2021-08-13:1079078",
+     "gaia-2021-08-13:1136598",
+     "gaia-2021-08-13:1142073",
+     "gaia-2021-08-13:1160653",
+     "gaia-2021-08-13:1254677",
+     "gaia-2021-08-13:1255077",
+     "gaia-2021-08-13:1274624",
+     "gaia-2021-08-13:1304676",
+     "gaia-2021-08-13:132499",
+     "gaia-2021-08-13:138225",
+     "gaia-2021-08-13:139679",
+     "gaia-2021-08-13:1862756",
+     "gaia-2021-08-13:2255461",
+     "gaia-2021-08-13:967170",
+     "gaia-2021-08-13:981358",
+     "gaia-2021-08-14:2113544",
+     "gaia-2021-08-14:2229348",
+     "gaia-2021-08-14:2382932",
+     "gaia-2021-08-14:3183001"
+    ],
+    "reached": 48,
+    "reached_by": {
+     "asked": 45,
+     "attached": 3,
+     "follower": 0
+    },
+    "requested": 88,
+    "unobserved": [
+     "gaia-2021-08-11:2119600"
+    ]
+   },
+   "oracle": "oracle",
+   "primary": false,
+   "result_file": "gaia-baseline.json"
+  },
+  {
+   "arm": "A",
+   "dataset": "re3",
+   "events": 1272600,
+   "events_sent": 8602,
+   "incidents": {
+    "detectable": 20,
+    "detected": 20,
+    "withheld": []
+   },
+   "model": {
+    "drop_below": 0.000203715140290298,
+    "path": "cand-A.json",
+    "sha256": "ee41b5e9e8f34fe69c41fac9d639319b9c7220cdea65c3d2edce69bf74d76b67"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 114,
+    "missed": 18,
+    "missed_by_kind": {
+     "exposure": 11,
+     "symptom": 7
+    },
+    "missed_ids": [
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-1:397",
+     "re3-ss-carts_f4-1:4291",
+     "re3-ss-carts_f4-1:601",
+     "re3-ss-carts_f4-2:49331",
+     "re3-ss-carts_f4-2:58481",
+     "re3-ss-carts_f4-3:77639",
+     "re3-ss-front-end_f3-1:16593",
+     "re3-ss-front-end_f3-1:4778",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-1:38305",
+     "re3-tt-ts-auth-service_f3-1:38343",
+     "re3-tt-ts-auth-service_f3-1:42967",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:40750",
+     "re3-tt-ts-route-service_f2-1:70115",
+     "re3-tt-ts-route-service_f2-3:48572"
+    ],
+    "reached": 96,
+    "reached_by": {
+     "asked": 61,
+     "attached": 34,
+     "follower": 1
+    },
+    "requested": 114,
+    "unobserved": []
+   },
+   "oracle": "oracle-cautious",
+   "primary": true,
+   "result_file": "re3-A-cautious.json",
+   "vs_baseline": {
+    "events_sent_change_pct": -5.53,
+    "fixed": [],
+    "new_misses": [
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-2:49331",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:70115"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 4,
+     "symptom": 2
+    },
+    "newly_withheld": []
+   }
+  },
+  {
+   "arm": "A",
+   "dataset": "re3",
+   "events": 1272600,
+   "events_sent": 9136,
+   "incidents": {
+    "detectable": 20,
+    "detected": 20,
+    "withheld": []
+   },
+   "model": {
+    "drop_below": 0.000203715140290298,
+    "path": "cand-A.json",
+    "sha256": "ee41b5e9e8f34fe69c41fac9d639319b9c7220cdea65c3d2edce69bf74d76b67"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 114,
+    "missed": 32,
+    "missed_by_kind": {
+     "exposure": 11,
+     "symptom": 21
+    },
+    "missed_ids": [
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-1:1107",
+     "re3-ss-carts_f4-1:1269",
+     "re3-ss-carts_f4-1:303",
+     "re3-ss-carts_f4-1:397",
+     "re3-ss-carts_f4-1:4291",
+     "re3-ss-carts_f4-1:601",
+     "re3-ss-carts_f4-1:830",
+     "re3-ss-carts_f4-2:49331",
+     "re3-ss-carts_f4-2:58481",
+     "re3-ss-carts_f4-3:42969",
+     "re3-ss-carts_f4-3:45326",
+     "re3-ss-carts_f4-3:77639",
+     "re3-ss-carts_f4-4:43173",
+     "re3-ss-carts_f4-4:43225",
+     "re3-ss-front-end_f3-1:16593",
+     "re3-ss-front-end_f3-1:1874",
+     "re3-ss-front-end_f3-1:2634",
+     "re3-ss-front-end_f3-1:2839",
+     "re3-ss-front-end_f3-1:3109",
+     "re3-ss-front-end_f3-1:3256",
+     "re3-ss-front-end_f3-1:3553",
+     "re3-ss-front-end_f3-3:43665",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-1:38305",
+     "re3-tt-ts-auth-service_f3-1:38343",
+     "re3-tt-ts-auth-service_f3-1:42967",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:40750",
+     "re3-tt-ts-route-service_f2-1:70115",
+     "re3-tt-ts-route-service_f2-3:48572"
+    ],
+    "reached": 82,
+    "reached_by": {
+     "asked": 71,
+     "attached": 6,
+     "follower": 5
+    },
+    "requested": 114,
+    "unobserved": []
+   },
+   "oracle": "oracle",
+   "primary": false,
+   "result_file": "re3-A.json",
+   "vs_baseline": {
+    "events_sent_change_pct": -3.23,
+    "fixed": [
+     "re3-ss-carts_f4-1:42825",
+     "re3-ss-carts_f4-1:458",
+     "re3-ss-carts_f4-1:621",
+     "re3-ss-carts_f4-1:624",
+     "re3-ss-front-end_f3-1:3519"
+    ],
+    "new_misses": [
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-1:1107",
+     "re3-ss-carts_f4-1:830",
+     "re3-ss-carts_f4-2:49331",
+     "re3-ss-carts_f4-4:43225",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:70115"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 4,
+     "symptom": 5
+    },
+    "newly_withheld": []
+   }
+  },
+  {
+   "arm": "B",
+   "dataset": "re3",
+   "events": 1272600,
+   "events_sent": 11365,
+   "incidents": {
+    "detectable": 20,
+    "detected": 20,
+    "withheld": []
+   },
+   "model": {
+    "drop_below": 0.0006441759759173528,
+    "path": "cand-B.json",
+    "sha256": "cacd1333d53034fdaf62811e92bbd0ab423b3521dd7b32d2c9fe0fff4fbb5db3"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 114,
+    "missed": 17,
+    "missed_by_kind": {
+     "exposure": 10,
+     "symptom": 7
+    },
+    "missed_ids": [
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-1:397",
+     "re3-ss-carts_f4-1:4291",
+     "re3-ss-carts_f4-1:601",
+     "re3-ss-carts_f4-2:58481",
+     "re3-ss-carts_f4-3:77639",
+     "re3-ss-front-end_f3-1:16593",
+     "re3-ss-front-end_f3-1:4778",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-1:38305",
+     "re3-tt-ts-auth-service_f3-1:38343",
+     "re3-tt-ts-auth-service_f3-1:42967",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:40750",
+     "re3-tt-ts-route-service_f2-1:70115",
+     "re3-tt-ts-route-service_f2-3:48572"
+    ],
+    "reached": 97,
+    "reached_by": {
+     "asked": 61,
+     "attached": 34,
+     "follower": 2
+    },
+    "requested": 114,
+    "unobserved": []
+   },
+   "oracle": "oracle-cautious",
+   "primary": true,
+   "result_file": "re3-B-cautious.json",
+   "vs_baseline": {
+    "events_sent_change_pct": 24.81,
+    "fixed": [],
+    "new_misses": [
+     "re3-ob-adservice_f5-2:70017",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:70115"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 3,
+     "symptom": 2
+    },
+    "newly_withheld": []
+   }
+  },
+  {
+   "arm": "B",
+   "dataset": "re3",
+   "events": 1272600,
+   "events_sent": 11913,
+   "incidents": {
+    "detectable": 20,
+    "detected": 20,
+    "withheld": []
+   },
+   "model": {
+    "drop_below": 0.0006441759759173528,
+    "path": "cand-B.json",
+    "sha256": "cacd1333d53034fdaf62811e92bbd0ab423b3521dd7b32d2c9fe0fff4fbb5db3"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 114,
+    "missed": 39,
+    "missed_by_kind": {
+     "exposure": 10,
+     "symptom": 29
+    },
+    "missed_ids": [
+     "re3-ob-adservice_f5-1:37998",
+     "re3-ob-adservice_f5-1:38010",
+     "re3-ob-adservice_f5-1:38011",
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-1:1107",
+     "re3-ss-carts_f4-1:1269",
+     "re3-ss-carts_f4-1:303",
+     "re3-ss-carts_f4-1:397",
+     "re3-ss-carts_f4-1:42825",
+     "re3-ss-carts_f4-1:4291",
+     "re3-ss-carts_f4-1:601",
+     "re3-ss-carts_f4-1:830",
+     "re3-ss-carts_f4-2:58481",
+     "re3-ss-carts_f4-3:42969",
+     "re3-ss-carts_f4-3:43151",
+     "re3-ss-carts_f4-3:45326",
+     "re3-ss-carts_f4-3:77639",
+     "re3-ss-carts_f4-4:43173",
+     "re3-ss-carts_f4-4:43225",
+     "re3-ss-carts_f4-4:43226",
+     "re3-ss-front-end_f3-1:16593",
+     "re3-ss-front-end_f3-1:1874",
+     "re3-ss-front-end_f3-1:2634",
+     "re3-ss-front-end_f3-1:2839",
+     "re3-ss-front-end_f3-1:3109",
+     "re3-ss-front-end_f3-1:3256",
+     "re3-ss-front-end_f3-1:3519",
+     "re3-ss-front-end_f3-1:3553",
+     "re3-ss-front-end_f3-1:4778",
+     "re3-ss-front-end_f3-3:43665",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-1:38305",
+     "re3-tt-ts-auth-service_f3-1:38343",
+     "re3-tt-ts-auth-service_f3-1:42967",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:40750",
+     "re3-tt-ts-route-service_f2-1:70115",
+     "re3-tt-ts-route-service_f2-3:48572"
+    ],
+    "reached": 75,
+    "reached_by": {
+     "asked": 67,
+     "attached": 6,
+     "follower": 2
+    },
+    "requested": 114,
+    "unobserved": []
+   },
+   "oracle": "oracle",
+   "primary": false,
+   "result_file": "re3-B.json",
+   "vs_baseline": {
+    "events_sent_change_pct": 26.18,
+    "fixed": [
+     "re3-ss-carts_f4-1:458",
+     "re3-ss-carts_f4-1:621",
+     "re3-ss-carts_f4-1:624"
+    ],
+    "new_misses": [
+     "re3-ob-adservice_f5-1:37998",
+     "re3-ob-adservice_f5-1:38010",
+     "re3-ob-adservice_f5-1:38011",
+     "re3-ob-adservice_f5-2:70017",
+     "re3-ss-carts_f4-1:1107",
+     "re3-ss-carts_f4-1:830",
+     "re3-ss-carts_f4-3:43151",
+     "re3-ss-carts_f4-4:43225",
+     "re3-ss-carts_f4-4:43226",
+     "re3-ss-front-end_f3-1:4778",
+     "re3-tt-ts-auth-service_f3-1:38244",
+     "re3-tt-ts-auth-service_f3-1:38274",
+     "re3-tt-ts-auth-service_f3-3:41787",
+     "re3-tt-ts-route-service_f2-1:70115"
+    ],
+    "new_misses_by_kind": {
+     "exposure": 3,
+     "symptom": 11
+    },
+    "newly_withheld": []
+   }
+  },
+  {
+   "arm": "baseline",
+   "dataset": "re3",
+   "events": 1272600,
+   "events_sent": 9106,
+   "incidents": {
+    "detectable": 20,
+    "detected": 20,
+    "withheld": []
+   },
+   "model": {
+    "drop_below": 0.0008146906267609244,
+    "path": "base.json",
+    "sha256": "7adaec2b1c278b3cc83ef4794a39f9e6c08523e51ea8560cff40c45e306dada8"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 114,
+    "missed": 12,
+    "missed_by_kind": {
+     "exposure": 7,
+     "symptom": 5
+    },
+    "missed_ids": [
+     "re3-ss-carts_f4-1:397",
+     "re3-ss-carts_f4-1:4291",
+     "re3-ss-carts_f4-1:601",
+     "re3-ss-carts_f4-2:58481",
+     "re3-ss-carts_f4-3:77639",
+     "re3-ss-front-end_f3-1:16593",
+     "re3-ss-front-end_f3-1:4778",
+     "re3-tt-ts-auth-service_f3-1:38305",
+     "re3-tt-ts-auth-service_f3-1:38343",
+     "re3-tt-ts-auth-service_f3-1:42967",
+     "re3-tt-ts-route-service_f2-1:40750",
+     "re3-tt-ts-route-service_f2-3:48572"
+    ],
+    "reached": 102,
+    "reached_by": {
+     "asked": 68,
+     "attached": 34,
+     "follower": 0
+    },
+    "requested": 114,
+    "unobserved": []
+   },
+   "oracle": "oracle-cautious",
+   "primary": true,
+   "result_file": "re3-baseline-cautious.json"
+  },
+  {
+   "arm": "baseline",
+   "dataset": "re3",
+   "events": 1272600,
+   "events_sent": 9441,
+   "incidents": {
+    "detectable": 20,
+    "detected": 20,
+    "withheld": []
+   },
+   "model": {
+    "drop_below": 0.0008146906267609244,
+    "path": "base.json",
+    "sha256": "7adaec2b1c278b3cc83ef4794a39f9e6c08523e51ea8560cff40c45e306dada8"
+   },
+   "must_reach": {
+    "all_reached": false,
+    "encountered": 114,
+    "missed": 28,
+    "missed_by_kind": {
+     "exposure": 7,
+     "symptom": 21
+    },
+    "missed_ids": [
+     "re3-ss-carts_f4-1:1269",
+     "re3-ss-carts_f4-1:303",
+     "re3-ss-carts_f4-1:397",
+     "re3-ss-carts_f4-1:42825",
+     "re3-ss-carts_f4-1:4291",
+     "re3-ss-carts_f4-1:458",
+     "re3-ss-carts_f4-1:601",
+     "re3-ss-carts_f4-1:621",
+     "re3-ss-carts_f4-1:624",
+     "re3-ss-carts_f4-2:58481",
+     "re3-ss-carts_f4-3:42969",
+     "re3-ss-carts_f4-3:45326",
+     "re3-ss-carts_f4-3:77639",
+     "re3-ss-carts_f4-4:43173",
+     "re3-ss-front-end_f3-1:16593",
+     "re3-ss-front-end_f3-1:1874",
+     "re3-ss-front-end_f3-1:2634",
+     "re3-ss-front-end_f3-1:2839",
+     "re3-ss-front-end_f3-1:3109",
+     "re3-ss-front-end_f3-1:3256",
+     "re3-ss-front-end_f3-1:3519",
+     "re3-ss-front-end_f3-1:3553",
+     "re3-ss-front-end_f3-3:43665",
+     "re3-tt-ts-auth-service_f3-1:38305",
+     "re3-tt-ts-auth-service_f3-1:38343",
+     "re3-tt-ts-auth-service_f3-1:42967",
+     "re3-tt-ts-route-service_f2-1:40750",
+     "re3-tt-ts-route-service_f2-3:48572"
+    ],
+    "reached": 86,
+    "reached_by": {
+     "asked": 76,
+     "attached": 6,
+     "follower": 4
+    },
+    "requested": 114,
+    "unobserved": []
+   },
+   "oracle": "oracle",
+   "primary": false,
+   "result_file": "re3-baseline.json"
+  }
+ ],
+ "sensitivity_oracle": "oracle",
+ "sources": {
+  "gaia-A-cautious.json": "4b4ed499179ca24fb1a23c763784d696fe170596f6f5aaa6d170f65cd836e838",
+  "gaia-A.json": "f21d8242b56bc3579ea7f67f889c4a5306f3db9e70fd359f672a47c02c7c8afe",
+  "gaia-B-cautious.json": "978a5ba333868776f51df06066dd6cb60c0c98a63bca0bac21b07946fde7be60",
+  "gaia-B.json": "05c181a5d742338282a43a626163b1b94b5c63f67baaffd28f8d7b8a2194bbc6",
+  "gaia-baseline-cautious.json": "f646865ed828795cb383558da81507f4488ada94e86e4417a0876be33ff4808b",
+  "gaia-baseline.json": "ba8dc4ff2d7ff2da7c956c8adbcf8d6e7e4505e28416bb2336331d4e57e0cdde",
+  "must-reach-ids.txt": "44ec56496d1bd7710bd65911f3353e72b21b5723028c1e841a946d2186c26753",
+  "re3-A-cautious.json": "52fc73fa4288809e9c74279daf330734e226411f7c15cd052007545292ea673e",
+  "re3-A.json": "931f775c027d6e2c909497ad627f5f11c9515928a6eebaf9d415d64b1970e9b4",
+  "re3-B-cautious.json": "bb6b8353ab8565ea8135989807dc18dac43d5ef56a6ea37b368c588cd515155b",
+  "re3-B.json": "9be3a161043b8e9bba12f0d9b9364c6f2c1d75472d0e90e09e7cb896a7ddf9e9",
+  "re3-baseline-cautious.json": "52702b58ebb8d69ce49abd4b9e9d482561771a402bf7eb6444e2a2ea1b39758d",
+  "re3-baseline.json": "42a0eff95a084ec5b79fa99b87c804694a93047b975d096a587957383aaeb31b",
+  "references": "8fb2e4ca7e2f51034cea142e65db7d33a403308353bcde67a7419f9b4b295dce",
+  "roles": "8e29b415ca568555ebe9da7593fb23aa9f44a6c4ec7f39eeac60b6c48f195b43"
+ },
+ "what": "Dev must-reach gate over saved replays (ml/evaluate.ts). Assistant-reviewed references, not human gold. Exposures are inside the gate."
+}
