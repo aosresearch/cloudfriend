@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { importLabels, type ImportedLabel } from "./feedback.ts";
-import { Trainer } from "./training.ts";
+import { MULTI_WORKSPACE_TRAINING, singleWorkspace, Trainer } from "./training.ts";
 import { BUILTIN_MODEL, Triage } from "./triage/runtime.ts";
 import { BUILTIN_SCENARIOS, loadScenarios, runSuite } from "./triage/scenarios.ts";
 import { loadConfig } from "./config.ts";
@@ -198,6 +198,7 @@ async function mlCommand(
     escalatedMemoryMs: config.escalatedMemoryMs,
     suppressionTtlMs: config.suppressionTtlMs,
   }, ws);
+  if (!values["dry-run"] && !(await singleWorkspace(db))) throw new Error(MULTI_WORKSPACE_TRAINING);
   const report = await trainer.train({ dryRun: values["dry-run"] });
   out(report);
   return report.status === "failed" ? 1 : 0;

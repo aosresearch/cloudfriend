@@ -881,6 +881,25 @@ describe("training loop", { skip: !hasLightgbm && "python3 with lightgbm is not 
   });
 });
 
+describe("manual training", () => {
+  let cf: TestCloudfriend;
+  afterEach(async () => {
+    await cf?.close(0).catch(() => {});
+  });
+
+  it("refuses manual training while there is more than one workspace, as the schedule does", async () => {
+    cf = await makeCloudfriend({ decider: fakeDecider().adapter, config: { triage: true, modelPath: writeModel(tinyModel()) } });
+    await cf.db.query("INSERT INTO workspaces (id, name, created_at) VALUES ('ws_b', 'b', $1)", [Date.now()]);
+    const train = (q = "") => cf.app.request(`/model/train${q}`, { method: "POST", headers: { authorization: "Bearer test-admin-key" } });
+    const res = await train();
+    assert.equal(res.status, 409);
+    assert.match((await json(res)).error, /more than one workspace/);
+    assert.equal(await count(cf, "models"), 0, "no run was recorded");
+    // A dry run promotes nothing, so it still reports.
+    assert.equal((await json(train("?dry_run=1"))).status, "skipped");
+  });
+});
+
 describe("the runtime follows the model's feature version", () => {
   const opts = { auditRate: 0, verdictTtlMs: 0, perTemplate: 3, novelGuard: true, hasJev: true, suppressionTtlMs: 30 * 86_400_000 };
   const model = (version: number) => {

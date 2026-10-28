@@ -301,7 +301,7 @@ To rotate a secret, create a new one, update the sender, then revoke the old one
 | `GET /decisions/:id` | One decider call that produced labels: the exact prompt, the raw reply, the model and the events. Labels point to it by `decision_id`. |
 | `GET /model` | The active classifier, the one in shadow if any with its evidence so far, and the last training runs with their reports. |
 | `GET /model/shadow/review` | Events the model in shadow would newly drop that a person should look at: judged relevant, or not judged at all. |
-| `POST /model/train?dry_run=1` | Train now. Returns the run's report. |
+| `POST /model/train?dry_run=1` | Train now. Returns the run's report. `409` while there is more than one workspace (the model is shared by all of them), except for a dry run. |
 | `GET /stats?since=24h` | Events per route, share past the classifier, flags by status, Jev calls since start, the model. |
 
 `since` and `until` take ISO 8601, epoch milliseconds, or a relative duration such as `since=1h`. `limit` defaults to 100 and caps at 1000.

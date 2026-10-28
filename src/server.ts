@@ -8,7 +8,7 @@ import { errMsg, log } from "./log.ts";
 import { safeEqual, SOURCE_NAME, type SecretMatch, type Secrets } from "./secrets.ts";
 import { eventFeedback, flagFeedback, importLabels, type ImportedLabel } from "./feedback.ts";
 import { deliveriesFor, eventsByIds, FLAG_COLUMNS, getFlagRow, listEvents, listFlags, queue, toFlag, type FlagRow } from "./store.ts";
-import type { Trainer } from "./training.ts";
+import { MULTI_WORKSPACE_TRAINING, singleWorkspace, type Trainer } from "./training.ts";
 import type { Triage } from "./triage/runtime.ts";
 import { SEVERITIES, type ActionAdapter, type SourceAdapter } from "./types.ts";
 
@@ -343,6 +343,8 @@ export function createApp(deps: AppDeps): Hono {
   app.post("/model/train", async (c) => {
     if (!trainer) return c.json({ error: "triage is off (CLOUDFRIEND_TRIAGE=off)" }, 503);
     const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    // Gated like the schedule: a promoted model serves every workspace, but learned from one.
+    if (!dryRun && !(await singleWorkspace(db))) return c.json({ error: MULTI_WORKSPACE_TRAINING }, 409);
     return c.json(await trainer.train({ dryRun }));
   });
 

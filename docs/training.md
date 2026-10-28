@@ -59,7 +59,7 @@ cloudfriend labels import incidents.ndjson
 
 ## A training run
 
-`cloudfriend train` (in the container: `docker exec <container> cloudfriend train`), `POST /model/train`, or the schedule all do the same thing:
+`cloudfriend train` (in the container: `docker exec <container> cloudfriend train`), `POST /model/train`, or the schedule all do the same thing. Training learns from the default workspace's labels, and the model it promotes serves every workspace, so all three refuse (the API with `409`) while there is more than one workspace; a dry run still reports.
 
 1. **Split.** Labels from the current featurizer version are split by time into three parts: **fit** (oldest 60%), **calibrate** (next 20%) and **accept** (newest 20%). A run of labels of one template with gaps under `CLOUDFRIEND_INCIDENT_WINDOW` (30 minutes) is one incident and stays in one part. It is capped at four windows, so a template that never goes quiet doesn't swallow the split. Splitting by time asks the right question: does a model trained on the past do well on what came next? A run needs at least 30 labels, with escalations and non-escalations in every part. Otherwise it is recorded as `skipped`.
 2. **Train.** `ml/train.py` boosts up to 200 new trees on top of the built-in model (`models/base.lgb.txt`) on the fit part, with each label's weight. Early stopping and thresholds use the calibrate part only. A few hundred of your labels refine the built-in model rather than replace it. The thresholds:
