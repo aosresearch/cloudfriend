@@ -35,6 +35,8 @@ describe("end to end: Sentry -> decider -> Slack", () => {
         CLOUDFRIEND_ADMIN_KEY: "admin",
         CLOUDFRIEND_BATCH_WAIT: "200ms",
         CLOUDFRIEND_POLL_INTERVAL: "20ms",
+        // No random audit samples: one would turn the drop the tests expect into an audit (1 in 100).
+        CLOUDFRIEND_AUDIT_RATE: "0",
         OPENROUTER_API_KEY: "sk-or-test",
         OPENROUTER_BASE_URL: openrouter.url,
         SLACK_WEBHOOK_URL: slack.url + "/services/T/B/X",
