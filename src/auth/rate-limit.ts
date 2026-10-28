@@ -2,7 +2,9 @@
 // A key gets `free` failed attempts; after that each further failure locks it for base * 2^(extra - 1),
 // capped at `max`. Entries are forgotten `forgetAfterMs` after the last failure. Unknown emails are
 // throttled exactly like known ones, so a lockout says nothing about whether an account exists.
-// Being in memory, the limits are per process and reset on restart.
+// Being in memory, the limits are per process and reset on restart. A null IP (no address of the
+// client's own, e.g. behind an untrusted proxy: see client-ip.ts) skips the per-IP limits, since a
+// key shared by every client would let anyone lock everyone out.
 
 export interface BackoffPolicy {
   free: number;
@@ -118,23 +120,23 @@ export class LoginRateLimiter {
    * Returns how many milliseconds the caller must wait (> 0: refuse the attempt). On 0 the attempt is
    * counted as in flight, and the caller must call finish() exactly once.
    */
-  begin(ip: string, email: string): number {
+  begin(ip: string | null, email: string): number {
     const now = this.#now();
-    const wait = Math.max(this.#ip.wait(ip, now), this.#email.wait(email, now));
+    const wait = Math.max(ip === null ? 0 : this.#ip.wait(ip, now), this.#email.wait(email, now));
     if (wait > 0) return wait;
-    const ipKey = "ip\0" + ip;
+    const ipKey = ip === null ? null : "ip\0" + ip;
     const emailKey = "email\0" + email;
-    if ((this.#inFlight.get(ipKey) ?? 0) >= this.#limits.maxInFlightPerIp || (this.#inFlight.get(emailKey) ?? 0) >= this.#limits.maxInFlightPerEmail) {
+    if ((ipKey !== null && (this.#inFlight.get(ipKey) ?? 0) >= this.#limits.maxInFlightPerIp) || (this.#inFlight.get(emailKey) ?? 0) >= this.#limits.maxInFlightPerEmail) {
       return 1_000;
     }
-    this.#inFlight.set(ipKey, (this.#inFlight.get(ipKey) ?? 0) + 1);
+    if (ipKey !== null) this.#inFlight.set(ipKey, (this.#inFlight.get(ipKey) ?? 0) + 1);
     this.#inFlight.set(emailKey, (this.#inFlight.get(emailKey) ?? 0) + 1);
     return 0;
   }
 
   /** Records the outcome. A success clears the email's failures, not the IP's (one valid account must not reset an attacker's IP budget). */
-  finish(ip: string, email: string, success: boolean): void {
-    for (const key of ["ip\0" + ip, "email\0" + email]) {
+  finish(ip: string | null, email: string, success: boolean): void {
+    for (const key of [...(ip === null ? [] : ["ip\0" + ip]), "email\0" + email]) {
       const n = (this.#inFlight.get(key) ?? 1) - 1;
       if (n > 0) this.#inFlight.set(key, n);
       else this.#inFlight.delete(key);
@@ -143,7 +145,7 @@ export class LoginRateLimiter {
       this.#email.reset(email);
     } else {
       const now = this.#now();
-      this.#ip.fail(ip, now);
+      if (ip !== null) this.#ip.fail(ip, now);
       this.#email.fail(email, now);
     }
   }

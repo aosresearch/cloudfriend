@@ -86,6 +86,8 @@ The server also serves a dashboard at `/`: a setup checklist, the escalation que
 
 Sign-in uses an `HttpOnly`, `SameSite=Lax` session cookie (`Secure` when `CLOUDFRIEND_PUBLIC_URL` is https). Sessions expire after `CLOUDFRIEND_SESSION_TTL` without use. Put cloudfriend behind TLS and set `CLOUDFRIEND_PUBLIC_URL` to the address people use.
 
+Failed password sign-ins slow down per email and per client address. Behind a reverse proxy, set `CLOUDFRIEND_TRUSTED_PROXIES` to the proxy's address so the client's address is read from `X-Forwarded-For`. Until then, requests from a loopback or private address (a proxy, or Docker's gateway) are limited per email only, since that address is shared by every client and one person's failures would lock everyone out.
+
 ### Single sign-on (OIDC)
 
 Set `CLOUDFRIEND_OIDC_ISSUER`, `CLOUDFRIEND_OIDC_CLIENT_ID`, `CLOUDFRIEND_OIDC_CLIENT_SECRET` and `CLOUDFRIEND_PUBLIC_URL`, and register this redirect URI with the provider:
@@ -230,6 +232,7 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_PUBLIC_URL` | *(the request's address)* | The address people and senders use, e.g. `https://cloudfriend.example.com`. Used for source endpoint URLs, the OIDC redirect URI and `Secure` cookies. Required for OIDC. |
 | `CLOUDFRIEND_ADMIN_EMAIL` / `CLOUDFRIEND_ADMIN_PASSWORD` | *(unset)* | The first admin, kept in sync at every boot. Set both or neither; the password needs 12 characters or more. Without them, the first boot creates `admin@localhost` and prints its password once. |
 | `CLOUDFRIEND_SESSION_TTL` | `30d` | How long a session lasts without use (5m to 400d). |
+| `CLOUDFRIEND_TRUSTED_PROXIES` | *(none)* | Reverse proxies whose `X-Forwarded-For` names the client, for sign-in rate limiting: comma-separated IPs and CIDRs, or `loopback` and `private`, e.g. `loopback,10.0.0.0/8`. The client is the right-most address in the header that isn't a trusted proxy. Unset, a loopback or private peer counts as no client address (limited per email only). |
 | `CLOUDFRIEND_OIDC_ISSUER` | | The provider's issuer URL, e.g. `https://example.auth0.com/`. OIDC is on when the issuer, client id and secret are all set. |
 | `CLOUDFRIEND_OIDC_CLIENT_ID` / `CLOUDFRIEND_OIDC_CLIENT_SECRET` | | The client registered with the provider. Its redirect URI is `CLOUDFRIEND_PUBLIC_URL/auth/oidc/callback`. |
 | `CLOUDFRIEND_OIDC_ALLOWED_DOMAINS` | *(any)* | Comma-separated email domains allowed to sign in, e.g. `example.com`. |

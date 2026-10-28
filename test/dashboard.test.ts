@@ -218,6 +218,14 @@ describe("dashboard API access", () => {
     assert.deepEqual(big.json, { error: "request body too large" });
   });
 
+  it("doesn't let failures on other emails from a shared address lock a user out of signing in", async () => {
+    // In-process requests have no client address of their own, like everyone behind an untrusted proxy.
+    const t = await setup({ withBob: false });
+    const attacker = t.client();
+    for (let i = 0; i < 21; i++) assert.equal((await attacker.login(`nobody${i}@example.com`, "wrong")).status, 401);
+    assert.equal((await t.client().login(ALICE.email, ALICE.password)).status, 200);
+  });
+
   it("keeps the admin-key API working, on the default workspace", async () => {
     const t = await setup({ withBob: false });
     const src = (await t.alice.post(`/api/w/${WS_A}/sources`, { name: "app", kind: "json" })).json;

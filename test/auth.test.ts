@@ -13,6 +13,8 @@ import {
   type AuthEnv,
   type LoginLimits,
 } from "../src/auth/index.ts";
+import { DEFAULT_LOGIN_LIMITS } from "../src/auth/rate-limit.ts";
+import { clientAddress, parseTrustedProxies } from "../src/auth/client-ip.ts";
 import { hashSessionToken } from "../src/auth/sessions.ts";
 
 process.env.CLOUDFRIEND_LOG ??= "silent";
@@ -234,6 +236,67 @@ describe("login rate limiting", () => {
     assert.equal(res.status, 429);
     assert.equal(res.headers.get("retry-after"), "5");
     assert.equal((await t.login(t.user.email, t.user.password, { "x-test-ip": "10.0.0.2" })).status, 200);
+  });
+
+  it("finds the client behind trusted proxies, and has no address for a shared or unknown peer", () => {
+    assert.equal(parseTrustedProxies(""), null);
+    assert.throws(() => parseTrustedProxies("10.0.0.0/33"), /not an IP address/);
+    assert.throws(() => loadAuthConfig({ CLOUDFRIEND_TRUSTED_PROXIES: "proxy.local" }), (err: Error) => err instanceof AuthConfigError);
+    const p = parseTrustedProxies("loopback, 10.1.0.0/16, 2001:db8::1")!;
+    // Untrusted peer: itself, whatever it claims to forward.
+    assert.equal(clientAddress("93.184.215.9", "151.101.1.7", p), "93.184.215.9");
+    // Trusted peer: the right-most hop that isn't a trusted proxy. Hops left of it are the client's own claims.
+    assert.equal(clientAddress("::ffff:127.0.0.1", "151.101.1.7", p), "151.101.1.7");
+    assert.equal(clientAddress("127.0.0.1", "1.1.1.1, 151.101.1.7, 10.1.2.3", p), "151.101.1.7");
+    assert.equal(clientAddress("2001:db8::1", "10.1.0.5, 10.1.0.6", p), "10.1.0.5");
+    assert.equal(clientAddress("127.0.0.1", undefined, p), null);
+    assert.equal(clientAddress("127.0.0.1", "garbage", p), null);
+    // Not configured: a public peer is the client; a private or loopback one may be a proxy every client shares.
+    assert.equal(clientAddress("93.184.215.9", "1.2.3.4", null), "93.184.215.9");
+    assert.equal(clientAddress("172.17.0.1", undefined, null), null);
+    assert.equal(clientAddress("::1", "1.2.3.4", null), null);
+    assert.equal(clientAddress(undefined, undefined, p), null);
+  });
+
+  it("limits per client address only when there is one: a shared proxy address can't lock everyone out", async () => {
+    const make = async (env: Record<string, string>) => {
+      const store = new MemoryAuthStore();
+      const app = new Hono();
+      registerAuthRoutes(app, {
+        store,
+        config: loadAuthConfig(env),
+        loginLimits: { ...DEFAULT_LOGIN_LIMITS, ip: { free: 2, baseMs: 5000, maxMs: 60_000, forgetAfterMs: HOUR } },
+        listWorkspaces: async () => [],
+      });
+      await store.createUser({ id: "usr_alice", email: "alice@example.com", name: null, password_hash: await hashPassword("correct horse battery"), created_at: new Date() });
+      // As @hono/node-server passes the socket.
+      return (email: string, password: string, peer: string, xff?: string) =>
+        app.request(
+          "/api/login",
+          { method: "POST", headers: { ...CSRF, "content-type": "application/json", ...(xff ? { "x-forwarded-for": xff } : {}) }, body: JSON.stringify({ email, password }) },
+          { incoming: { socket: { remoteAddress: peer } } },
+        );
+    };
+
+    // Behind a trusted proxy: the attacker's own address is limited, nobody else's.
+    const proxied = await make({ CLOUDFRIEND_TRUSTED_PROXIES: "loopback" });
+    for (const e of ["a", "b", "c"]) assert.equal((await proxied(`${e}@example.com`, "x", "127.0.0.1", "93.184.215.9")).status, 401);
+    assert.equal((await proxied("alice@example.com", "correct horse battery", "127.0.0.1", "93.184.215.9")).status, 429);
+    assert.equal((await proxied("d@example.com", "x", "127.0.0.1", "151.101.1.7, 93.184.215.9")).status, 429, "a forged hop doesn't escape the limit");
+    assert.equal((await proxied("alice@example.com", "correct horse battery", "127.0.0.1", "151.101.1.7")).status, 200);
+
+    // Not configured, everyone arriving from the proxy's (or Docker's) private address: per email only.
+    const shared = await make({});
+    for (let i = 0; i < 10; i++) assert.equal((await shared(`n${i}@example.com`, "x", "172.17.0.1", "93.184.215.9")).status, 401);
+    assert.equal((await shared("alice@example.com", "correct horse battery", "172.17.0.1", "151.101.1.7")).status, 200);
+    for (let i = 0; i < 6; i++) await shared("alice@example.com", "wrong", "172.17.0.1");
+    assert.equal((await shared("alice@example.com", "correct horse battery", "172.17.0.1")).status, 429, "the per-email limit still applies");
+
+    // Not configured, a public peer: it is the client.
+    const direct = await make({});
+    for (const e of ["a", "b", "c"]) assert.equal((await direct(`${e}@example.com`, "x", "93.184.215.9")).status, 401);
+    assert.equal((await direct("alice@example.com", "correct horse battery", "93.184.215.9")).status, 429);
+    assert.equal((await direct("alice@example.com", "correct horse battery", "151.101.1.7")).status, 200);
   });
 
   it("caps password checks in flight per email", async () => {

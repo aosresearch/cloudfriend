@@ -2,6 +2,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { errMsg, log } from "../log.ts";
 import { newUserId } from "./bootstrap.ts";
+import { clientAddress } from "./client-ip.ts";
 import { DEFAULT_OIDC_LABEL, looksLikeEmail, normalizeEmail, type AuthConfig } from "./config.ts";
 import { OidcDeniedError, OidcProvider, type OidcClaims, type OidcTransaction } from "./oidc.ts";
 import { burnPasswordCheck, hashPassword, needsRehash, verifyPassword } from "./password.ts";
@@ -37,10 +38,11 @@ export interface AuthDeps {
   /** Workspaces for GET /api/me. */
   listWorkspaces(userId: string): Promise<WorkspaceSummary[]>;
   /**
-   * Client address for login rate limiting. Default: the TCP peer from @hono/node-server. Behind a reverse
-   * proxy, pass a function that reads the proxy's header (e.g. the last X-Forwarded-For hop it appends).
+   * Client address for login rate limiting, or null when there is none of the client's own (then only the
+   * per-email limit applies). Default: the TCP peer from @hono/node-server, read through
+   * `config.trustedProxies` (see client-ip.ts).
    */
-  clientIp?: (c: Context) => string;
+  clientIp?: (c: Context) => string | null;
   loginLimits?: LoginLimits;
   /** Clock, for tests. */
   now?: () => number;
@@ -62,9 +64,18 @@ export interface Auth {
 
 export const publicUser = (u: UserRecord): AuthUser => ({ id: u.id, email: u.email, name: u.name });
 
-function defaultClientIp(c: Context): string {
-  const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined;
-  return env?.incoming?.socket?.remoteAddress ?? "unknown";
+function defaultClientIp(config: AuthConfig): (c: Context) => string | null {
+  let warned = false;
+  return (c) => {
+    const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined;
+    const peer = env?.incoming?.socket?.remoteAddress;
+    const ip = clientAddress(peer, c.req.header("x-forwarded-for"), config.trustedProxies);
+    if (ip === null && peer && !config.trustedProxies && !warned) {
+      warned = true;
+      log.warn("sign-in from a private address with CLOUDFRIEND_TRUSTED_PROXIES unset: login attempts are limited per email only, not per client address. Behind a reverse proxy, set CLOUDFRIEND_TRUSTED_PROXIES to its address", { peer });
+    }
+    return ip;
+  };
 }
 
 export function createAuth(deps: AuthDeps): Auth {
@@ -166,7 +177,7 @@ function build(deps: AuthDeps) {
 export function registerAuthRoutes(app: Hono<any>, deps: AuthDeps): Auth {
   const { auth, secure, signedIn, signedOut, now } = build(deps);
   const { store, config } = deps;
-  const clientIp = deps.clientIp ?? defaultClientIp;
+  const clientIp = deps.clientIp ?? defaultClientIp(config);
   const home = (config.publicUrl?.pathname ?? "").replace(/\/+$/, "") + "/";
 
   app.use("/api/*", auth.csrfGuard);
