@@ -182,8 +182,47 @@ describe("leases", () => {
     await cf.post("app", { level: "error", message: "disk full on db-1" });
     cf.worker.start();
     await waitFor(async () => (await count(cf, "events WHERE decided")) === 1);
+    // A workspace leaves `owned` only once its history is saved and its lease released.
     await waitFor(() => cf.worker.owned.length === 0);
     assert.equal((await rows(cf, "SELECT expires_at FROM leases"))[0].expires_at, 0);
+    assert.equal(await count(cf, "snapshots WHERE workspace_id = $1", WS), 1);
+  });
+
+  it("holds an unloading workspace until it is released, and starts no parse or decide on it meanwhile", async (t) => {
+    const d = recorder(flagAll);
+    cf = await makeCloudfriend({ decider: d.adapter, config: { ...TRIAGE, modelPath: tinyModel(), leaseRenewMs: 50, idleUnloadMs: 100 } });
+    await cf.post("app", { level: "error", message: "disk full on db-1" });
+    await run(cf);
+    assert.equal(d.calls.length, 1);
+    // Hold the idle unload in its snapshot save.
+    const triage = cf.worker.triageFor(WS)!;
+    const save = triage.saveState.bind(triage);
+    let saving!: () => void;
+    const started = new Promise<void>((r) => (saving = r));
+    let finish!: () => void;
+    const gate = new Promise<void>((r) => (finish = r));
+    t.mock.method(triage, "saveState", async (q?: Parameters<typeof save>[0]) => {
+      saving();
+      await gate;
+      return save(q);
+    });
+    cf.worker.start();
+    try {
+      await started;
+      assert.deepEqual(cf.worker.owned, [{ workspace: WS, epoch: 1 }], "still held: the lease isn't released yet");
+      // Work that arrives now is left for the next owner: no paid call whose answer the release would discard.
+      await cf.post("app", { level: "error", message: "certificate expired for the payments api" });
+      await run(cf);
+      await sleep(100);
+      assert.equal(d.calls.length, 1);
+      assert.equal(await count(cf, "queue WHERE status = 'new'"), 1);
+    } finally {
+      finish();
+    }
+    // Released, then claimed again for the new work.
+    await waitFor(async () => (await count(cf, "events WHERE decided")) === 2);
+    assert.equal(d.calls.length, 2);
+    assert.equal((await rows(cf, "SELECT epoch FROM leases"))[0].epoch, 2);
     assert.equal(await count(cf, "snapshots WHERE workspace_id = $1", WS), 1);
   });
 });

@@ -141,6 +141,8 @@ class Owned implements Held {
   lastWork = Date.now();
   /** Set when the lease is lost or released: nothing more may be written for it. */
   gone = false;
+  /** Set once it is being saved and released (#unload): no new parse or decide starts for it. */
+  unloading: Promise<void> | null = null;
   settings: WorkspaceSettings = {};
   /** Decider spend on `spendDay` (UTC), as stored plus what this worker added since. */
   spend = 0;
@@ -283,7 +285,7 @@ export class Worker {
   /** Persist each held workspace's featurizer history, so a restart doesn't make every template look new. */
   async saveTriageState(): Promise<void> {
     for (const o of [...this.#owned.values()]) {
-      if (!o.triage || o.gone) continue;
+      if (!o.triage || o.gone || o.unloading) continue; // #unload saves it
       try {
         await this.#fenced(o, (c) => o.triage!.saveState(c));
       } catch (err) {
@@ -427,34 +429,41 @@ export class Worker {
     log.warn("lease lost; another worker took over the workspace", { workspace: o.workspace, epoch: o.epoch });
   }
 
-  /** Save the workspace's history, release its lease and drop its state. */
-  async #unload(o: Owned, why: string): Promise<void> {
-    if (o.gone) return;
-    this.#owned.delete(o.workspace);
-    await o.parsing;
-    try {
-      if (o.triage) await this.#fenced(o, (c) => o.triage!.saveState(c));
-    } catch (err) {
-      if (err instanceof LeaseLost) {
-        this.#owned.set(o.workspace, o); // so #lose finds it
-        this.#lose(o);
-        return;
+  /**
+   * Save the workspace's history, release its lease and drop its state. It stays in #owned until
+   * the lease is released, so `owned` never shows a workspace as let go while it is still held,
+   * and a claim can't take it back meanwhile; `unloading` (set before the first await) keeps new
+   * parses and decides from starting on it. Unloading twice (idle, then shutdown) waits for the first.
+   */
+  #unload(o: Owned, why: string): Promise<void> {
+    if (o.gone) return Promise.resolve();
+    o.unloading ??= (async () => {
+      await o.parsing;
+      try {
+        if (o.triage) await this.#fenced(o, (c) => o.triage!.saveState(c));
+      } catch (err) {
+        if (err instanceof LeaseLost) {
+          this.#lose(o);
+          return;
+        }
+        log.warn("saving triage state failed", { workspace: o.workspace, error: errMsg(err) });
       }
-      log.warn("saving triage state failed", { workspace: o.workspace, error: errMsg(err) });
-    }
-    o.gone = true;
-    let released = false;
-    try {
-      await this.#leases.release(o);
-      released = true;
-    } catch (err) {
-      log.warn("releasing the lease failed; it expires on its own", { workspace: o.workspace, error: errMsg(err) });
-    }
-    if (o.triage && o.triage === this.#o.defaultTriage) {
-      o.triage.settledEpoch = released ? o.epoch : null;
-      this.#parked.set(o.workspace, o.triage);
-    }
-    log.info("workspace released", { workspace: o.workspace, epoch: o.epoch, why });
+      o.gone = true;
+      let released = false;
+      try {
+        await this.#leases.release(o);
+        released = true;
+      } catch (err) {
+        log.warn("releasing the lease failed; it expires on its own", { workspace: o.workspace, error: errMsg(err) });
+      }
+      if (this.#owned.get(o.workspace) === o) this.#owned.delete(o.workspace);
+      if (o.triage && o.triage === this.#o.defaultTriage) {
+        o.triage.settledEpoch = released ? o.epoch : null;
+        this.#parked.set(o.workspace, o.triage);
+      }
+      log.info("workspace released", { workspace: o.workspace, epoch: o.epoch, why });
+    })();
+    return o.unloading;
   }
 
   /** A transaction that only commits while the workspace's lease is still ours (leases.ts). */
@@ -523,7 +532,7 @@ export class Worker {
    * featurizer's history, so only the owner may do it, in arrival order.
    */
   async #parseOnce(o: Owned, limit: number): Promise<number> {
-    if (o.gone || this.#stopped) return 0;
+    if (o.gone || o.unloading || this.#stopped) return 0;
     const triage = o.triage;
     if (triage) await triage.sync();
     let n: number;
@@ -658,7 +667,8 @@ export class Worker {
 
   /** Start one batch for a workspace if one is due. Returns whether it did. */
   async #startBatch(o: Owned, now: number): Promise<boolean> {
-    if (o.gone || now < o.retryAt) return false;
+    // Not for a workspace being unloaded: its lease is about to go, and the paid call's answer with it.
+    if (o.gone || o.unloading || now < o.retryAt) return false;
     const decider = this.#deciderFor(o);
     if (!(decider || o.triage?.classifier)) return false;
     const rows = await all<{ id: number; received_at: number; route: string | null }>(
@@ -668,7 +678,9 @@ export class Worker {
     );
     if (rows.length) o.lastWork = Date.now();
     const batch = rows.filter((r) => !o.inflight.has(r.id)).slice(0, this.#o.batchSize);
-    if (!batch.length || this.#stopped || o.gone) return false;
+    // Checked again after the query: an idle unload may have begun meanwhile (#startDueBatches
+    // works on a snapshot of #owned). From here to `decides.add` nothing awaits.
+    if (!batch.length || this.#stopped || o.gone || o.unloading) return false;
     const full = batch.length >= this.#o.batchSize;
     // Audit samples aren't urgent: they wait for other events, or for auditWaitMs.
     const urgent = batch.find((r) => r.route !== "audit");
