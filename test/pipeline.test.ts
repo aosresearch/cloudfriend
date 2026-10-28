@@ -227,6 +227,22 @@ describe("deliver stage", () => {
     assert.equal((await rows(cloudfriend, "SELECT last_error FROM deliveries"))[0].last_error, "run() returned false");
   });
 
+  it("keeps a database error's text out of the error members see, and retries", async (t) => {
+    const act = fakeAction();
+    await flagged({ hook: act.adapter });
+    const db = cloudfriend.db;
+    const query = db.query.bind(db) as (...a: unknown[]) => unknown;
+    t.mock.method(db, "query", (...args: unknown[]) => {
+      if (typeof args[0] === "string" && args[0].includes("AND id = ANY($2::bigint[]) ORDER BY id")) return Promise.reject(new Error('relation "events" is on fire at 10.0.0.7'));
+      return query(...args);
+    });
+    await cloudfriend.worker.deliverDue();
+    t.mock.restoreAll();
+    const [d] = await rows(cloudfriend, "SELECT status, attempts, last_error FROM deliveries");
+    assert.deepEqual({ ...d }, { status: "pending", attempts: 1, last_error: "internal error loading the flag's events" });
+    assert.equal(act.calls.length, 0);
+  });
+
   it("isolates actions: one failing does not block another", async () => {
     const ok = fakeAction();
     const bad = fakeAction(async () => {
@@ -262,6 +278,25 @@ describe("delivery claims", () => {
       assert.equal(a.length + b.length, 120, "every delivery ran once");
       assert.equal(new Set([...a, ...b]).size, 120, "and none twice");
       assert.equal(await count(cloudfriend, "deliveries WHERE status = 'ok' AND attempts = 1"), 120);
+    } finally {
+      await other.close(0);
+    }
+  });
+
+  it("claims on the database's clock, so a worker whose clock runs behind can't free a claim early", async (t) => {
+    cloudfriend = await makeCloudfriend({ decider: null, actions: { a: fakeAction().adapter } });
+    await dueDeliveries(cloudfriend, 1);
+    await rows(cloudfriend, "UPDATE deliveries SET next_attempt_at = next_attempt_at - 180000");
+    const other = await createCloudfriend(cloudfriend.config, {}, await testAdapters(null, { a: fakeAction().adapter }));
+    try {
+      // This worker's clock is two minutes behind while it claims; its claim must still hold for the other.
+      const real = Date.now.bind(Date);
+      const behind = t.mock.method(Date, "now", () => real() - 120_000);
+      const mine = await cloudfriend.worker.claimDeliveries();
+      behind.mock.restore();
+      assert.equal(mine.length, 1);
+      assert.ok(mine[0]!.claimed_until > Date.now(), "the claim runs from the database's now, not the worker's");
+      assert.deepEqual(await other.worker.claimDeliveries(), [], "nobody else finds a claimed delivery due");
     } finally {
       await other.close(0);
     }

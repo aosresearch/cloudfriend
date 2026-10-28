@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { AuthConfig } from "./config.ts";
+import { AuthConfigError, type AuthConfig } from "./config.ts";
 import { generatePassword, hashPassword, verifyPassword } from "./password.ts";
 import { EmailTakenError, type AuthStore, type UserRecord } from "./store.ts";
 
@@ -24,6 +24,7 @@ export function newUserId(): string {
 /**
  * Makes sure an admin can sign in. Call once at startup, after migrations.
  * - With CLOUDFRIEND_ADMIN_EMAIL + CLOUDFRIEND_ADMIN_PASSWORD: that user exists and has that password.
+ *   Throws AuthConfigError when the email belongs to an account created by SSO sign-in (see syncPassword).
  * - Otherwise, when there are no users at all: creates admin@localhost with a random password and returns it.
  */
 export async function ensureBootstrapAdmin(store: AuthStore, config: Pick<AuthConfig, "bootstrapAdmin">): Promise<BootstrapResult> {
@@ -50,8 +51,20 @@ export async function ensureBootstrapAdmin(store: AuthStore, config: Pick<AuthCo
   return { mode: "generated", userId: user.id, email: FIRST_BOOT_ADMIN_EMAIL, created: true, passwordUpdated: false, password };
 }
 
+/**
+ * Gives the env admin's account the env password. An account without a password was created by SSO
+ * sign-in, and is never adopted: giving it a password (and, in setupAuth, the default workspace) would hand
+ * the admin's rights to whoever holds the SSO identities linked to it, and the env names an email, not
+ * those identities. Boot fails instead, with a message saying what to do.
+ */
 async function syncPassword(store: AuthStore, user: Pick<UserRecord, "id" | "email" | "password_hash">, password: string): Promise<BootstrapResult> {
-  const same = user.password_hash !== null && (await verifyPassword(password, user.password_hash));
+  if (user.password_hash === null) {
+    throw new AuthConfigError(
+      `CLOUDFRIEND_ADMIN_EMAIL ${user.email} belongs to an account created by SSO sign-in, which cloudfriend will not turn into the admin. ` +
+        "Set CLOUDFRIEND_ADMIN_EMAIL to an address no one has signed in with, or unset CLOUDFRIEND_ADMIN_EMAIL and CLOUDFRIEND_ADMIN_PASSWORD.",
+    );
+  }
+  const same = await verifyPassword(password, user.password_hash);
   if (!same) {
     await store.setPasswordHash(user.id, await hashPassword(password));
     await store.deleteUserSessions(user.id);

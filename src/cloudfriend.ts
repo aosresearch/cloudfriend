@@ -10,7 +10,7 @@ import { Intake } from "./intake.ts";
 import { errMsg, log } from "./log.ts";
 import { Secrets } from "./secrets.ts";
 import { createApp } from "./server.ts";
-import { Trainer } from "./training.ts";
+import { singleWorkspace as onlyOneWorkspace, Trainer } from "./training.ts";
 import { BUILTIN_MODEL, Models, Triage, type TriageOptions } from "./triage/runtime.ts";
 import type { ActionAdapter, DeciderAdapter } from "./types.ts";
 import { Worker } from "./worker.ts";
@@ -195,7 +195,7 @@ export async function createCloudfriend(config: Config, env: NodeJS.ProcessEnv =
   let reloadTimer: NodeJS.Timeout | null = null;
   // The trainer learns from the default workspace's labels, and the model it promotes serves
   // every workspace: scheduled training and shadow promotion only run while that is the only one.
-  const singleWorkspace = async () => (await one<{ n: number }>(db, "SELECT count(*) AS n FROM workspaces"))!.n <= 1;
+  const singleWorkspace = () => onlyOneWorkspace(db);
   let warnedMulti = false;
   const startRetraining = () => {
     if (reloadTimer || retrainTimer) return;

@@ -1,4 +1,5 @@
 import { parseDuration } from "../config.ts";
+import { parseTrustedProxies, TrustedProxiesError, type TrustedProxies } from "./client-ip.ts";
 
 export interface OidcConfig {
   issuer: URL;
@@ -23,6 +24,8 @@ export interface AuthConfig {
   /** A session's expiry is pushed forward at most this often (default 1 hour). */
   sessionRenewEveryMs: number;
   oidc: OidcConfig | null;
+  /** `CLOUDFRIEND_TRUSTED_PROXIES`: whose X-Forwarded-For names the client, for login rate limiting (client-ip.ts). */
+  trustedProxies: TrustedProxies | null;
 }
 
 export class AuthConfigError extends Error {}
@@ -103,12 +106,21 @@ export function loadAuthConfig(env: Record<string, string | undefined> = process
     }
   }
 
+  let trustedProxies: TrustedProxies | null;
+  try {
+    trustedProxies = parseTrustedProxies(get("CLOUDFRIEND_TRUSTED_PROXIES"));
+  } catch (err) {
+    if (err instanceof TrustedProxiesError) throw new AuthConfigError(err.message);
+    throw err;
+  }
+
   return {
     publicUrl,
     bootstrapAdmin,
     sessionTtlMs,
     sessionRenewEveryMs: Math.min(3600_000, Math.floor(sessionTtlMs / 2)),
     oidc: loadOidc(get, publicUrl),
+    trustedProxies,
   };
 }
 

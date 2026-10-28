@@ -2,6 +2,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { errMsg, log } from "../log.ts";
 import { newUserId } from "./bootstrap.ts";
+import { clientAddress } from "./client-ip.ts";
 import { DEFAULT_OIDC_LABEL, looksLikeEmail, normalizeEmail, type AuthConfig } from "./config.ts";
 import { OidcDeniedError, OidcProvider, type OidcClaims, type OidcTransaction } from "./oidc.ts";
 import { burnPasswordCheck, hashPassword, needsRehash, verifyPassword } from "./password.ts";
@@ -37,10 +38,11 @@ export interface AuthDeps {
   /** Workspaces for GET /api/me. */
   listWorkspaces(userId: string): Promise<WorkspaceSummary[]>;
   /**
-   * Client address for login rate limiting. Default: the TCP peer from @hono/node-server. Behind a reverse
-   * proxy, pass a function that reads the proxy's header (e.g. the last X-Forwarded-For hop it appends).
+   * Client address for login rate limiting, or null when there is none of the client's own (then only the
+   * per-email limit applies). Default: the TCP peer from @hono/node-server, read through
+   * `config.trustedProxies` (see client-ip.ts).
    */
-  clientIp?: (c: Context) => string;
+  clientIp?: (c: Context) => string | null;
   loginLimits?: LoginLimits;
   /** Clock, for tests. */
   now?: () => number;
@@ -62,9 +64,18 @@ export interface Auth {
 
 export const publicUser = (u: UserRecord): AuthUser => ({ id: u.id, email: u.email, name: u.name });
 
-function defaultClientIp(c: Context): string {
-  const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined;
-  return env?.incoming?.socket?.remoteAddress ?? "unknown";
+function defaultClientIp(config: AuthConfig): (c: Context) => string | null {
+  let warned = false;
+  return (c) => {
+    const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined;
+    const peer = env?.incoming?.socket?.remoteAddress;
+    const ip = clientAddress(peer, c.req.header("x-forwarded-for"), config.trustedProxies);
+    if (ip === null && peer && !config.trustedProxies && !warned) {
+      warned = true;
+      log.warn("sign-in from a private address with CLOUDFRIEND_TRUSTED_PROXIES unset: login attempts are limited per email only, not per client address. Behind a reverse proxy, set CLOUDFRIEND_TRUSTED_PROXIES to its address", { peer });
+    }
+    return ip;
+  };
 }
 
 export function createAuth(deps: AuthDeps): Auth {
@@ -166,7 +177,7 @@ function build(deps: AuthDeps) {
 export function registerAuthRoutes(app: Hono<any>, deps: AuthDeps): Auth {
   const { auth, secure, signedIn, signedOut, now } = build(deps);
   const { store, config } = deps;
-  const clientIp = deps.clientIp ?? defaultClientIp;
+  const clientIp = deps.clientIp ?? defaultClientIp(config);
   const home = (config.publicUrl?.pathname ?? "").replace(/\/+$/, "") + "/";
 
   app.use("/api/*", auth.csrfGuard);
@@ -227,7 +238,7 @@ export function registerAuthRoutes(app: Hono<any>, deps: AuthDeps): Auth {
 
   // --- OIDC ----------------------------------------------------------------------------
 
-  const fail = (c: Context, code: "sso_failed" | "sso_denied") => c.redirect(`${home}?auth_error=${code}`, 302);
+  const fail = (c: Context, code: "sso_failed" | "sso_denied" | "sso_unverified") => c.redirect(`${home}?auth_error=${code}`, 302);
 
   app.get("/auth/oidc/login", async (c) => {
     if (!auth.oidc) return c.json({ error: "SSO is not configured" }, 404);
@@ -274,9 +285,9 @@ export function registerAuthRoutes(app: Hono<any>, deps: AuthDeps): Auth {
     }
 
     const user = await userForClaims(store, claims, now());
-    if (typeof user === "string") {
-      log.warn("oidc: sign-in denied", { reason: user, issuer: claims.issuer, sub: claims.subject });
-      return fail(c, "sso_denied");
+    if ("denied" in user) {
+      log.warn("oidc: sign-in denied", { reason: user.denied, issuer: claims.issuer, sub: claims.subject });
+      return fail(c, user.code);
     }
     await auth.sessions.destroy(getCookie(c, SESSION_COOKIE));
     const { token } = await auth.sessions.create(user.id);
@@ -302,20 +313,29 @@ function readTx(raw: string | undefined, now: number): OidcTransaction | null {
 }
 
 /**
- * Finds or provisions the user for a verified ID token. Matching is by (issuer, sub) only. A new identity is
- * linked to an existing account with the same email only when the provider says the email is verified;
- * otherwise sign-in is refused (returns the reason) rather than creating a second account or taking one over.
+ * Finds or provisions the user for a verified ID token. Matching is by (issuer, sub) only. A new identity
+ * (first sign-in) needs an email the provider verified, whether it creates an account or links to an
+ * existing one with that email; otherwise sign-in is refused (returns the reason).
+ *
+ * Why creation needs it too: an account's email is what later verified sign-ins (and the bootstrap admin)
+ * link to. If an unverified identity could create the account for victim@example.com, the real owner's
+ * verified sign-in would later be linked to the attacker's account (pre-account hijack). So every account's
+ * email comes from a verified source: an admin (password) or a provider that verified it.
  */
-async function userForClaims(store: AuthStore, claims: OidcClaims, now: number): Promise<UserRecord | string> {
+async function userForClaims(
+  store: AuthStore,
+  claims: OidcClaims,
+  now: number,
+): Promise<UserRecord | { denied: string; code: "sso_denied" | "sso_unverified" }> {
   const linked = await store.findUserByIdentity(claims.issuer, claims.subject);
   if (linked) return linked;
-  if (!claims.email) return "the provider returned no email address (request the email scope)";
+  if (!claims.email) return { denied: "the provider returned no email address (request the email scope)", code: "sso_denied" };
+  if (!claims.emailVerified) return { denied: `the provider did not verify the email ${claims.email}`, code: "sso_unverified" };
   const identity = { issuer: claims.issuer, subject: claims.subject, email: claims.email, created_at: new Date(now) };
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const existing = await store.getUserByEmail(claims.email);
     if (existing) {
-      if (!claims.emailVerified) return `email ${claims.email} belongs to an existing account and the provider did not verify it`;
       try {
         await store.addIdentity({ ...identity, user_id: existing.id });
       } catch (err) {
@@ -337,5 +357,5 @@ async function userForClaims(store: AuthStore, claims: OidcClaims, now: number):
       // Someone created this email concurrently: loop once to link instead.
     }
   }
-  return "could not provision the user";
+  return { denied: "could not provision the user", code: "sso_denied" };
 }

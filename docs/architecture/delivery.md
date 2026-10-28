@@ -37,7 +37,7 @@ flowchart TD
   retry -->|yes| failed["status = failed"]
 ```
 
-1. Claim up to 50 `pending` deliveries of any workspace whose `next_attempt_at` has passed, earliest first. One statement selects them with `FOR UPDATE SKIP LOCKED` and moves their `next_attempt_at` a minute ahead, so another worker running a pass at the same moment skips them, and once the claim commits nobody finds them due. No transaction is open while the actions run.
+1. Claim up to 50 `pending` deliveries of any workspace whose `next_attempt_at` has passed, earliest first. One statement selects them with `FOR UPDATE SKIP LOCKED` and moves their `next_attempt_at` a minute ahead, so another worker running a pass at the same moment skips them, and once the claim commits nobody finds them due. No transaction is open while the actions run. Due times, claims and retries are the database's clock, so workers whose own clocks disagree still agree on when a claim ends.
 2. Run them all at once. Each runs the action adapter named by its destination's `kind`, and gets the flag, up to 50 of its events and the destination's `config`, with 15 seconds.
 3. Record each result, if the claim is still this pass's:
    - **success:** `status = 'ok'`, and the destination's `last_delivery_at` is set.

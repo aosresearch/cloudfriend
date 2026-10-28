@@ -270,7 +270,7 @@ describe("OIDC sign-in on Postgres", () => {
     await t.store.createUser(user("usr_admin", "jo@example.com", await hashPassword("password password")));
     idp.next = { email_verified: false };
     const refused = await t.signIn();
-    assert.equal(refused.res.headers.get("location"), "/?auth_error=sso_denied");
+    assert.equal(refused.res.headers.get("location"), "/?auth_error=sso_unverified");
     assert.equal((await t.db.query("SELECT count(*) AS n FROM user_identities")).rows[0].n, 0);
     idp.next = {};
     const linked = await t.signIn();
@@ -307,6 +307,15 @@ describe("setupAuth (boot)", () => {
     const b = await setupAuth(db, { ...env, CLOUDFRIEND_ADMIN_EMAIL: "new@example.com" });
     b.stop();
     assert.deepEqual(await owners(db), [{ email: "ops@example.com", role: "owner" }]);
+  });
+
+  it("fails boot rather than make an account created by SSO sign-in the admin and owner", async () => {
+    const db = await newDb();
+    const store = new PgAuthStore(db);
+    await store.createUser(user("usr_sso", "ops@example.com"), { issuer: "https://idp.example.com", subject: "s1", user_id: "usr_sso", email: "ops@example.com", created_at: new Date() });
+    await assert.rejects(setupAuth(db, { CLOUDFRIEND_ADMIN_EMAIL: "ops@example.com", CLOUDFRIEND_ADMIN_PASSWORD: "a long admin password" }), /created by SSO sign-in/);
+    assert.deepEqual(await owners(db), []);
+    assert.equal((await store.getUserById("usr_sso"))!.password_hash, null);
   });
 
   it("fails fast on bad settings, and prunes expired sessions at boot", async () => {

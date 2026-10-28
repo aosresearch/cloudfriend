@@ -4,9 +4,9 @@ import { setImmediate as yieldToLoop } from "node:timers/promises";
 import type pg from "pg";
 import { all, DEFAULT_WORKSPACE, one, pgText, run, tx, type DB, type Queryable } from "./db.ts";
 import type { Intake } from "./intake.ts";
-import { LeaseLost, Leases, type Held } from "./leases.ts";
+import { DB_NOW, LeaseLost, Leases, type Held } from "./leases.ts";
 import { errMsg, log } from "./log.ts";
-import { EVENT_COLUMNS, eventsByIds, getFlagRow, toEvent, toFlag, type EventRow } from "./store.ts";
+import { EVENT_COLUMNS, eventsByIds, FLAG_COLUMNS, getFlagRow, toEvent, toFlag, type EventRow, type FlagRow } from "./store.ts";
 import { applyVerdicts, labelProvenance, planBatch, verdictKey, type Outcome, type Pending, type Plan } from "./triage/cascade.ts";
 import { humanLabelsSince, type HumanLabel, type Triage } from "./triage/runtime.ts";
 import { toDecision, type ActionAdapter, type CloudfriendEvent, type DeciderAdapter, type Decision, type Judgment, type ParsedEvent, type Severity, type SourceAdapter } from "./types.ts";
@@ -90,9 +90,9 @@ const INSERT_EVENTS = `INSERT INTO events (workspace_id, queue_id, source, recei
 const INSERT_FLAG = `INSERT INTO flags (id, workspace_id, created_at, reason, severity, event_ids, decider, status, updated_at, event_count, users)
   VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10)`;
 
-/** One delivery per destination of the workspace that isn't deleted, plus the named actions in $4. */
+/** One delivery per destination of the workspace that isn't deleted, plus the named actions in $4. Due now by the database's clock (see claimDeliveries). */
 const INSERT_DELIVERIES = `INSERT INTO deliveries (flag_id, workspace_id, action, next_attempt_at, updated_at)
-  SELECT $1, $2, a, $3, $3 FROM (SELECT id AS a FROM destinations WHERE workspace_id = $2 AND deleted_at IS NULL UNION SELECT unnest($4::text[])) x`;
+  SELECT $1, $2, a, ${DB_NOW}, $3 FROM (SELECT id AS a FROM destinations WHERE workspace_id = $2 AND deleted_at IS NULL UNION SELECT unnest($4::text[])) x`;
 
 /** $1 y, $2 created_at, $3 provenance, $4 weight, $5 decision id, $6 rate, $7 service errors, $8 workspace, $9 event id. */
 const INSERT_LABEL = `INSERT INTO labels (workspace_id, event_id, y, source, route, score, features, featurizer_version, event_source, received_at, data, created_at, template, provenance, weight, decision_id, severity, ctx_rate, ctx_service_errors)
@@ -141,6 +141,8 @@ class Owned implements Held {
   lastWork = Date.now();
   /** Set when the lease is lost or released: nothing more may be written for it. */
   gone = false;
+  /** Set once it is being saved and released (#unload): no new parse or decide starts for it. */
+  unloading: Promise<void> | null = null;
   settings: WorkspaceSettings = {};
   /** Decider spend on `spendDay` (UTC), as stored plus what this worker added since. */
   spend = 0;
@@ -283,7 +285,7 @@ export class Worker {
   /** Persist each held workspace's featurizer history, so a restart doesn't make every template look new. */
   async saveTriageState(): Promise<void> {
     for (const o of [...this.#owned.values()]) {
-      if (!o.triage || o.gone) continue;
+      if (!o.triage || o.gone || o.unloading) continue; // #unload saves it
       try {
         await this.#fenced(o, (c) => o.triage!.saveState(c));
       } catch (err) {
@@ -398,8 +400,13 @@ export class Worker {
         const o = this.#owned.get(ws);
         if (!o) continue;
         o.settings = s.settings;
-        o.spend = s.spend;
-        o.spendDay = day;
+        // Spend only grows within a day. The read may predate a decision this worker committed (and
+        // added to o.spend) meanwhile: taking it as is would under-count the budget until the next read.
+        if (o.spendDay === day) o.spend = Math.max(o.spend, s.spend);
+        else if (o.spendDay < day) {
+          o.spend = s.spend;
+          o.spendDay = day;
+        } // else: the day ended during the read; #deciderFor already started the new one
       }
       if (!unloadIdle) return;
       const idleMs = this.#o.idleUnloadMs ?? 600_000;
@@ -427,34 +434,41 @@ export class Worker {
     log.warn("lease lost; another worker took over the workspace", { workspace: o.workspace, epoch: o.epoch });
   }
 
-  /** Save the workspace's history, release its lease and drop its state. */
-  async #unload(o: Owned, why: string): Promise<void> {
-    if (o.gone) return;
-    this.#owned.delete(o.workspace);
-    await o.parsing;
-    try {
-      if (o.triage) await this.#fenced(o, (c) => o.triage!.saveState(c));
-    } catch (err) {
-      if (err instanceof LeaseLost) {
-        this.#owned.set(o.workspace, o); // so #lose finds it
-        this.#lose(o);
-        return;
+  /**
+   * Save the workspace's history, release its lease and drop its state. It stays in #owned until
+   * the lease is released, so `owned` never shows a workspace as let go while it is still held,
+   * and a claim can't take it back meanwhile; `unloading` (set before the first await) keeps new
+   * parses and decides from starting on it. Unloading twice (idle, then shutdown) waits for the first.
+   */
+  #unload(o: Owned, why: string): Promise<void> {
+    if (o.gone) return Promise.resolve();
+    o.unloading ??= (async () => {
+      await o.parsing;
+      try {
+        if (o.triage) await this.#fenced(o, (c) => o.triage!.saveState(c));
+      } catch (err) {
+        if (err instanceof LeaseLost) {
+          this.#lose(o);
+          return;
+        }
+        log.warn("saving triage state failed", { workspace: o.workspace, error: errMsg(err) });
       }
-      log.warn("saving triage state failed", { workspace: o.workspace, error: errMsg(err) });
-    }
-    o.gone = true;
-    let released = false;
-    try {
-      await this.#leases.release(o);
-      released = true;
-    } catch (err) {
-      log.warn("releasing the lease failed; it expires on its own", { workspace: o.workspace, error: errMsg(err) });
-    }
-    if (o.triage && o.triage === this.#o.defaultTriage) {
-      o.triage.settledEpoch = released ? o.epoch : null;
-      this.#parked.set(o.workspace, o.triage);
-    }
-    log.info("workspace released", { workspace: o.workspace, epoch: o.epoch, why });
+      o.gone = true;
+      let released = false;
+      try {
+        await this.#leases.release(o);
+        released = true;
+      } catch (err) {
+        log.warn("releasing the lease failed; it expires on its own", { workspace: o.workspace, error: errMsg(err) });
+      }
+      if (this.#owned.get(o.workspace) === o) this.#owned.delete(o.workspace);
+      if (o.triage && o.triage === this.#o.defaultTriage) {
+        o.triage.settledEpoch = released ? o.epoch : null;
+        this.#parked.set(o.workspace, o.triage);
+      }
+      log.info("workspace released", { workspace: o.workspace, epoch: o.epoch, why });
+    })();
+    return o.unloading;
   }
 
   /** A transaction that only commits while the workspace's lease is still ours (leases.ts). */
@@ -523,7 +537,7 @@ export class Worker {
    * featurizer's history, so only the owner may do it, in arrival order.
    */
   async #parseOnce(o: Owned, limit: number): Promise<number> {
-    if (o.gone || this.#stopped) return 0;
+    if (o.gone || o.unloading || this.#stopped) return 0;
     const triage = o.triage;
     if (triage) await triage.sync();
     let n: number;
@@ -658,7 +672,8 @@ export class Worker {
 
   /** Start one batch for a workspace if one is due. Returns whether it did. */
   async #startBatch(o: Owned, now: number): Promise<boolean> {
-    if (o.gone || now < o.retryAt) return false;
+    // Not for a workspace being unloaded: its lease is about to go, and the paid call's answer with it.
+    if (o.gone || o.unloading || now < o.retryAt) return false;
     const decider = this.#deciderFor(o);
     if (!(decider || o.triage?.classifier)) return false;
     const rows = await all<{ id: number; received_at: number; route: string | null }>(
@@ -668,7 +683,9 @@ export class Worker {
     );
     if (rows.length) o.lastWork = Date.now();
     const batch = rows.filter((r) => !o.inflight.has(r.id)).slice(0, this.#o.batchSize);
-    if (!batch.length || this.#stopped || o.gone) return false;
+    // Checked again after the query: an idle unload may have begun meanwhile (#startDueBatches
+    // works on a snapshot of #owned). From here to `decides.add` nothing awaits.
+    if (!batch.length || this.#stopped || o.gone || o.unloading) return false;
     const full = batch.length >= this.#o.batchSize;
     // Audit samples aren't urgent: they wait for other events, or for auditWaitMs.
     const urgent = batch.find((r) => r.route !== "audit");
@@ -863,6 +880,16 @@ export class Worker {
     const flagIds: string[] = [];
     const flagOf = new Map<string, string>();
     await this.#fenced(o, async (c) => {
+      // Lock every existing flag this outcome adds to, in one statement, in id order and before any
+      // other row lock (the usage row below). Batches of one workspace are stored concurrently and
+      // may add to the same flags: locking them one by one, in each batch's own order, deadlocks.
+      const targets = await all<FlagRow>(
+        c,
+        `SELECT ${FLAG_COLUMNS} FROM flags WHERE workspace_id = $1 AND id = ANY($2::text[]) ORDER BY id FOR UPDATE`,
+        [ws, [...out.attach.keys()]],
+      );
+      const rowOf = new Map(targets.map((r) => [r.id, r]));
+      reraiseClosed(out, rowOf, ctxOf);
       if (record) {
         await c.query("INSERT INTO decisions (id, workspace_id, created_at, decider, model, prompt, response, event_ids, cost_usd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", record);
         await addDeciderCall(c, ws, utcDay(now), cost ?? 0);
@@ -878,9 +905,7 @@ export class Worker {
         for (const e of f.event_ids) flagOf.set(e, id);
       }
       for (const [flagId, evs] of out.attach) {
-        // Locked: two batches may add to the same flag at once.
-        const row = await getFlagRow(c, ws, flagId, true);
-        if (!row) continue;
+        const row = rowOf.get(flagId)!; // reraiseClosed left only open flags that exist
         const merged = [...new Set([...row.event_ids, ...evs])].slice(0, 1000);
         await c.query("UPDATE flags SET event_ids = $1, event_count = coalesce(event_count, 0) + $2, updated_at = $3 WHERE id = $4", [JSON.stringify(merged), evs.length, now, flagId]);
         for (const e of evs) flagOf.set(e, flagId);
@@ -931,23 +956,28 @@ export class Worker {
    * skipped, and a claimed row's next_attempt_at moves forward by DELIVERY_CLAIM_MS, so once this
    * commits no one else finds it due: each delivery runs once per attempt, with no transaction
    * held while it runs.
+   *
+   * "Due" and the claim are the database's clock, like leases: every worker compares against the
+   * same clock, so one whose own clock runs behind can't make its claims expire early for the
+   * others (and run a delivery twice). `now` overrides it, for tests that move time forward.
    */
-  async claimDeliveries(now = Date.now(), limit = DELIVERY_CHUNK): Promise<Claimed[]> {
+  async claimDeliveries(now?: number, limit = DELIVERY_CHUNK): Promise<Claimed[]> {
     if (!this.#enabled) return [];
+    const clock = `coalesce($1::bigint, ${DB_NOW})`;
     return all<Claimed>(
       this.#db,
-      `UPDATE deliveries d SET next_attempt_at = $2
+      `UPDATE deliveries d SET next_attempt_at = ${clock} + $2
        FROM (SELECT flag_id, action, next_attempt_at FROM deliveries
-             WHERE status = 'pending' AND next_attempt_at <= $1
+             WHERE status = 'pending' AND next_attempt_at <= ${clock}
              ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED) due
        WHERE d.flag_id = due.flag_id AND d.action = due.action
        RETURNING d.flag_id, d.workspace_id, d.action, d.attempts, due.next_attempt_at AS was_due, d.next_attempt_at AS claimed_until`,
-      [now, now + DELIVERY_CLAIM_MS, limit],
+      [now ?? null, DELIVERY_CLAIM_MS, limit],
     );
   }
 
-  /** Run every delivery that is due. Returns how many were attempted. */
-  async deliverDue(now = Date.now()): Promise<number> {
+  /** Run every delivery that is due. Returns how many were attempted. `now`: see claimDeliveries. */
+  async deliverDue(now?: number): Promise<number> {
     const due = await this.claimDeliveries(now);
     await Promise.all(due.map((d) => this.#deliver(d)));
     return due.length;
@@ -979,13 +1009,22 @@ export class Worker {
     if (!adapter) {
       attempts = MAX_DELIVERY_ATTEMPTS - 1; // no point retrying
     } else {
+      // last_error is shown to the workspace's members: a database error's text stays in the log.
+      let events: CloudfriendEvent[] | null = null;
       try {
-        const events = await eventsByIds(this.#db, ws, flag.event_ids);
-        const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(DELIVERY_TIMEOUT_MS)]);
-        const ok = await adapter.run(flag, { events, env: this.#o.env, signal, ...(dest ? { config: dest.config ?? {} } : {}) });
-        if (ok === false) error = "run() returned false";
+        events = await eventsByIds(this.#db, ws, flag.event_ids);
       } catch (err) {
-        error = errMsg(err);
+        log.error("loading a flag's events for delivery failed", { workspace: ws, flag: flagId, action, error: errMsg(err) });
+        error = "internal error loading the flag's events";
+      }
+      if (events) {
+        try {
+          const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(DELIVERY_TIMEOUT_MS)]);
+          const ok = await adapter.run(flag, { events, env: this.#o.env, signal, ...(dest ? { config: dest.config ?? {} } : {}) });
+          if (ok === false) error = "run() returned false";
+        } catch (err) {
+          error = errMsg(err);
+        }
       }
     }
     // Where: still ours. Claims expire, and an expired one may have been taken by another worker.
@@ -1007,8 +1046,9 @@ export class Worker {
     const giveUp = n >= MAX_DELIVERY_ATTEMPTS;
     const changed = await run(
       this.#db,
-      `UPDATE deliveries SET status = $4, attempts = $5, last_error = $6, next_attempt_at = $7, updated_at = $8 ${mine}`,
-      [flagId, action, d.claimed_until, giveUp ? "failed" : "pending", n, pgText(error), now + deliveryBackoff(n), now],
+      // The retry is scheduled on the database's clock, like the claim.
+      `UPDATE deliveries SET status = $4, attempts = $5, last_error = $6, next_attempt_at = ${DB_NOW} + $7, updated_at = $8 ${mine}`,
+      [flagId, action, d.claimed_until, giveUp ? "failed" : "pending", n, pgText(error), deliveryBackoff(n), now],
     );
     if (changed && live) await run(this.#db, "UPDATE destinations SET last_error = $3 WHERE workspace_id = $1 AND id = $2", [ws, action, pgText(error)]);
     log.warn(giveUp ? "action failed; giving up" : "action failed; will retry", {
@@ -1086,6 +1126,38 @@ function outcomes(plan: Plan, decision: Decision, decisionId: string | null): Ma
   }
   for (const { item, verdict } of plan.cached) out.set(item.id, { judgment: verdict.escalate ? "relevant" : "benign", flag: null, decision: null });
   return out;
+}
+
+/**
+ * Events the outcome adds to an existing flag (a cached "escalate", or an alert that continues one)
+ * whose flag was resolved, marked or deleted after it was checked (the decider call takes seconds,
+ * and the check is not under the lock). Added to it, they would raise no alert at all. Instead each
+ * such flag's events get a new flag, with the old one's reason and severity, and the verdicts that
+ * pointed at the old flag point at the new one, so later events join it rather than the closed one.
+ * `rows` are the flags locked in this transaction. Changes `out` in place.
+ */
+function reraiseClosed(out: Outcome, rows: Map<string, FlagRow>, ctxOf: Map<string, Pending>): void {
+  for (const [flagId, evs] of [...out.attach]) {
+    const row = rows.get(flagId);
+    if (row && (row.status === "open" || row.status === "acknowledged")) continue;
+    out.attach.delete(flagId);
+    const templates = [...new Set(evs.map((id) => ctxOf.get(id)?.template).filter((t): t is string => !!t))];
+    const index =
+      out.flags.push({
+        reason: row?.reason ?? "Recurred: events the decider escalated before (their flag was deleted)",
+        severity: (row?.severity ?? "medium") as Severity,
+        event_ids: evs,
+        templates,
+        via: "decider",
+      }) - 1;
+    for (const id of evs) {
+      const it = ctxOf.get(id);
+      if (!it) continue;
+      const key = verdictKey(it);
+      const v = out.verdicts.get(key);
+      if (!v || v.flag === flagId) out.verdicts.set(key, { escalate: true, flag: index });
+    }
+  }
 }
 
 /** What the decider said the call cost, in USD; 0 when it didn't say. */

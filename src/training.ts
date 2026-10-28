@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { all, DEFAULT_WORKSPACE, one, tx, type DB } from "./db.ts";
+import { all, DEFAULT_WORKSPACE, one, tx, type DB, type Queryable } from "./db.ts";
 import { errMsg, log } from "./log.ts";
 import { Classifier, type ClassifierFile } from "./triage/classifier.ts";
 import { FEATURE_NAMES } from "./triage/features.ts";
@@ -34,6 +34,18 @@ import { verdictKey } from "./triage/cascade.ts";
 import { RoutingState, type RoutingOptions } from "./triage/routing.ts";
 import { BUILTIN_SCENARIOS, loadScenarios, runSuite } from "./triage/scenarios.ts";
 import { BUILTIN_MODEL, decodeFeatures, type Triage } from "./triage/runtime.ts";
+
+/**
+ * Whether there is only one workspace. The trainer learns from the default workspace's labels, and the
+ * model it promotes serves every workspace, so anything that may promote a model (scheduled or manual
+ * training, shadow promotion) only runs while that is the only one.
+ */
+export async function singleWorkspace(q: Queryable): Promise<boolean> {
+  return (await one<{ n: number }>(q, "SELECT count(*) AS n FROM workspaces"))!.n <= 1;
+}
+
+export const MULTI_WORKSPACE_TRAINING =
+  "training is off while there is more than one workspace: it learns from the default workspace's labels, and the model it would promote is shared by every workspace (a dry run still reports)";
 
 export const TRAIN_SCRIPT = path.join(import.meta.dirname, "..", "ml", "train.py");
 

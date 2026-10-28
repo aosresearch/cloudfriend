@@ -138,6 +138,8 @@ The server also serves a dashboard at `/`: a setup checklist, the escalation que
 
 Sign-in uses an `HttpOnly`, `SameSite=Lax` session cookie (`Secure` when `CLOUDFRIEND_PUBLIC_URL` is https). Sessions expire after `CLOUDFRIEND_SESSION_TTL` without use. Put cloudfriend behind TLS and set `CLOUDFRIEND_PUBLIC_URL` to the address people use.
 
+Failed password sign-ins slow down per email and per client address. Behind a reverse proxy, set `CLOUDFRIEND_TRUSTED_PROXIES` to the proxy's address so the client's address is read from `X-Forwarded-For`. Until then, requests from a loopback or private address (a proxy, or Docker's gateway) are limited per email only, since that address is shared by every client and one person's failures would lock everyone out.
+
 ### Single sign-on (OIDC)
 
 Set `CLOUDFRIEND_OIDC_ISSUER`, `CLOUDFRIEND_OIDC_CLIENT_ID`, `CLOUDFRIEND_OIDC_CLIENT_SECRET` and `CLOUDFRIEND_PUBLIC_URL`, and register this redirect URI with the provider:
@@ -149,7 +151,7 @@ Set `CLOUDFRIEND_OIDC_ISSUER`, `CLOUDFRIEND_OIDC_CLIENT_ID`, `CLOUDFRIEND_OIDC_C
 - **Auth0:** create a *Regular Web Application*, add the redirect URI under *Allowed Callback URLs*, and use `https://<tenant>.auth0.com/` (with the trailing slash) as the issuer.
 - **Google:** create an *OAuth client ID* of type *Web application* in Google Cloud, add the redirect URI under *Authorized redirect URIs*, and use `https://accounts.google.com` as the issuer. Set `CLOUDFRIEND_OIDC_ALLOWED_DOMAINS=yourcompany.com`, or any Google account can sign in.
 
-People are matched by the provider's subject id, not by email. The first sign-in creates the account; it is linked to an existing account with the same email only when the provider says the email is verified. New accounts are members of no workspace until they create one.
+People are matched by the provider's subject id, not by email. A first sign-in needs an email the provider says is verified (`email_verified`): it creates the account, or links to an existing account with the same email. Without it, sign-in is refused (`?auth_error=sso_unverified`, and a warning in the logs), so nobody can claim an address for someone else's later sign-in. New accounts are members of no workspace until they create one. `CLOUDFRIEND_ADMIN_EMAIL` can't name an account created by SSO sign-in: boot fails with a message saying so.
 
 ## How it works
 
@@ -282,6 +284,7 @@ Everything is set through environment variables.
 | `CLOUDFRIEND_PUBLIC_URL` | *(the request's address)* | The address people and senders use, e.g. `https://cloudfriend.example.com`. Used for source endpoint URLs, the OIDC redirect URI and `Secure` cookies. Required for OIDC. |
 | `CLOUDFRIEND_ADMIN_EMAIL` / `CLOUDFRIEND_ADMIN_PASSWORD` | *(unset)* | The first admin, kept in sync at every boot. Set both or neither; the password needs 12 characters or more. Without them, the first boot creates `admin@localhost` and prints its password once. |
 | `CLOUDFRIEND_SESSION_TTL` | `30d` | How long a session lasts without use (5m to 400d). |
+| `CLOUDFRIEND_TRUSTED_PROXIES` | *(none)* | Reverse proxies whose `X-Forwarded-For` names the client, for sign-in rate limiting: comma-separated IPs and CIDRs, or `loopback` and `private`, e.g. `loopback,10.0.0.0/8`. The client is the right-most address in the header that isn't a trusted proxy. Unset, a loopback or private peer counts as no client address (limited per email only). |
 | `CLOUDFRIEND_OIDC_ISSUER` | | The provider's issuer URL, e.g. `https://example.auth0.com/`. OIDC is on when the issuer, client id and secret are all set. |
 | `CLOUDFRIEND_OIDC_CLIENT_ID` / `CLOUDFRIEND_OIDC_CLIENT_SECRET` | | The client registered with the provider. Its redirect URI is `CLOUDFRIEND_PUBLIC_URL/auth/oidc/callback`. |
 | `CLOUDFRIEND_OIDC_ALLOWED_DOMAINS` | *(any)* | Comma-separated email domains allowed to sign in, e.g. `example.com`. |
@@ -350,7 +353,7 @@ To rotate a secret, create a new one, update the sender, then revoke the old one
 | `GET /decisions/:id` | One decider call that produced labels: the exact prompt, the raw reply, the model and the events. Labels point to it by `decision_id`. |
 | `GET /model` | The active classifier, the one in shadow if any with its evidence so far, and the last training runs with their reports. |
 | `GET /model/shadow/review` | Events the model in shadow would newly drop that a person should look at: judged relevant, or not judged at all. |
-| `POST /model/train?dry_run=1` | Train now. Returns the run's report. |
+| `POST /model/train?dry_run=1` | Train now. Returns the run's report. `409` while there is more than one workspace (the model is shared by all of them), except for a dry run. |
 | `GET /stats?since=24h` | Events per route, share past the classifier, flags by status, Jev calls since start, the model. |
 
 `since` and `until` take ISO 8601, epoch milliseconds, or a relative duration such as `since=1h`. `limit` defaults to 100 and caps at 1000.
