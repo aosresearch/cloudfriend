@@ -321,7 +321,15 @@ describe(`docker compose with ${IMAGE}`, { timeout: 900_000 }, () => {
       const app = await p.container("cloudfriend");
       const startedAt = await p.inspect(app, "{{.State.StartedAt}}");
       await p.compose("restart", "postgres");
-      const ev = await testEvent(http, 60_000);
+      // While Postgres comes back the API answers 503 with retry-after (never a 500); a client retries.
+      const statuses: number[] = [];
+      const { queue_id } = await eventually(async () => {
+        const r = await http.post(`${WS}/test-event`);
+        statuses.push(r.status);
+        return r.status === 200 && r.json;
+      }, 60_000);
+      assert.ok(statuses.every((s) => s === 200 || s === 503), `statuses: ${statuses.join(", ")}`);
+      const ev = await decided(http, queue_id, 60_000);
       assert.ok(ev.flag_id);
       assert.equal(await p.inspect(app, "{{.State.StartedAt}}"), startedAt, "the app kept running");
       assert.equal(await p.inspect(app, "{{.State.Status}}"), "running");

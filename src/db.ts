@@ -115,6 +115,24 @@ export async function run(q: Queryable, sql: string, params: unknown[] = []): Pr
   return (await q.query(sql, params)).rowCount ?? 0;
 }
 
+/** Node socket errors that mean the database can't be reached right now. */
+const UNREACHABLE = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH"]);
+
+/**
+ * Whether `err` means the database is unavailable for a while (restarting, refusing or dropping
+ * connections) rather than that the query was wrong. Callers answer 503 with Retry-After, so
+ * people and senders retry instead of seeing an internal error.
+ */
+export function isDatabaseUnavailable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") {
+    // 08xxx connection exception; 57P01-57P03 shutting down, crashed, starting up; 53300 too many connections.
+    if (code.startsWith("08") || ["57P01", "57P02", "57P03", "53300"].includes(code) || UNREACHABLE.has(code)) return true;
+  }
+  return /Connection terminated|connection error|timeout exceeded when trying to connect/i.test(err.message);
+}
+
 /**
  * Postgres text can't hold NUL. Untrusted strings (hints, templates, decider replies) lose it
  * rather than fail the whole transaction they are written in, again on every retry.

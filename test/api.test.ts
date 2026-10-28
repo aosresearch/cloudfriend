@@ -169,6 +169,23 @@ describe("read API", () => {
     assert.equal(await count(cloudfriend, "flags"), 1);
   });
 
+  it("answers 503 with retry-after, not 500, while the database is unavailable", async () => {
+    cloudfriend = await makeCloudfriend();
+    const db = cloudfriend.db;
+    const starting = () => Promise.reject(Object.assign(new Error("the database system is starting up"), { code: "57P03" }));
+    const query = db.query;
+    db.query = starting as typeof db.query;
+    try {
+      const res = await cloudfriend.app.request("/flags", { headers: { authorization: `Bearer ${ADMIN}` } });
+      assert.equal(res.status, 503);
+      assert.equal(res.headers.get("retry-after"), "5");
+      assert.deepEqual(await res.json(), { error: "storage unavailable, try again shortly" });
+    } finally {
+      db.query = query;
+    }
+    assert.equal((await cloudfriend.app.request("/flags", { headers: { authorization: `Bearer ${ADMIN}` } })).status, 200);
+  });
+
   it("returns JSON 404 for unknown API routes (other GETs get the dashboard)", async () => {
     cloudfriend = await makeCloudfriend();
     for (const path of ["/api/nope", "/in/x", "/auth/nope"]) {

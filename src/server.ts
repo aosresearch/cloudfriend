@@ -1,7 +1,7 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { registerDashboardApi, registerUi, type AuthSetup } from "./api/index.ts";
 import { BadRequest, HttpError, MAX_LIMIT, parseLimit, parseTime } from "./api/http.ts";
-import { all, DEFAULT_WORKSPACE, one, pgText, run, type DB } from "./db.ts";
+import { all, DEFAULT_WORKSPACE, isDatabaseUnavailable, one, pgText, run, type DB } from "./db.ts";
 import { checkDestinationUrl } from "./net/outbound.ts";
 import { QueueFullError, type Intake } from "./intake.ts";
 import { errMsg, log } from "./log.ts";
@@ -85,6 +85,12 @@ export function createApp(deps: AppDeps): Hono {
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
+    if (isDatabaseUnavailable(err)) {
+      // Postgres restarting or out of reach: a wait-and-retry, not a bug.
+      log.warn("request failed: database unavailable", { path: c.req.path, error: errMsg(err) });
+      c.header("retry-after", "5");
+      return c.json({ error: "storage unavailable, try again shortly" }, 503);
+    }
     log.error("request failed", { path: c.req.path, error: errMsg(err) });
     return c.json({ error: "internal error" }, 500);
   });

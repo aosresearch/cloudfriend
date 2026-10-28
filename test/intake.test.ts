@@ -35,7 +35,8 @@ describe("ingest", () => {
   });
 
   it("group-commits concurrent requests in one transaction", async () => {
-    cloudfriend = await makeCloudfriend({ config: { commitWindowMs: 20 } });
+    // A window long enough that all 50 land in it even on a slow CI machine.
+    cloudfriend = await makeCloudfriend({ config: { commitWindowMs: 1000 } });
     const results = await Promise.all(Array.from({ length: 50 }, (_, i) => cloudfriend.post("myapp", { i })));
     assert.ok(results.every((r) => r.status === 202));
     assert.equal(await count(cloudfriend, "queue"), 50);
@@ -132,7 +133,8 @@ describe("ingest", () => {
 
 describe("crash safety", () => {
   it("commits a batch whole or not at all, and answers every request in it accordingly", async () => {
-    cloudfriend = await makeCloudfriend({ config: { commitWindowMs: 20 } });
+    // A window long enough that the poison row shares its commit with the other 9, even on a slow CI machine.
+    cloudfriend = await makeCloudfriend({ config: { commitWindowMs: 1000 } });
     // A row the database refuses fails the commit it is in.
     await cloudfriend.db.query(`CREATE FUNCTION reject_poison() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF convert_from(NEW.body, 'UTF8') LIKE '%poison%' THEN RAISE EXCEPTION 'poison'; END IF; RETURN NEW; END $$`);

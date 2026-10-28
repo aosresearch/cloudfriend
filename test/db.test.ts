@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DEFAULT_WORKSPACE, migrations, openDb, tx } from "../src/db.ts";
+import { DEFAULT_WORKSPACE, isDatabaseUnavailable, migrations, openDb, tx } from "../src/db.ts";
 import { loadConfig } from "../src/config.ts";
 import "./helpers.ts";
 import { freshDatabase } from "./pg.ts";
@@ -77,6 +77,23 @@ describe("database", () => {
     } finally {
       process.off("uncaughtException", onUncaught);
       await db.end();
+    }
+  });
+
+  it("tells an unavailable database from a bad query", async () => {
+    const pgError = (code: string, message = "x") => Object.assign(new Error(message), { code });
+    for (const code of ["57P03", "57P01", "08006", "08001", "53300", "ECONNREFUSED", "ECONNRESET"]) assert.ok(isDatabaseUnavailable(pgError(code)), code);
+    assert.ok(isDatabaseUnavailable(new Error("Connection terminated unexpectedly")));
+    for (const code of ["42P01", "23505", "22P02"]) assert.ok(!isDatabaseUnavailable(pgError(code)), code);
+    assert.ok(!isDatabaseUnavailable("not an error"));
+    // And a pool pointed at a port nothing listens on.
+    const { default: pg } = await import("pg");
+    const dead = new pg.Pool({ connectionString: "postgres://x:y@127.0.0.1:1/z", connectionTimeoutMillis: 2000 });
+    try {
+      const err = await dead.query("SELECT 1").then(() => null, (e: unknown) => e);
+      assert.ok(isDatabaseUnavailable(err), String(err));
+    } finally {
+      await dead.end();
     }
   });
 
