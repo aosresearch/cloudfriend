@@ -10,7 +10,8 @@ import { Gbdt } from "../src/triage/gbdt.ts";
 import { BUILTIN_MODEL, encodeFeatures, Triage } from "../src/triage/runtime.ts";
 import { DEFAULT_WORKSPACE as WS, openDb } from "../src/db.ts";
 import { gate, limitThreshold, rulesAtTheTime, splitLabels, Trainer } from "../src/training.ts";
-import { count, fakeDecider, makeCloudfriend, rows, tempDir, type TestCloudfriend } from "./helpers.ts";
+import { log } from "../src/log.ts";
+import { count, fakeDecider, makeCloudfriend, rows, tempDir, waitFor, type TestCloudfriend } from "./helpers.ts";
 import { freshDatabase } from "./pg.ts";
 
 const ERRORISH = FEATURE_NAMES.indexOf("errorish");
@@ -469,6 +470,70 @@ describe("triage in the pipeline", () => {
     await run();
     assert.equal(await count(cf, "flags"), 2, "the events are not hidden in a resolved flag");
     assert.equal((await json(cf.get("/queue"))).flags.length, 1);
+  });
+
+  it("raises a new flag for cached-verdict events whose flag was resolved during the decider call", async () => {
+    let gate: Promise<void> = Promise.resolve();
+    let open!: () => void;
+    const calls: string[][] = [];
+    const d = fakeDecider(async (events) => {
+      calls.push(events.map((e) => e.id));
+      await gate;
+      return { flags: [{ reason: "payments failing", severity: "high", event_ids: events.map((e) => e.id) }], judgments: events.map((e) => ({ event_id: e.id, relevance: "relevant" as const })) };
+    });
+    cf = await makeCloudfriend({ decider: d.adapter, config: { triage: true, modelPath: writeModel(tinyModel()), auditRate: 0, batchSize: 50, batchWaitMs: 0, suppressionTtlMs: 0 } });
+    await cf.db.query("INSERT INTO destinations (id, workspace_id, name, kind, config, created_at) VALUES ('dst_hook', $1, 'hook', 'webhook', '{}', $2)", [WS, Date.now()]);
+    await cf.post("app", { level: "error", message: "payment provider timeout after 1ms" });
+    await run();
+    const [f1] = await rows(cf, "SELECT id FROM flags");
+    // One event the cached verdict adds to f1 without asking, and a new kind that needs a call.
+    gate = new Promise((r) => (open = r));
+    await cf.post("app", [{ level: "error", message: "payment provider timeout after 2ms" }, { level: "error", message: "ledger write failed totally" }]);
+    await cf.worker.parseNew();
+    await cf.worker.startDueBatches();
+    await waitFor(() => calls.length === 2);
+    assert.equal(calls[1]!.length, 1, "the cached event isn't asked about");
+    // A person resolves f1 while the call is in flight.
+    await cf.db.query("UPDATE flags SET status = 'resolved' WHERE id = $1", [f1.id]);
+    open();
+    await cf.worker.whenIdle();
+    const [e2] = await rows(cf, "SELECT flag_id FROM events WHERE data LIKE '%2ms%'");
+    assert.notEqual(e2.flag_id, f1.id, "the new occurrence is not hidden in the resolved flag");
+    const [reraised] = await rows(cf, "SELECT reason, severity, status, event_ids FROM flags WHERE id = $1", e2.flag_id);
+    assert.deepEqual(reraised, { reason: "payments failing", severity: "high", status: "open", event_ids: [String((await rows(cf, "SELECT id FROM events WHERE data LIKE '%2ms%'"))[0].id)] });
+    assert.equal((await rows(cf, "SELECT event_ids FROM flags WHERE id = $1", f1.id))[0].event_ids.length, 1);
+    assert.equal(await count(cf, "deliveries WHERE flag_id = $1 AND action = 'dst_hook'", e2.flag_id), 1, "the new flag is delivered");
+    // The cached verdict now points at the new flag, not the resolved one.
+    await cf.post("app", { level: "error", message: "payment provider timeout after 3ms" });
+    await run();
+    assert.equal(calls.length, 2);
+    assert.equal((await rows(cf, "SELECT flag_id FROM events WHERE data LIKE '%3ms%'"))[0].flag_id, e2.flag_id);
+  });
+
+  it("stores concurrent batches that add to the same flags without deadlocking", async (t) => {
+    const errors: string[] = [];
+    t.mock.method(log, "error", (msg: string, f?: Record<string, unknown>) => void errors.push(`${msg} ${f?.error ?? ""}`));
+    const d = fakeDecider((events) => ({
+      flags: events.map((e) => ({ reason: "r" + e.id, severity: "high" as const, event_ids: [e.id] })),
+      judgments: events.map((e) => ({ event_id: e.id, relevance: "relevant" as const })),
+    }));
+    cf = await makeCloudfriend({
+      decider: d.adapter,
+      config: { triage: true, modelPath: writeModel(tinyModel()), auditRate: 0, suppressionTtlMs: 0, batchSize: 2, batchWaitMs: 0, deciderConcurrency: 8 },
+    });
+    const a = (n: number) => ({ level: "error", message: `payment provider timeout after ${n}ms` });
+    const b = (n: number) => ({ level: "error", message: `ledger write failed for account ${n}` });
+    await cf.post("app", [a(1), b(1)]);
+    await run();
+    assert.equal(await count(cf, "flags"), 2);
+    // Batches of two cached events, in both orders, stored at once: each adds to both flags.
+    for (let round = 0; round < 10; round++) {
+      await cf.post("app", [a(round + 10), b(round + 10), b(round + 20), a(round + 20)]);
+      await run();
+    }
+    assert.deepEqual(errors.filter((e) => /deadlock/.test(e)), []);
+    assert.equal(await count(cf, "events WHERE NOT decided"), 0);
+    assert.equal(await count(cf, "flags"), 2);
   });
 
   it("clears decision prompts with the events they quote", async () => {

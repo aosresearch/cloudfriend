@@ -6,7 +6,7 @@ import { all, DEFAULT_WORKSPACE, one, pgText, run, tx, type DB, type Queryable }
 import type { Intake } from "./intake.ts";
 import { LeaseLost, Leases, type Held } from "./leases.ts";
 import { errMsg, log } from "./log.ts";
-import { EVENT_COLUMNS, eventsByIds, getFlagRow, toEvent, toFlag, type EventRow } from "./store.ts";
+import { EVENT_COLUMNS, eventsByIds, FLAG_COLUMNS, getFlagRow, toEvent, toFlag, type EventRow, type FlagRow } from "./store.ts";
 import { applyVerdicts, labelProvenance, planBatch, verdictKey, type Outcome, type Pending, type Plan } from "./triage/cascade.ts";
 import { humanLabelsSince, type HumanLabel, type Triage } from "./triage/runtime.ts";
 import { toDecision, type ActionAdapter, type CloudfriendEvent, type DeciderAdapter, type Decision, type Judgment, type ParsedEvent, type Severity, type SourceAdapter } from "./types.ts";
@@ -863,6 +863,16 @@ export class Worker {
     const flagIds: string[] = [];
     const flagOf = new Map<string, string>();
     await this.#fenced(o, async (c) => {
+      // Lock every existing flag this outcome adds to, in one statement, in id order and before any
+      // other row lock (the usage row below). Batches of one workspace are stored concurrently and
+      // may add to the same flags: locking them one by one, in each batch's own order, deadlocks.
+      const targets = await all<FlagRow>(
+        c,
+        `SELECT ${FLAG_COLUMNS} FROM flags WHERE workspace_id = $1 AND id = ANY($2::text[]) ORDER BY id FOR UPDATE`,
+        [ws, [...out.attach.keys()]],
+      );
+      const rowOf = new Map(targets.map((r) => [r.id, r]));
+      reraiseClosed(out, rowOf, ctxOf);
       if (record) {
         await c.query("INSERT INTO decisions (id, workspace_id, created_at, decider, model, prompt, response, event_ids, cost_usd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", record);
         await addDeciderCall(c, ws, utcDay(now), cost ?? 0);
@@ -878,9 +888,7 @@ export class Worker {
         for (const e of f.event_ids) flagOf.set(e, id);
       }
       for (const [flagId, evs] of out.attach) {
-        // Locked: two batches may add to the same flag at once.
-        const row = await getFlagRow(c, ws, flagId, true);
-        if (!row) continue;
+        const row = rowOf.get(flagId)!; // reraiseClosed left only open flags that exist
         const merged = [...new Set([...row.event_ids, ...evs])].slice(0, 1000);
         await c.query("UPDATE flags SET event_ids = $1, event_count = coalesce(event_count, 0) + $2, updated_at = $3 WHERE id = $4", [JSON.stringify(merged), evs.length, now, flagId]);
         for (const e of evs) flagOf.set(e, flagId);
@@ -1086,6 +1094,38 @@ function outcomes(plan: Plan, decision: Decision, decisionId: string | null): Ma
   }
   for (const { item, verdict } of plan.cached) out.set(item.id, { judgment: verdict.escalate ? "relevant" : "benign", flag: null, decision: null });
   return out;
+}
+
+/**
+ * Events the outcome adds to an existing flag (a cached "escalate", or an alert that continues one)
+ * whose flag was resolved, marked or deleted after it was checked (the decider call takes seconds,
+ * and the check is not under the lock). Added to it, they would raise no alert at all. Instead each
+ * such flag's events get a new flag, with the old one's reason and severity, and the verdicts that
+ * pointed at the old flag point at the new one, so later events join it rather than the closed one.
+ * `rows` are the flags locked in this transaction. Changes `out` in place.
+ */
+function reraiseClosed(out: Outcome, rows: Map<string, FlagRow>, ctxOf: Map<string, Pending>): void {
+  for (const [flagId, evs] of [...out.attach]) {
+    const row = rows.get(flagId);
+    if (row && (row.status === "open" || row.status === "acknowledged")) continue;
+    out.attach.delete(flagId);
+    const templates = [...new Set(evs.map((id) => ctxOf.get(id)?.template).filter((t): t is string => !!t))];
+    const index =
+      out.flags.push({
+        reason: row?.reason ?? "Recurred: events the decider escalated before (their flag was deleted)",
+        severity: (row?.severity ?? "medium") as Severity,
+        event_ids: evs,
+        templates,
+        via: "decider",
+      }) - 1;
+    for (const id of evs) {
+      const it = ctxOf.get(id);
+      if (!it) continue;
+      const key = verdictKey(it);
+      const v = out.verdicts.get(key);
+      if (!v || v.flag === flagId) out.verdicts.set(key, { escalate: true, flag: index });
+    }
+  }
 }
 
 /** What the decider said the call cost, in USD; 0 when it didn't say. */
