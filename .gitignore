@@ -11,3 +11,6 @@ docs/.vitepress/cache/
 # Benchmark data, features, Jev reply cache and results (see ml/README.md)
 data/
 ml/**/__pycache__/
+
+# Compose settings and secrets (copy .env.example)
+.env
