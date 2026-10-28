@@ -16,26 +16,29 @@ Code: `src/worker.ts` (`parseNew`, `startDueBatches`, `#decideBatch`, `#storeDec
 ```mermaid
 flowchart TB
   queue[("queue<br/>status = new")] --> parse["Parse<br/>200 requests per pass"]
-  parse --> events[("events<br/>decided = 0")]
+  parse --> events[("events<br/>decided = false")]
   events --> ready{"100 waiting, or<br/>oldest waited 10 s?"}
   ready -->|yes| decide["Decide<br/>up to 2 batches at once"]
   ready -->|no| events
-  decide --> flags[("flags + deliveries<br/>events decided = 1")]
+  decide --> flags[("flags + deliveries<br/>events decided = true")]
 ```
 
 ## The worker loop
 
+Parse and decide run per workspace, only in the worker that holds the workspace's lease (see [Processes and workspaces](../architecture.md#processes-and-workspaces)). Every write they make is fenced on that lease: it rolls back if another worker has claimed the workspace since.
+
 The worker wakes every `CLOUDFRIEND_POLL_INTERVAL` (200 ms) and, in order:
 
-1. parses new requests until none are left,
-2. starts a decide call for every batch that is ready,
-3. starts a [delivery](./delivery.md) pass if one is not already running.
+1. claims workspaces with work, if it has room (at most once a second),
+2. parses new requests of each workspace it holds until none are left, 200 per workspace in turn,
+3. starts a decide call for every batch that is ready,
+4. starts a [delivery](./delivery.md) pass if one is not already running.
 
-Parsing is synchronous and quick. Decide calls and deliveries are network calls, so the loop starts them and moves on instead of waiting.
+Parsing is quick and waits on nothing but the database. Decide calls and deliveries are network calls, so the loop starts them and moves on instead of waiting.
 
 ## Parse
 
-Parse reads up to 200 `queue` rows with `status = 'new'`, oldest first, and runs each through the source adapter with the same name as its source. A source with no adapter of that name uses `json`.
+Parse reads up to 200 of a workspace's `queue` rows with `status = 'new'`, oldest first, and runs each through its source adapter: the one intake recorded in `queue.adapter` (from the source's kind), or for older rows the one with the same name as its source. A source with no adapter of that name uses `json`. The same transaction lowers the workspace's `backlog` counter.
 
 | Adapter | Turns a request into |
 | --- | --- |
@@ -51,7 +54,7 @@ Each event is stored with its JSON `data` and three optional hints set by the ad
 
 Deciders use the hints when they are there and work without them.
 
-All events from the pass, and the new status of each request, are written in one transaction. A request becomes `done`, or `failed` if its adapter threw. A failed request is kept, not retried, and logged with its queue id so you can look at the body.
+The pass reads its requests with `FOR UPDATE SKIP LOCKED`, and all events from the pass, and the new status of each request, are written in that same transaction, so no two parsers ever take the same request. A request becomes `done`, or `failed` if its adapter threw. A failed request is kept, not retried, and logged with its queue id so you can look at the body.
 
 ### Source adapter: `parse`
 
@@ -74,14 +77,14 @@ Return an array. Only `data` is required. Return `[]` to drop a request, and thr
 
 ### When a batch is ready
 
-Decide looks at events with `decided = 0`, oldest first. It starts a batch when either:
+Decide looks at events with `decided = false`, oldest first. It starts a batch when either:
 
 - `CLOUDFRIEND_BATCH_SIZE` events (100) are waiting, or
 - the oldest waiting event arrived `CLOUDFRIEND_BATCH_WAIT` (10 s) ago or more.
 
 So under heavy traffic the model gets full batches as fast as it can take them, and under light traffic no event waits more than about 10 seconds.
 
-Up to `CLOUDFRIEND_DECIDER_CONCURRENCY` (2) batches are decided at once. Events already in a running batch are skipped when the next batch is built, so no event is in two batches at the same time.
+A batch holds events of one workspace only. Up to `CLOUDFRIEND_DECIDER_CONCURRENCY` (2) batches are decided at once per worker. Workspaces take turns: each round offers every workspace one batch, starting with a different workspace each time. Events already in a running batch are skipped when the next batch is built, so no event is in two batches at the same time.
 
 ### What the decider returns
 
@@ -103,24 +106,33 @@ cloudfriend then, in one transaction:
 
 1. drops drafts with no reason, and event ids that are not in this batch,
 2. stores each remaining flag with a new id such as `flg_8c1d0e4f2a7b9c3d5e6f`,
-3. adds one `deliveries` row per enabled action for each flag,
-4. marks every event in the batch `decided = 1`, flagged or not.
+3. adds one `deliveries` row per destination of the workspace for each flag,
+4. marks every event in the batch `decided = true`, flagged or not, with what the decider made of it: `judgment` (`relevant`, `benign` or `uncertain`; events that followed an example or a cached verdict get that one), `flag_id` (the flag it joined) and `decision_id` (the call that judged it),
+5. counts the call in `usage`, with its cost when the decider reports one (`decisions.cost_usd`).
 
-### The default decider: OpenRouter
+### Triage before the decider
 
-The `openrouter` decider makes one chat completion per batch:
+With triage on (the default), parse also scores each event with the classifier, and only events that pass it wait for a batch. Before the batch reaches the decider, events are grouped by template and recent verdicts are reused, so the decider sees a few examples per template. [Triage](../triage.md) describes the routes, the grouping and the verdict cache. The steps below still apply to the examples that are sent.
 
-- **System prompt.** Describes cloudfriend's job: flag new or unusual errors, spikes, regressions after deploys, outages, data loss, security problems, and failures in checkout, payments or signup. Ignore routine logs, isolated handled errors and normal analytics. Group events with the same cause into one flag. `CLOUDFRIEND_DECIDER_INSTRUCTIONS` is appended as operator context.
-- **User message.** The batch, oldest first. Each event is a numbered line with its source, time, type and group, then its data as compact JSON cut to `CLOUDFRIEND_EVENT_CHARS` (1500) characters. Plain fields come before nested ones, so the cut removes stack frames rather than the error title.
+### The Jev and OpenRouter deciders
+
+The `jev` decider (the default) and the `openrouter` decider share one implementation and make one chat completion per batch. Jev uses `JEV_API_KEY` and `JEV_MODEL` (`typesafe/jev-router`); openrouter uses `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`.
+
+- **System prompt.** Describes cloudfriend's job: flag new or unusual errors, spikes, regressions after deploys, crashes (a service process killed or exiting with an error, unless the events show a planned deploy), outages, data loss, security problems, and failures in checkout, payments or signup. Ignore routine logs, isolated handled errors and normal analytics. Group events with the same cause into one flag. It also explains the classifier's `classifier_score` (a hint, not a verdict) and `similar_events_not_shown`. `CLOUDFRIEND_DECIDER_INSTRUCTIONS` is appended as operator context, followed by the workspace's own `decider_instructions` setting.
+- **User message.** The batch, oldest first. Each event is a numbered line with its source, time, type and group, plus its classifier score and how many similar events it stands for. Then comes its data as compact JSON, cut to `CLOUDFRIEND_EVENT_CHARS` (1500) characters. Plain fields come before nested ones, so the cut removes stack frames rather than the error title.
 - **Reply.** JSON only, `{"flags": [{"reason", "severity", "events": [0, 3]}]}`, with `temperature: 0`. The numbers are mapped back to event ids. Unknown numbers are ignored, and an unknown severity becomes `medium`.
 
-The model is `OPENROUTER_MODEL` (`anthropic/claude-haiku-5.5` by default), and each call times out after 90 seconds. `OPENROUTER_BASE_URL` points it at any OpenAI-compatible endpoint instead.
+Each call times out after 180 seconds. `OPENROUTER_BASE_URL` points either decider at any OpenAI-compatible endpoint instead.
 
-Without `OPENROUTER_API_KEY` the decider is off. Events are still parsed and stored, and they are decided once a key is set and cloudfriend restarts.
+Without a key the decider is off. With a classifier loaded, the classifier then escalates on its own at its `threshold`. Without a classifier (`CLOUDFRIEND_TRIAGE=off`), events are parsed and stored, and decided once a key is set and cloudfriend restarts.
+
+### Budget
+
+`CLOUDFRIEND_JEV_DAILY_BUDGET_USD` caps each workspace's decider spend per UTC day, as OpenRouter reports it; a workspace's `jev_budget_usd` setting overrides it. Unset, there is no cap. Once a workspace's spend for the day reaches it, its batches are decided by the classifier alone, as when no decider is configured, until the day ends; this is logged once per workspace per day. Other workspaces are not affected. With triage off there is no classifier, so its events wait for the next day.
 
 ### When the decider fails
 
-If the call throws (model down, bad key, unreadable reply), nothing is written: the events stay `decided = 0` and are tried again. Retries back off from 1 second, doubling up to 5 minutes, and reset after the first success. Events are never dropped because the model was unavailable.
+If the call throws (model down, bad key, unreadable reply), nothing is written: the events stay `decided = false` and are tried again. Retries back off from 1 second, doubling up to 5 minutes, per workspace, and reset after the first success. Events are never dropped because the model was unavailable.
 
 ### Decider adapter: `decide`
 
@@ -146,6 +158,10 @@ Each event has `id`, `source`, `received_at`, `data` and the optional hints. Pas
 | --- | --- | --- |
 | `CLOUDFRIEND_BATCH_SIZE` | `100` | Larger batches give the model more context and cost less per event, but each call is slower. |
 | `CLOUDFRIEND_BATCH_WAIT` | `10s` | The longest an event waits before it is decided. |
-| `CLOUDFRIEND_DECIDER_CONCURRENCY` | `2` | Raise it if flags arrive later and later under steady traffic, which means batches are waiting for a free decide slot. |
+| `CLOUDFRIEND_DECIDER_CONCURRENCY` | `2` | Per worker, over all its workspaces. Raise it if flags arrive later and later under steady traffic, which means batches are waiting for a free decide slot. |
+| `CLOUDFRIEND_JEV_DAILY_BUDGET_USD` | *(no cap)* | Decider spend per workspace per UTC day before the classifier decides alone. |
+| `CLOUDFRIEND_MAX_WORKSPACES_PER_WORKER` | `200` | Workspaces one worker holds at once. |
+| `CLOUDFRIEND_LEASE_TTL` / `CLOUDFRIEND_LEASE_RENEW` | `30s` / `10s` | How long a lease lasts, and how often its owner renews it. A crashed worker's workspaces are taken over after the TTL. |
+| `CLOUDFRIEND_IDLE_UNLOAD` | `10m` | A workspace without work for this long is released and dropped from memory. |
 | `CLOUDFRIEND_EVENT_CHARS` | `1500` | How much of each event the model sees. |
 | `CLOUDFRIEND_POLL_INTERVAL` | `200ms` | How often the idle worker checks for new work. |

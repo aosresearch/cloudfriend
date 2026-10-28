@@ -6,9 +6,14 @@ import path from "node:path";
 import { loadAdapters, type Adapters } from "../src/adapters.ts";
 import { loadConfig, type Config } from "../src/config.ts";
 import { createCloudfriend, type cloudfriend } from "../src/cloudfriend.ts";
-import type { ActionAdapter, DeciderAdapter, FlagDraft, CloudfriendEvent } from "../src/types.ts";
+import { after } from "node:test";
+import { dropDatabases, freshDatabase } from "./pg.ts";
+import type { ActionAdapter, DeciderAdapter, Decision, FlagDraft, CloudfriendEvent } from "../src/types.ts";
 
 process.env.CLOUDFRIEND_LOG ??= "silent";
+
+// Each test file runs in its own process: drop the databases it made once it is done.
+after(dropDatabases);
 
 export const ADMIN = "test-admin-key";
 
@@ -16,21 +21,26 @@ export function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cloudfriend-test-"));
 }
 
-export function testConfig(over: Partial<Config> = {}): Config {
+/** A config on a fresh, empty database, unless `over` names one (to reopen it, as after a restart). */
+export async function testConfig(over: Partial<Config> = {}): Promise<Config> {
   return {
-    ...loadConfig({}),
+    ...loadConfig({ CLOUDFRIEND_DATABASE_URL: over.databaseUrl ?? (await freshDatabase()) }),
     dataDir: tempDir(),
     adminKey: ADMIN,
     batchSize: 3,
     batchWaitMs: 60_000,
     pollMs: 10,
     cleanupIntervalMs: 3_600_000,
+    // The v0 tests check the pipeline without the classifier; test/triage.test.ts turns it on.
+    triage: false,
+    // Promote trained models at once; the shadow tests set a period.
+    shadowPeriodMs: 0,
     ...over,
   };
 }
 
 /** A decider that records what it saw and returns whatever `respond` says. */
-export function fakeDecider(respond: (events: CloudfriendEvent[]) => FlagDraft[] | Promise<FlagDraft[]> = () => []) {
+export function fakeDecider(respond: (events: CloudfriendEvent[]) => FlagDraft[] | Decision | Promise<FlagDraft[] | Decision> = () => []) {
   const calls: CloudfriendEvent[][] = [];
   const adapter: DeciderAdapter = {
     async decide(events) {
@@ -75,12 +85,12 @@ export interface TestCloudfriend extends cloudfriend {
 }
 
 export async function makeCloudfriend(
-  opts: { config?: Partial<Config>; decider?: DeciderAdapter | null; actions?: Record<string, ActionAdapter> } = {},
+  opts: { config?: Partial<Config>; decider?: DeciderAdapter | null; actions?: Record<string, ActionAdapter>; env?: NodeJS.ProcessEnv } = {},
 ): Promise<TestCloudfriend> {
-  const config = testConfig({ decider: "test", ...opts.config });
+  const config = await testConfig({ decider: "test", ...opts.config });
   const adapters = await testAdapters(opts.decider === undefined ? fakeDecider().adapter : opts.decider, opts.actions);
-  const cloudfriend = await createCloudfriend(config, {}, adapters);
-  const secret = cloudfriend.bootSecret ?? cloudfriend.secrets.create("test").secret;
+  const cloudfriend = await createCloudfriend(config, opts.env ?? {}, adapters);
+  const secret = cloudfriend.bootSecret ?? (await cloudfriend.secrets.create("test")).secret;
   return Object.assign(cloudfriend, {
     config,
     secret,
@@ -97,18 +107,23 @@ export async function makeCloudfriend(
   });
 }
 
-export async function waitFor<T>(fn: () => T | undefined | null | false, timeoutMs = 3_000): Promise<T> {
+export async function waitFor<T>(fn: () => T | undefined | null | false | Promise<T | undefined | null | false>, timeoutMs = 3_000): Promise<T> {
   const start = Date.now();
   for (;;) {
-    const v = fn();
+    const v = await fn();
     if (v) return v;
     if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
     await new Promise((r) => setTimeout(r, 10));
   }
 }
 
-export function count(cloudfriend: cloudfriend, sql: string, ...args: (string | number)[]): number {
-  return (cloudfriend.db.prepare(`SELECT count(*) AS n FROM ${sql}`).get(...args) as { n: number }).n;
+export async function count(cloudfriend: cloudfriend, sql: string, ...args: (string | number)[]): Promise<number> {
+  return (await cloudfriend.db.query(`SELECT count(*) AS n FROM ${sql}`, args)).rows[0].n;
+}
+
+/** Rows of a query on an instance's database. */
+export async function rows(cloudfriend: cloudfriend, sql: string, ...args: unknown[]): Promise<any[]> {
+  return (await cloudfriend.db.query(sql, args)).rows;
 }
 
 export interface Recorded {

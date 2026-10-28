@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { after, before, describe, it } from "node:test";
 import { mockServer, tempDir, waitFor } from "./helpers.ts";
+import { freshDatabase } from "./pg.ts";
 
 describe("end to end: Sentry -> decider -> Slack", () => {
   let openrouter: Awaited<ReturnType<typeof mockServer>>;
@@ -15,9 +16,13 @@ describe("end to end: Sentry -> decider -> Slack", () => {
 
   before(async () => {
     openrouter = await mockServer((req) => {
+      // Answers like Jev: a judgment for every event shown, and alerts for the ones that matter.
       const prompt = JSON.parse(req.body).messages[1].content as string;
-      const hit = prompt.includes("TypeError") ? [{ reason: "New TypeError in checkout", severity: "high", events: [0] }] : [];
-      return { body: { choices: [{ message: { content: JSON.stringify({ flags: hit }) } }] } };
+      const shown = [...prompt.matchAll(/^\[(\d+)\] /gm)].length;
+      const bad = prompt.slice(prompt.indexOf("events, oldest first")).includes("TypeError"); // not the open-alerts list
+      const judgments = Array.from({ length: shown }, (_, i) => ({ event: i, relevance: bad ? "relevant" : "benign" }));
+      const alerts = bad ? [{ reason: "New TypeError in checkout", severity: "high", events: [0] }] : [];
+      return { body: { choices: [{ message: { content: JSON.stringify({ judgments, alerts }) } }] } };
     });
     slack = await mockServer();
     proc = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "src/main.ts"], {
@@ -26,12 +31,17 @@ describe("end to end: Sentry -> decider -> Slack", () => {
         PORT: String(port),
         HOST: "127.0.0.1",
         CLOUDFRIEND_DATA_DIR: tempDir(),
+        CLOUDFRIEND_DATABASE_URL: await freshDatabase(),
         CLOUDFRIEND_ADMIN_KEY: "admin",
         CLOUDFRIEND_BATCH_WAIT: "200ms",
         CLOUDFRIEND_POLL_INTERVAL: "20ms",
+        // No random audit samples: one would turn the drop the tests expect into an audit (1 in 100).
+        CLOUDFRIEND_AUDIT_RATE: "0",
         OPENROUTER_API_KEY: "sk-or-test",
         OPENROUTER_BASE_URL: openrouter.url,
         SLACK_WEBHOOK_URL: slack.url + "/services/T/B/X",
+        // The mock Slack listens on 127.0.0.1.
+        CLOUDFRIEND_ALLOW_PRIVATE_DESTINATIONS: "on",
       },
     });
     proc.stdout!.on("data", (d) => (logs += d));
@@ -75,17 +85,32 @@ describe("end to end: Sentry -> decider -> Slack", () => {
     assert.deepEqual(detail.deliveries.map((d: any) => [d.action, d.status]), [["slack", "ok"]]);
   });
 
-  it("does not flag routine events", async () => {
+  it("reviews a new kind of routine event once, then drops it without asking the model", async () => {
     const secret = /cloudfriend_[A-Za-z0-9_-]{43}/.exec(logs)![0];
+    const post = (msg: string) =>
+      fetch(`${base}/in/myapp`, { method: "POST", headers: { authorization: `Bearer ${secret}` }, body: JSON.stringify({ level: "info", msg }) });
+    const latest = async (n: number) => {
+      for (let i = 0; i < 100; i++) {
+        const list = (await (await fetch(`${base}/events?source=myapp`, { headers: { authorization: "Bearer admin" } })).json()) as any;
+        if (list.events.length >= n && list.events.every((e: any) => e.decided ?? true)) return list.events[0];
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error("event not routed");
+    };
     const before = openrouter.requests.length;
-    const res = await fetch(`${base}/in/myapp`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${secret}` },
-      body: JSON.stringify({ level: "info", msg: "user logged in" }),
-    });
-    assert.equal(res.status, 202);
-    await waitFor(() => openrouter.requests.length > before, 5_000);
-    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await post("user 17 logged in")).status, 202);
+    const first = await latest(1);
+    assert.equal(first.route, "review", "nobody has judged this kind yet: the classifier may not drop it");
+    for (let i = 0; i < 40 && openrouter.requests.length === before; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(openrouter.requests.length, before + 1);
+    await new Promise((r) => setTimeout(r, 300));
+    // The model judged it benign: the next one is the classifier's to drop.
+    assert.equal((await post("user 18 logged in")).status, 202);
+    const second = await latest(2);
+    assert.equal(second.route, "drop");
+    assert.ok(second.score < 0.1);
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(openrouter.requests.length, before + 1);
     assert.equal(slack.requests.length, 1);
   });
 

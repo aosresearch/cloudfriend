@@ -1,0 +1,128 @@
+  counted gaia-2021-08-01
+  counted gaia-2021-08-02
+  counted gaia-2021-08-03
+  counted gaia-2021-08-04
+  counted gaia-2021-08-05
+  counted gaia-2021-08-06
+  counted gaia-2021-08-07
+  counted gaia-2021-08-08
+  counted gaia-2021-08-09
+  counted gaia-2021-08-10
+  counted gaia-2021-08-11
+  counted gaia-2021-08-12
+  counted gaia-2021-08-13
+  counted gaia-2021-08-14
+gaia-2021-08-01 train events= 3936964 positives=   971 incidents=29
+gaia-2021-08-02 train events= 3679067 positives=  1412 incidents=20
+gaia-2021-08-03 train events= 3704535 positives=   300 incidents=36
+gaia-2021-08-04 train events= 3566972 positives=  1388 incidents=30
+gaia-2021-08-05 train events= 3491031 positives=  9075 incidents=29
+gaia-2021-08-06 train events= 3574585 positives=  8459 incidents=33
+gaia-2021-08-07 train events= 3888575 positives=  8916 incidents=27
+gaia-2021-08-08 train events= 3840331 positives=  1412 incidents=26
+gaia-2021-08-09 valid events= 3210299 positives= 16215 incidents=20
+gaia-2021-08-10 valid events= 3441870 positives=  8606 incidents=28
+gaia-2021-08-11 eval  events= 3423625 positives=  1335 incidents=26
+gaia-2021-08-12 eval  events= 3477014 positives=   681 incidents=31
+gaia-2021-08-13 eval  events= 3483824 positives=  7908 incidents=22
+gaia-2021-08-14 eval  events= 3744010 positives=   135 incidents=28
+385 incidents; 98 start inside another's window; 15 have no positive event
+  overlapping: inc003-memory-logservice2 (5 positives)
+  overlapping: inc010-memory-mobservice1 (3 positives)
+  overlapping: inc021-memory-redisservice2 (3 positives)
+  overlapping: inc022-memory-logservice1 (2 positives)
+  overlapping: inc024-cpu-dbservice1 (7 positives)
+  overlapping: inc028-memory-logservice2 (20 positives)
+  overlapping: inc030-file_move-webservice2 (583 positives)
+  overlapping: inc032-memory-logservice1 (19 positives)
+  overlapping: inc036-memory-redisservice1 (2 positives)
+  overlapping: inc044-memory-webservice1 (8 positives)
+  overlapping: inc051-memory-redisservice2 (25 positives)
+  overlapping: inc052-memory-redisservice1 (3 positives)
+  overlapping: inc057-memory-dbservice2 (2 positives)
+  overlapping: inc059-memory-redisservice1 (7 positives)
+  overlapping: inc060-memory-dbservice1 (4 positives)
+  overlapping: inc072-memory-logservice1 (24 positives)
+  overlapping: inc073-memory-logservice2 (5 positives)
+  overlapping: inc074-memory-dbservice2 (16 positives)
+  overlapping: inc076-cpu-mobservice2 (16 positives)
+  overlapping: inc077-memory-redisservice2 (13 positives)
+  overlapping: inc081-cpu-redisservice1 (3 positives)
+  overlapping: inc083-memory-logservice2 (4 positives)
+  overlapping: inc092-memory-dbservice1 (1 positives)
+  overlapping: inc095-memory-mobservice2 (8 positives)
+  overlapping: inc103-memory-dbservice1 (12 positives)
+  overlapping: inc106-memory-webservice1 (1 positives)
+  overlapping: inc111-memory-logservice1 (4 positives)
+  overlapping: inc114-memory-dbservice1 (1 positives)
+  overlapping: inc117-memory-dbservice2 (1 positives)
+  overlapping: inc119-memory-logservice1 (1 positives)
+  overlapping: inc122-memory-dbservice1 (2 positives)
+  overlapping: inc125-permission_denied-dbservice1 (8355 positives)
+  overlapping: inc126-memory-dbservice2 (1999 positives)
+  overlapping: inc127-memory-mobservice1 (2026 positives)
+  overlapping: inc128-memory-webservice2 (959 positives)
+  overlapping: inc131-memory-mobservice1 (4 positives)
+  overlapping: inc147-memory-redisservice2 (2 positives)
+  overlapping: inc149-memory-logservice1 (4 positives)
+  overlapping: inc152-memory-logservice1 (2 positives)
+  overlapping: inc154-memory-logservice2 (21 positives)
+  overlapping: inc158-memory-mobservice1 (6 positives)
+  overlapping: inc161-memory-dbservice2 (6 positives)
+  overlapping: inc162-memory-webservice1 (5 positives)
+  overlapping: inc164-memory-mobservice2 (2 positives)
+  overlapping: inc165-memory-webservice1 (7 positives)
+  overlapping: inc169-memory-redisservice2 (19 positives)
+  overlapping: inc172-cpu-mobservice2 (18 positives)
+  overlapping: inc173-memory-mobservice1 (3 positives)
+  overlapping: inc174-memory-redisservice1 (1 positives)
+  overlapping: inc178-memory-dbservice2 (6 positives)
+  overlapping: inc184-memory-logservice1 (3 positives)
+  overlapping: inc190-memory-mobservice2 (1 positives)
+  overlapping: inc193-memory-redisservice2 (3 positives)
+  overlapping: inc201-memory-logservice1 (3 positives)
+  overlapping: inc211-memory-webservice1 (15 positives)
+  overlapping: inc215-memory-mobservice1 (1 positives)
+  overlapping: inc216-memory-webservice1 (8 positives)
+  overlapping: inc220-memory-redisservice1 (11 positives)
+  overlapping: inc225-file_move-webservice2 (655 positives)
+  overlapping: inc232-permission_denied-dbservice1 (7680 positives)
+  overlapping: inc233-memory-dbservice2 (1938 positives)
+  overlapping: inc237-memory-mobservice1 (3 positives)
+  overlapping: inc244-memory-redisservice2 (303 positives)
+  overlapping: inc254-memory-logservice1 (4 positives)
+  overlapping: inc255-cpu-mobservice2 (3 positives)
+  overlapping: inc256-memory-logservice2 (2 positives)
+  overlapping: inc258-memory-dbservice2 (4 positives)
+  overlapping: inc261-memory-logservice2 (3 positives)
+  overlapping: inc268-memory-dbservice1 (3 positives)
+  overlapping: inc270-memory-dbservice2 (8 positives)
+  overlapping: inc272-memory-webservice2 (8 positives)
+  overlapping: inc273-memory-dbservice1 (26 positives)
+  overlapping: inc276-memory-webservice2 (1 positives)
+  overlapping: inc284-memory-redisservice1 (243 positives)
+  overlapping: inc295-memory-mobservice1 (1 positives)
+  overlapping: inc299-memory-logservice1 (5 positives)
+  overlapping: inc301-memory-dbservice1 (1 positives)
+  overlapping: inc307-memory-dbservice2 (1 positives)
+  overlapping: inc308-memory-mobservice1 (1 positives)
+  overlapping: inc309-memory-redisservice1 (0 positives)
+  overlapping: inc315-memory-dbservice1 (3 positives)
+  overlapping: inc316-memory-mobservice1 (1 positives)
+  overlapping: inc317-memory-webservice1 (1 positives)
+  overlapping: inc319-cpu-webservice2 (2 positives)
+  overlapping: inc321-memory-mobservice1 (4 positives)
+  overlapping: inc323-memory-webservice2 (2 positives)
+  overlapping: inc324-memory-dbservice2 (3 positives)
+  overlapping: inc326-memory-mobservice2 (5 positives)
+  overlapping: inc340-cpu-mobservice2 (386 positives)
+  overlapping: inc341-permission_denied-dbservice2 (7719 positives)
+  overlapping: inc347-memory-webservice1 (3 positives)
+  overlapping: inc349-memory-dbservice1 (9 positives)
+  overlapping: inc353-cpu-mobservice2 (4 positives)
+  overlapping: inc364-memory-logservice1 (20 positives)
+  overlapping: inc372-memory-logservice1 (3 positives)
+  overlapping: inc376-memory-redisservice1 (1 positives)
+  overlapping: inc380-cpu-mobservice2 (1 positives)
+  overlapping: inc382-memory-dbservice1 (5 positives)
+relabel exit 0

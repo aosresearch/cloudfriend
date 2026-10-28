@@ -1,0 +1,45 @@
+re3-ob-adservice_f3              incidents=3 withheld=0 detected=3 to_jev=0.42% positives_reached=12874/12874
+re3-ob-adservice_f4              incidents=3 withheld=0 detected=3 to_jev=0.47% positives_reached=21041/21041
+re3-ob-adservice_f5              incidents=3 withheld=0 detected=3 to_jev=0.44% positives_reached=12885/12885
+re3-ob-cartservice_f1            incidents=3 withheld=0 detected=3 to_jev=0.48% positives_reached=3674/3674
+re3-ob-currencyservice_f1        incidents=3 withheld=0 detected=3 to_jev=0.48% positives_reached=19348/19351
+re3-ob-emailservice_f1           incidents=3 withheld=0 detected=3 to_jev=0.38% positives_reached=830/830
+re3-ob-emailservice_f2           incidents=3 withheld=0 detected=3 to_jev=0.39% positives_reached=856/856
+re3-ob-emailservice_f3           incidents=3 withheld=0 detected=3 to_jev=0.39% positives_reached=796/796
+re3-ob-emailservice_f4           incidents=3 withheld=0 detected=3 to_jev=0.38% positives_reached=860/860
+re3-ob-emailservice_f5           incidents=3 withheld=0 detected=3 to_jev=0.41% positives_reached=932/932
+re3-ss-carts_f1                  incidents=4 withheld=0 detected=4 to_jev=0.85% positives_reached=6376/6475
+re3-ss-carts_f3                  incidents=4 withheld=0 detected=4 to_jev=0.73% positives_reached=5996/6059
+re3-ss-carts_f4                  incidents=4 withheld=0 detected=4 to_jev=0.77% positives_reached=729/814
+re3-ss-front-end_f1              incidents=3 withheld=0 detected=3 to_jev=0.86% positives_reached=2137/2137
+re3-ss-front-end_f2              incidents=3 withheld=0 detected=3 to_jev=0.74% positives_reached=2165/2165
+re3-ss-front-end_f3              incidents=3 withheld=0 detected=3 to_jev=1.35% positives_reached=35/35
+re3-ss-orders_f1                 incidents=3 withheld=0 detected=3 to_jev=0.86% positives_reached=12233/12233
+re3-ss-orders_f3                 incidents=3 withheld=0 detected=3 to_jev=0.84% positives_reached=4387/4417
+re3-ss-orders_f4                 incidents=3 withheld=0 detected=3 to_jev=1.29% positives_reached=557/557
+re3-tt-ts-auth-service_f1        incidents=4 withheld=0 detected=4 to_jev=1.72% positives_reached=59/60
+re3-tt-ts-auth-service_f2        incidents=4 withheld=0 detected=4 to_jev=1.66% positives_reached=42/46
+re3-tt-ts-auth-service_f3        incidents=4 withheld=0 detected=4 to_jev=1.69% positives_reached=10168/10174
+re3-tt-ts-auth-service_f4        incidents=3 withheld=0 detected=3 to_jev=1.58% positives_reached=39/43
+re3-tt-ts-route-service_f1       incidents=3 withheld=0 detected=3 to_jev=1.10% positives_reached=414/414
+re3-tt-ts-route-service_f2       incidents=3 withheld=0 detected=3 to_jev=1.24% positives_reached=420/421
+re3-tt-ts-route-service_f3       incidents=3 withheld=0 detected=3 to_jev=1.25% positives_reached=457/457
+re3-tt-ts-route-service_f3_1     incidents=3 withheld=0 detected=3 to_jev=1.15% positives_reached=442/442
+re3-tt-ts-route-service_f4       incidents=3 withheld=0 detected=3 to_jev=1.25% positives_reached=388/389
+{
+ "groups": 28,
+ "incidents": 90,
+ "withheld": {
+  "k": 0,
+  "n": 90,
+  "rate": 0,
+  "upper95": 0.032738033833534574
+ },
+ "groups_with_a_withheld_incident": {
+  "k": 0,
+  "n": 28,
+  "upper95": 0.10146573557272469,
+  "which": []
+ },
+ "share_to_jev": 0.00844170519900795
+}

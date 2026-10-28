@@ -7,6 +7,8 @@ export async function main(): Promise<void> {
   const config = loadConfig();
   const cloudfriend = await createCloudfriend(config);
 
+  if (cloudfriend.role === "worker") log.info("CLOUDFRIEND_ROLE=worker: running the worker; HTTP serves only /healthz");
+  if (cloudfriend.role === "web") log.info("CLOUDFRIEND_ROLE=web: serving HTTP and intake; events are processed by workers (CLOUDFRIEND_ROLE=worker or all)");
   if (cloudfriend.bootSecret) {
     const bar = "=".repeat(72);
     console.log(
@@ -22,18 +24,40 @@ export async function main(): Promise<void> {
       ].join("\n"),
     );
   }
+  if (cloudfriend.auth.generatedPassword) {
+    const bar = "=".repeat(72);
+    console.log(
+      [
+        bar,
+        "First boot: created a dashboard admin. The password is shown only once:",
+        "",
+        `  email:     ${cloudfriend.auth.bootstrap.email}`,
+        `  password:  ${cloudfriend.auth.generatedPassword}`,
+        "",
+        `Sign in at ${cloudfriend.auth.config.publicUrl?.href ?? `http://localhost:${config.port}/`}`,
+        "Set CLOUDFRIEND_ADMIN_EMAIL and CLOUDFRIEND_ADMIN_PASSWORD to choose the admin yourself.",
+        bar,
+      ].join("\n"),
+    );
+  }
   if (!config.adminKey) log.warn("CLOUDFRIEND_ADMIN_KEY is not set; the admin API (/secrets, /flags, /events) is disabled");
   if (!cloudfriend.decider) {
-    log.warn(`decider '${config.decider}' is not configured (OPENROUTER_API_KEY missing?); events are stored but not triaged`);
+    log.warn(
+      cloudfriend.triage?.classifier
+        ? `decider '${config.decider}' is not configured (JEV_API_KEY or OPENROUTER_API_KEY missing?); the classifier decides alone`
+        : `decider '${config.decider}' is not configured (JEV_API_KEY or OPENROUTER_API_KEY missing?); events are stored but not triaged`,
+    );
   }
-  if (!cloudfriend.actions.size) log.warn("no actions configured; flags are stored but nothing is notified (set SLACK_WEBHOOK_URL or WEBHOOK_URL)");
+  if (!cloudfriend.actions.size && cloudfriend.role !== "worker") log.info("no actions configured from environment variables; flags go to each workspace's destinations (SLACK_WEBHOOK_URL or WEBHOOK_URL add one to the default workspace)");
 
-  cloudfriend.worker.start();
+  cloudfriend.start();
   const server = serve({ fetch: cloudfriend.app.fetch, port: config.port, hostname: config.host }, (info) => {
     log.info("cloudfriend listening", {
+      role: cloudfriend.role,
       port: info.port,
       data: config.dataDir,
       decider: cloudfriend.decider?.name ?? "none",
+      classifier: cloudfriend.triage?.classifier ? "on" : "off",
       actions: [...cloudfriend.actions.keys()].join(",") || "none",
       batch: `${config.batchSize} events or ${config.batchWaitMs}ms`,
     });

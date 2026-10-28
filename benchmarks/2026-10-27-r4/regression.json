@@ -1,0 +1,35 @@
+{
+ "arms": {
+  "A": {
+   "failures": [],
+   "model": "cand-A.json",
+   "model_sha256": "ee41b5e9e8f34fe69c41fac9d639319b9c7220cdea65c3d2edce69bf74d76b67",
+   "must_reach": 39,
+   "passed": true,
+   "reached": 39,
+   "reached_by_score": 37,
+   "scenarios": 13
+  },
+  "B": {
+   "failures": [],
+   "model": "cand-B.json",
+   "model_sha256": "cacd1333d53034fdaf62811e92bbd0ab423b3521dd7b32d2c9fe0fff4fbb5db3",
+   "must_reach": 39,
+   "passed": true,
+   "reached": 39,
+   "reached_by_score": 35,
+   "scenarios": 13
+  },
+  "baseline": {
+   "failures": [],
+   "model": "base.json",
+   "model_sha256": "7adaec2b1c278b3cc83ef4794a39f9e6c08523e51ea8560cff40c45e306dada8",
+   "must_reach": 39,
+   "passed": true,
+   "reached": 39,
+   "reached_by_score": 37,
+   "scenarios": 13
+  }
+ },
+ "command": "cloudfriend regression --model <model> --json"
+}

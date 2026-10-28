@@ -4,7 +4,7 @@ title: Intake
 
 # Intake
 
-Intake is the only part of cloudfriend that runs while a sender waits. Its job is narrow: get the request's bytes onto disk and say so. Everything else happens later, in [Process](./process.md).
+Intake is the only part of cloudfriend that runs while a sender waits. Its job is narrow: get the request's bytes committed to the database and say so. Everything else happens later, in [Process](./process.md).
 
 Code: `src/server.ts` (the `POST /in/:source` route) and `src/intake.ts`.
 
@@ -15,14 +15,14 @@ sequenceDiagram
   participant S as Sender
   participant R as POST /in/:source
   participant I as Intake writer
-  participant DB as SQLite
+  participant DB as Postgres
 
   S->>R: body + secret
   R->>R: check source name, secret, size, verify()
   R->>I: append(raw bytes)
   Note over I: collect requests for ~2 ms
-  I->>DB: one transaction: INSERT every row
-  DB-->>I: committed (fsync)
+  I->>DB: one transaction: one INSERT of every row
+  DB-->>I: committed
   I-->>R: resolved
   R-->>S: 202 accepted
 ```
@@ -30,7 +30,7 @@ sequenceDiagram
 In order:
 
 1. **Source name.** The `:source` part must be 1 to 64 characters of lowercase letters, digits, `-` and `_`, starting with a letter or digit. Anything else gets `404`.
-2. **Secret.** Read from `Authorization: Bearer <secret>`, or from `?secret=` for senders that cannot set headers. cloudfriend hashes it with SHA-256 and looks up the hash. A missing, unknown or revoked secret, or a secret limited to another source, gets `401`.
+2. **Secret.** Read from `Authorization: Bearer <secret>`, or from `?secret=` for senders that cannot set headers. cloudfriend hashes it with SHA-256 and looks up the hash. A missing, unknown or revoked secret, or a secret limited to another source, gets `401`. The secret also says which workspace the request's rows belong to.
 3. **Size.** A body over `CLOUDFRIEND_MAX_BODY_BYTES` (1 MiB by default) gets `413`. A too-large `Content-Length` is rejected before the body is read.
 4. **`verify()`.** If the source adapter has a `verify` function, it runs now. The Sentry adapter uses this to check the `Sentry-Hook-Signature` HMAC when `SENTRY_CLIENT_SECRET` is set. A `false` gets `401`.
 5. **Append.** The raw bytes go to the intake writer with the source name and the time received. The request waits until they are committed.
@@ -40,33 +40,24 @@ The body is never parsed here. A malformed JSON body is accepted and stored, and
 
 ## Group commit
 
-A durable write needs an fsync, and an fsync takes about as long for one row as for a thousand. So the intake writer does not commit each request on its own:
+A durable commit waits for Postgres to flush its write-ahead log, and that takes about as long for one row as for a thousand. So the intake writer does not commit each request on its own:
 
 - The first request to arrive starts a timer of `CLOUDFRIEND_COMMIT_WINDOW` (2 ms by default).
 - Every request that arrives before the timer fires joins the same batch.
-- When the timer fires, the whole batch is inserted into the `queue` table in one transaction, so one fsync covers all of it.
-- Every request in the batch then gets its `202` together. If the transaction fails, every request in it gets `503`.
+- When the timer fires, the whole batch is inserted into the `queue` table with one multi-row `INSERT` in one transaction, so one commit covers all of it.
+- Every request in the batch then gets its `202` together. If the transaction fails, every request in it gets `503`, and none of its rows is stored.
 
-The same transaction also updates `last_used_at` on the secrets that were used, so that costs no extra write.
+The same transaction also updates `last_used_at` on the secrets that were used, so that costs no extra commit.
 
-On a laptop with `CLOUDFRIEND_SYNCHRONOUS=FULL`, 50 concurrent senders get their `202` in about 3 ms at the median, at roughly 16,000 requests per second.
+## Durability
 
-## Durability settings
-
-The database runs in WAL mode. `CLOUDFRIEND_SYNCHRONOUS` decides how hard each commit is pushed to disk:
-
-| Setting | Survives a process crash | Survives power loss | Speed |
-| --- | --- | --- | --- |
-| `FULL` (default) | yes | yes | baseline |
-| `NORMAL` | yes | the last few commits may be lost | faster |
-
-With `FULL`, a `202` means the event is on disk.
+A `202` means the transaction holding the request's row has committed. How durable a commit is follows the Postgres server's own settings, which cloudfriend does not change: with the defaults (`fsync = on`, `synchronous_commit = on`), a committed row survives a crash of cloudfriend, of Postgres, or of the machine. A server with `synchronous_commit = off` can lose the last moments of commits if Postgres or its machine crashes, though never because cloudfriend crashed.
 
 ## Backpressure
 
-If the worker falls behind (the model is down, or a burst is bigger than parsing can keep up with), unparsed requests pile up in `queue`. Intake keeps a count of them in memory, so checking it costs nothing per request.
+If the worker falls behind (the model is down, or a burst is bigger than parsing can keep up with), unparsed requests pile up in `queue`. Each workspace's count of them is kept in `workspaces.backlog`: the intake commit adds to it and parse subtracts from it, each in its own transaction, so it stays right when web and worker run in different processes. Intake reads it from a cache that is refreshed at most once a second, so checking it costs nothing per request. The same commit counts the accepted requests in `usage`.
 
-Once the count reaches `CLOUDFRIEND_MAX_QUEUE` (one million by default), new requests get `503` with `Retry-After: 5` instead of growing the database without limit. Senders that retry (Sentry, PostHog and most webhook senders do) deliver the event later. `GET /healthz` reports the current count as `queued`.
+Once a workspace's count, plus its requests waiting for a commit, reaches `CLOUDFRIEND_MAX_QUEUE` (one million by default), its new requests get `503` with `Retry-After: 5` instead of growing the database without limit. Other workspaces are not affected. Senders that retry (Sentry, PostHog and most webhook senders do) deliver the event later. `GET /healthz` reports the current count as `queued`.
 
 Note that the queue only holds requests that are not yet parsed. Parsed events waiting for the model sit in `events` and do not count toward the limit.
 
@@ -74,7 +65,7 @@ Note that the queue only holds requests that are not yet parsed. Parsed events w
 
 | Status | Meaning | Sender should |
 | --- | --- | --- |
-| `202` | Stored on disk. | Move on. |
+| `202` | Committed to the database. | Move on. |
 | `401` | Bad or missing secret, or `verify()` failed. | Fix its configuration. |
 | `404` | Invalid source name. | Fix the URL. |
 | `413` | Body too large. | Send smaller requests, or raise `CLOUDFRIEND_MAX_BODY_BYTES`. |
@@ -84,8 +75,8 @@ Note that the queue only holds requests that are not yet parsed. Parsed events w
 
 | Variable | Default | Raise it to | Lower it to |
 | --- | --- | --- | --- |
-| `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | batch more per fsync under heavy load | reply sooner when traffic is light |
-| `CLOUDFRIEND_SYNCHRONOUS` | `FULL` | | `NORMAL` for speed, if losing the last moments on power loss is acceptable |
+| `CLOUDFRIEND_COMMIT_WINDOW` | `2ms` | batch more per commit under heavy load | reply sooner when traffic is light |
+| `CLOUDFRIEND_DB_POOL` | `10` | let more commits and queries run at once | use fewer of the server's connections |
 | `CLOUDFRIEND_MAX_QUEUE` | `1000000` | absorb longer outages of the worker | push back on senders sooner |
 | `CLOUDFRIEND_MAX_BODY_BYTES` | `1048576` | accept large batches in one request | reject oversized payloads |
 

@@ -1,0 +1,175 @@
+{
+ "method": "assistant review (two independent Claude subagents, a third on disagreement); not human gold",
+ "events": 909,
+ "packets": 845,
+ "agreement": {
+  "packets": 845,
+  "disagreed": 13
+ },
+ "audit": {
+  "events": 201,
+  "reference": {
+   "benign": 113,
+   "relevant": 87,
+   "unsure": 1
+  },
+  "jev_vs_reference": {
+   "jev benign / ref benign": 81,
+   "jev relevant / ref relevant": 81,
+   "jev uncertain / ref benign": 30,
+   "jev uncertain / ref relevant": 4,
+   "jev relevant / ref benign": 2,
+   "jev benign / ref relevant": 2
+  },
+  "weak_old_vs_reference": {
+   "weak 0 / ref benign": 113,
+   "weak 0 / ref relevant": 74,
+   "weak 1 / ref relevant": 13
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref benign": 113,
+   "weak 0 / ref relevant": 74,
+   "weak 1 / ref relevant": 13
+  },
+  "jev_benign_but_relevant": {
+   "k": 2,
+   "n": 83,
+   "upper95": 0.07391362347434387
+  },
+  "jev_relevant_and_relevant": {
+   "k": 81,
+   "n": 83,
+   "lower95": 0.9260863765256562
+  }
+ },
+ "drops": {
+  "events": 301,
+  "reference": {
+   "benign": 301
+  },
+  "weak_old_vs_reference": {
+   "weak 0 / ref benign": 301
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref benign": 301
+  },
+  "relevant_share": {
+   "k": 0,
+   "n": 301,
+   "rate": 0,
+   "upper95": 0.009903235702694682
+  }
+ },
+ "safety": {
+  "events": 293,
+  "reference": {
+   "benign": 170,
+   "relevant": 121,
+   "unknown": 2
+  },
+  "jev_vs_reference": {
+   "jev relevant / ref relevant": 17,
+   "jev benign / ref benign": 15,
+   "jev uncertain / ref benign": 1,
+   "jev benign / ref relevant": 1
+  },
+  "weak_old_vs_reference": {
+   "weak 0 / ref benign": 137,
+   "weak 0 / ref relevant": 62,
+   "weak 1 / ref benign": 33,
+   "weak 1 / ref relevant": 59
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref benign": 160,
+   "weak 0 / ref relevant": 84,
+   "weak 1 / ref relevant": 37,
+   "weak 1 / ref benign": 10
+  }
+ },
+ "conflict-labels": {
+  "events": 72,
+  "reference": {
+   "relevant": 6,
+   "benign": 66
+  },
+  "jev_vs_reference": {
+   "jev conflict / ref relevant": 2,
+   "jev benign / ref benign": 57,
+   "jev relevant / ref benign": 2,
+   "jev relevant / ref relevant": 2,
+   "jev conflict / ref benign": 3,
+   "jev uncertain / ref benign": 1,
+   "jev benign / ref relevant": 1
+  },
+  "weak_old_vs_reference": {
+   "weak 0 / ref relevant": 6,
+   "weak 0 / ref benign": 66
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref relevant": 6,
+   "weak 0 / ref benign": 66
+  }
+ },
+ "conflict-direct": {
+  "events": 64,
+  "reference": {
+   "relevant": 10,
+   "benign": 54
+  },
+  "jev_vs_reference": {
+   "jev conflict / ref relevant": 10,
+   "jev conflict / ref benign": 6,
+   "jev benign / ref benign": 48
+  },
+  "weak_old_vs_reference": {
+   "weak 0 / ref relevant": 10,
+   "weak 0 / ref benign": 54
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref relevant": 10,
+   "weak 0 / ref benign": 54
+  }
+ },
+ "benign-positive": {
+  "events": 29,
+  "reference": {
+   "benign": 24,
+   "relevant": 5
+  },
+  "jev_vs_reference": {
+   "jev benign / ref benign": 24,
+   "jev benign / ref relevant": 5
+  },
+  "weak_old_vs_reference": {
+   "weak 1 / ref benign": 24,
+   "weak 1 / ref relevant": 5
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref benign": 8,
+   "weak 1 / ref relevant": 3,
+   "weak 1 / ref benign": 16,
+   "weak 0 / ref relevant": 2
+  }
+ },
+ "inconsistent": {
+  "events": 65,
+  "reference": {
+   "relevant": 15,
+   "benign": 50
+  },
+  "jev_vs_reference": {
+   "jev benign / ref relevant": 8,
+   "jev relevant / ref relevant": 7,
+   "jev benign / ref benign": 48,
+   "jev conflict / ref benign": 2
+  },
+  "weak_old_vs_reference": {
+   "weak 0 / ref relevant": 15,
+   "weak 0 / ref benign": 50
+  },
+  "weak_new_vs_reference": {
+   "weak 0 / ref relevant": 15,
+   "weak 0 / ref benign": 50
+  }
+ }
+}

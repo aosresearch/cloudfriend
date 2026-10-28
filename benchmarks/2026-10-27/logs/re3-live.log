@@ -1,0 +1,153 @@
+jev call failed, treating as unavailable: Expected ',' or ']' after array element in JSON at position 1115 (line 28 column 43)
+re3-ob-emailservice_f1-1             events=70214 pos=292 to_jev=0.39% alerts=3 D pre=2 | jev $1.209 calls=225 cached=0
+jev call failed, treating as unavailable: Expected ',' or ']' after array element in JSON at position 390 (line 11 column 40)
+re3-ob-adservice_f5-1                events=71263 pos=4254 to_jev=0.55% alerts=6 D pre=2 | jev $1.602 calls=306 cached=0
+re3-tt-ts-auth-service_f3-1          events=43517 pos=2518 to_jev=1.97% alerts=6 D pre=3 | jev $2.119 calls=334 cached=0
+re3-ss-front-end_f3-1                events=46800 pos=14 to_jev=6.68% alerts=27 D pre=25 | jev $4.020 calls=415 cached=0
+re3-tt-ts-route-service_f2-1         events=74449 pos=134 to_jev=1.51% alerts=7 D pre=3 | jev $4.020 calls=415 cached=0
+re3-ss-carts_f4-1                    events=84024 pos=4 to_jev=8.98% alerts=48 D pre=45 | jev $4.040 calls=416 cached=0
+{
+ "aggregate": {
+  "cascade": {
+   "events": 390267,
+   "asked_jev": 13323,
+   "jev_calls": 960,
+   "share_to_jev": 0.03413816694724381,
+   "flags": 97,
+   "flags_without_incident_event": 83,
+   "flags_before_fault": 80,
+   "incidents": 6,
+   "detected": {
+    "k": 6,
+    "n": 6,
+    "rate": 1,
+    "upper95": 1
+   },
+   "detected_ci95_by_group": [
+    1,
+    1
+   ],
+   "withheld": {
+    "k": 0,
+    "n": 6,
+    "rate": 0,
+    "upper95": 0.3930377689970827
+   },
+   "withheld_by_size": {
+    "1-3": {
+     "k": 0,
+     "n": 0,
+     "rate": null,
+     "upper95": null
+    },
+    "4+": {
+     "k": 0,
+     "n": 6,
+     "rate": 0,
+     "upper95": 0.3930377689970827
+    }
+   },
+   "dismissed": {
+    "k": 0,
+    "n": 6,
+    "rate": 0,
+    "upper95": 0.3930377689970827
+   },
+   "positives_reached": {
+    "k": 7206,
+    "n": 7216,
+    "lower95": 0.9976504938377131
+   },
+   "situations": {
+    "new": {
+     "positives": 46,
+     "withheld": 0
+    },
+    "recurring": {
+     "positives": 182,
+     "withheld": 6
+    },
+    "sustained": {
+     "positives": 6954,
+     "withheld": 4
+    },
+    "single": {
+     "positives": 32,
+     "withheld": 0
+    },
+    "transition": {
+     "positives": 2,
+     "withheld": 0
+    }
+   },
+   "median_ttd_s": 29.737,
+   "median_first_reached_s": 24.672
+  },
+  "classifier": {
+   "events": 390267,
+   "asked_jev": 0,
+   "jev_calls": 0,
+   "share_to_jev": 0,
+   "flags": 63,
+   "flags_without_incident_event": 14,
+   "flags_before_fault": 6,
+   "incidents": 6,
+   "detected": {
+    "k": 6,
+    "n": 6,
+    "rate": 1,
+    "upper95": 1
+   },
+   "detected_ci95_by_group": [
+    1,
+    1
+   ],
+   "median_ttd_s": 32.748
+  },
+  "keyword": {
+   "events": 390267,
+   "asked_jev": 0,
+   "jev_calls": 0,
+   "share_to_jev": 0,
+   "flags": 391,
+   "flags_without_incident_event": 321,
+   "flags_before_fault": 229,
+   "incidents": 6,
+   "detected": {
+    "k": 6,
+    "n": 6,
+    "rate": 1,
+    "upper95": 1
+   },
+   "detected_ci95_by_group": [
+    1,
+    1
+   ],
+   "median_ttd_s": 26.554
+  }
+ },
+ "escalated_kinds": {
+  "events": 47202,
+  "by_score": 8246
+ },
+ "jev": {
+  "live": true,
+  "model": "typesafe/jev-router",
+  "calls": 416,
+  "cached_calls": 0,
+  "skipped_calls": 544,
+  "spent_usd": 4.0399943,
+  "prompt_tokens": 3391780,
+  "completion_tokens": 278147,
+  "median_latency_ms": 3369,
+  "routed_to": {
+   "google/gemini-3.8-flash": 226,
+   "meta/muse-spark-1.2": 139,
+   "openai/gpt-6-astra": 1,
+   "x-ai/grok-4.7": 2,
+   "anthropic/claude-opus-5.5": 9,
+   "anthropic/claude-sonnet-5.5": 38,
+   "openai/gpt-6.1-sol": 1
+  }
+ }
+}

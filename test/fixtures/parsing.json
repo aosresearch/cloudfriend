@@ -1,0 +1,23 @@
+{
+  "about": "Shared by the runtime featurizer (src/triage/features.ts, v3) and the weak labels (ml/datasets/common.py). status: the HTTP status the text reports, or null. errorish: whether the line reads as an error. Checked by test/parsing.test.ts, which also runs ml/datasets/check_parsing.py.",
+  "cases": [
+    { "text": "2021-08-01 15:27:27,500 | INFO | webservice1 | 172.17.0.3 | 172.17.0.3 | call service:mobservice1, inst:http://0.0.0.4:9382", "status": null, "errorish": false, "note": "GAIA: milliseconds are not a 500" },
+    { "text": "2021-07-14 09:12:03,503 | INFO | dbservice1 | 172.17.0.4 | 172.17.0.4 | query finished", "status": null, "errorish": false, "note": "milliseconds 503" },
+    { "text": "15:27:27.502 request handled", "status": null, "errorish": false, "note": "bare clock time with fraction" },
+    { "text": "2024-11-22T02:28:05.504Z handled GET /cart", "status": null, "errorish": false, "note": "ISO timestamp" },
+    { "text": "max_connections: 500, pool size 200", "status": null, "errorish": false, "note": "config numbers" },
+    { "text": "deployed version 5.0.503", "status": null, "errorish": false, "note": "version-like number" },
+    { "text": "took 503ms", "status": null, "errorish": false, "note": "a duration" },
+    { "text": "listening on 10.0.0.5:502", "status": null, "errorish": false, "note": "a port" },
+    { "text": "POST /orders 500 - 12.345 ms", "status": 500, "errorish": true, "note": "morgan access log" },
+    { "text": "10.0.0.1 - - [22/Nov/2024:02:28:05 +0000] \"GET /cart HTTP/1.1\" 503 12", "status": 503, "errorish": true, "note": "combined access log" },
+    { "text": "status=502 upstream reset", "status": 502, "errorish": true, "note": "key=value" },
+    { "text": "upstream returned 504", "status": 504, "errorish": true, "note": "returned" },
+    { "text": "503 Service Unavailable", "status": 503, "errorish": true, "note": "reason phrase" },
+    { "text": "HTTP/1.1 200 OK", "status": 200, "errorish": false, "note": "success" },
+    { "text": "GET /health 200 3ms", "status": 200, "errorish": false, "note": "success access log" },
+    { "text": "response_code: 404 for /missing", "status": 404, "errorish": false, "note": "a 4xx is not an error by itself" },
+    { "text": "java.lang.NullPointerException: null\n\tat com.shop.Cart.add(Cart.java:42)", "status": null, "errorish": true, "note": "exception" },
+    { "text": "Connection refused to 10.0.0.7:5432", "status": null, "errorish": true, "note": "error words" }
+  ]
+}

@@ -1,0 +1,71 @@
+# cloudfriend with its own Postgres. Copy .env.example to .env, set POSTGRES_PASSWORD, then:
+#
+#   docker compose up -d
+#   docker compose logs cloudfriend     # the generated admin password, on first boot
+#
+# The first `up` builds the image from this checkout. To use the published image instead, run
+# `docker compose pull cloudfriend` first (CLOUDFRIEND_VERSION picks the tag).
+#
+# Split web and worker (optional): set CLOUDFRIEND_ROLE=web and COMPOSE_PROFILES=split in .env,
+# then `docker compose up -d`. The cloudfriend service then serves HTTP and intake only, and the
+# worker service (scale it with --scale worker=N) parses, decides and delivers.
+
+name: cloudfriend
+
+x-cloudfriend: &cloudfriend
+  image: ghcr.io/aosresearch/cloudfriend:${CLOUDFRIEND_VERSION:-latest}
+  build: .
+  restart: unless-stopped
+  init: true
+  depends_on:
+    postgres:
+      condition: service_healthy
+  env_file: .env
+  volumes:
+    # Trained model files only; everything else is in Postgres. Shared, so every process
+    # loads the model the worker promotes.
+    - models:/data
+
+x-cloudfriend-env: &cloudfriend-env
+  # The password is passed apart from the URL, so it needs no URL encoding.
+  CLOUDFRIEND_DATABASE_URL: postgres://cloudfriend@postgres:5432/cloudfriend
+  PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (copy .env.example to .env)}
+
+services:
+  postgres:
+    image: postgres:17.11
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cloudfriend
+      POSTGRES_DB: cloudfriend
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (copy .env.example to .env)}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: during first-boot init the image runs a temporary server on the socket only.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "cloudfriend", "-d", "cloudfriend"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+    # Not published to the host. To reach it, e.g. for pg_dump:
+    #   docker compose exec postgres pg_dump -U cloudfriend cloudfriend > backup.sql
+
+  cloudfriend:
+    <<: *cloudfriend
+    environment:
+      <<: *cloudfriend-env
+    ports:
+      - "${CLOUDFRIEND_PORT:-8080}:8080"
+
+  worker:
+    <<: *cloudfriend
+    profiles: [split]
+    environment:
+      <<: *cloudfriend-env
+      CLOUDFRIEND_ROLE: worker
+
+volumes:
+  postgres:
+  models:

@@ -1,15 +1,22 @@
 import path from "node:path";
 
+export type Role = "all" | "web" | "worker";
+
 export interface Config {
+  /** all: HTTP and the worker. web: HTTP and intake only. worker: the worker, and only /healthz. */
+  role: Role;
   port: number;
   host: string;
+  /** Where trained model files live. Everything else is in Postgres. */
   dataDir: string;
+  /** Postgres connection string: CLOUDFRIEND_DATABASE_URL, else DATABASE_URL. */
+  databaseUrl: string;
+  /** Connections in the pool. */
+  dbPool: number;
   /** Empty string disables the admin API. */
   adminKey: string;
   /** Flush ingest writes every this many ms (group commit window). */
   commitWindowMs: number;
-  /** `FULL` survives power loss; `NORMAL` only survives a crashed process. */
-  synchronous: "FULL" | "NORMAL";
   /** Reply 503 once this many requests are queued but not yet parsed. */
   maxQueue: number;
   /** Reject request bodies above this size with 413. */
@@ -26,6 +33,41 @@ export interface Config {
   adapterDir: string | null;
   /** How often the worker looks for new work when idle. */
   pollMs: number;
+  /** Classifier, grouping, verdict cache and labels in front of the decider. */
+  triage: boolean;
+  /** Model file to load instead of the active (or built-in) one. */
+  modelPath: string | null;
+  auditRate: number;
+  auditWaitMs: number;
+  verdictTtlMs: number;
+  perTemplate: number;
+  novelGuard: boolean;
+  knownTtlMs: number;
+  escalatedMemoryMs: number;
+  suppressionTtlMs: number;
+  /** 0 turns scheduled retraining off. */
+  retrainIntervalMs: number;
+  retrainMinLabels: number;
+  /** How long a trained candidate runs in shadow before it may be promoted. 0 promotes at once. */
+  shadowPeriodMs: number;
+  shadowMinEvidence: number;
+  shadowMaxMs: number;
+  /** Directory with a human-labelled safety set the gate must pass, or null. */
+  safetySet: string | null;
+  regressionSuite: string | null;
+  incidentWindowMs: number;
+  humanLabelWeight: number;
+  recallTarget: number;
+  python: string;
+  /** How long a workspace's lease lasts without renewal, and how often its owner renews it. */
+  leaseTtlMs: number;
+  leaseRenewMs: number;
+  /** Most workspaces one worker holds at once. */
+  maxWorkspacesPerWorker: number;
+  /** A workspace with no work for this long is saved, released and dropped from memory. */
+  idleUnloadMs: number;
+  /** Daily decider spend per workspace, in USD; null = no cap. */
+  jevDailyBudgetUsd: number | null;
 }
 
 const UNITS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
@@ -54,21 +96,47 @@ function duration(env: NodeJS.ProcessEnv, name: string, fallback: string): numbe
   }
 }
 
+function num(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${name} must be a number from ${min} to ${max}, got ${JSON.stringify(raw)}`);
+  return n;
+}
+
+function bool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "on", "yes"].includes(raw)) return true;
+  if (["0", "false", "off", "no"].includes(raw)) return false;
+  throw new Error(`${name} must be on or off, got ${JSON.stringify(env[name])}`);
+}
+
 function list(raw: string | undefined): string[] | null {
   if (raw === undefined || raw.trim() === "") return null;
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const sync = (env.CLOUDFRIEND_SYNCHRONOUS ?? "FULL").toUpperCase();
-  if (sync !== "FULL" && sync !== "NORMAL") throw new Error("CLOUDFRIEND_SYNCHRONOUS must be FULL or NORMAL");
+  const databaseUrl = env.CLOUDFRIEND_DATABASE_URL || env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("CLOUDFRIEND_DATABASE_URL is not set: cloudfriend stores everything in Postgres (e.g. postgres://user:password@host:5432/cloudfriend). DATABASE_URL works too.");
+  }
+  const role = (env.CLOUDFRIEND_ROLE || "all").trim().toLowerCase();
+  if (role !== "all" && role !== "web" && role !== "worker") throw new Error(`CLOUDFRIEND_ROLE must be all, web or worker, got ${JSON.stringify(env.CLOUDFRIEND_ROLE)}`);
+  const leaseTtlMs = duration(env, "CLOUDFRIEND_LEASE_TTL", "30s");
+  const leaseRenewMs = duration(env, "CLOUDFRIEND_LEASE_RENEW", "10s");
+  if (leaseRenewMs <= 0 || leaseRenewMs >= leaseTtlMs) throw new Error("CLOUDFRIEND_LEASE_RENEW must be shorter than CLOUDFRIEND_LEASE_TTL");
+  const budget = env.CLOUDFRIEND_JEV_DAILY_BUDGET_USD;
   return {
+    role,
     port: int(env, "PORT", 8080, 0),
     host: env.HOST || "0.0.0.0",
     dataDir: path.resolve(env.CLOUDFRIEND_DATA_DIR || "./data"),
+    databaseUrl,
+    dbPool: int(env, "CLOUDFRIEND_DB_POOL", 10),
     adminKey: env.CLOUDFRIEND_ADMIN_KEY ?? "",
     commitWindowMs: duration(env, "CLOUDFRIEND_COMMIT_WINDOW", "2ms"),
-    synchronous: sync,
     maxQueue: int(env, "CLOUDFRIEND_MAX_QUEUE", 1_000_000),
     maxBodyBytes: int(env, "CLOUDFRIEND_MAX_BODY_BYTES", 1_048_576),
     batchSize: int(env, "CLOUDFRIEND_BATCH_SIZE", 100),
@@ -76,9 +144,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deciderConcurrency: int(env, "CLOUDFRIEND_DECIDER_CONCURRENCY", 2),
     retentionMs: duration(env, "CLOUDFRIEND_RETENTION", "7d"),
     cleanupIntervalMs: duration(env, "CLOUDFRIEND_CLEANUP_INTERVAL", "1m"),
-    decider: env.CLOUDFRIEND_DECIDER || "openrouter",
+    decider: env.CLOUDFRIEND_DECIDER || "jev",
     actions: list(env.CLOUDFRIEND_ACTIONS),
     adapterDir: env.CLOUDFRIEND_ADAPTER_DIR ? path.resolve(env.CLOUDFRIEND_ADAPTER_DIR) : null,
     pollMs: duration(env, "CLOUDFRIEND_POLL_INTERVAL", "200ms"),
+    triage: bool(env, "CLOUDFRIEND_TRIAGE", true),
+    modelPath: env.CLOUDFRIEND_MODEL ? path.resolve(env.CLOUDFRIEND_MODEL) : null,
+    auditRate: num(env, "CLOUDFRIEND_AUDIT_RATE", 0.01, 0, 1),
+    auditWaitMs: duration(env, "CLOUDFRIEND_AUDIT_WAIT", "5m"),
+    verdictTtlMs: duration(env, "CLOUDFRIEND_VERDICT_TTL", "15m"),
+    perTemplate: int(env, "CLOUDFRIEND_EXAMPLES_PER_TEMPLATE", 3),
+    novelGuard: bool(env, "CLOUDFRIEND_NOVEL_ERRORS", true),
+    knownTtlMs: /^(off|0)$/i.test(env.CLOUDFRIEND_ESCALATED_TTL ?? "") ? 0 : duration(env, "CLOUDFRIEND_ESCALATED_TTL", "7d"),
+    escalatedMemoryMs: duration(env, "CLOUDFRIEND_ESCALATED_MEMORY", "90d"),
+    suppressionTtlMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SUPPRESSION_TTL ?? "") ? 0 : duration(env, "CLOUDFRIEND_SUPPRESSION_TTL", "30d"),
+    retrainIntervalMs: /^(off|0)$/i.test(env.CLOUDFRIEND_RETRAIN_INTERVAL ?? "") ? 0 : duration(env, "CLOUDFRIEND_RETRAIN_INTERVAL", "24h"),
+    retrainMinLabels: int(env, "CLOUDFRIEND_RETRAIN_MIN_LABELS", 200),
+    shadowPeriodMs: /^(off|0)$/i.test(env.CLOUDFRIEND_SHADOW_PERIOD ?? "") ? 0 : duration(env, "CLOUDFRIEND_SHADOW_PERIOD", "24h"),
+    shadowMinEvidence: int(env, "CLOUDFRIEND_SHADOW_MIN_EVIDENCE", 200, 0),
+    shadowMaxMs: duration(env, "CLOUDFRIEND_SHADOW_MAX", "7d"),
+    safetySet: env.CLOUDFRIEND_SAFETY_SET ? path.resolve(env.CLOUDFRIEND_SAFETY_SET) : null,
+    regressionSuite: env.CLOUDFRIEND_REGRESSION_SUITE ? path.resolve(env.CLOUDFRIEND_REGRESSION_SUITE) : null,
+    incidentWindowMs: duration(env, "CLOUDFRIEND_INCIDENT_WINDOW", "30m"),
+    humanLabelWeight: num(env, "CLOUDFRIEND_HUMAN_LABEL_WEIGHT", 5, 0, 1000),
+    recallTarget: num(env, "CLOUDFRIEND_RECALL_TARGET", 0.995, 0.5, 1),
+    python: env.CLOUDFRIEND_PYTHON || "python3",
+    leaseTtlMs,
+    leaseRenewMs,
+    maxWorkspacesPerWorker: int(env, "CLOUDFRIEND_MAX_WORKSPACES_PER_WORKER", 200),
+    idleUnloadMs: duration(env, "CLOUDFRIEND_IDLE_UNLOAD", "10m"),
+    jevDailyBudgetUsd: budget === undefined || budget.trim() === "" ? null : num(env, "CLOUDFRIEND_JEV_DAILY_BUDGET_USD", 0, 0, 1e9),
   };
 }

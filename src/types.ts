@@ -14,6 +14,28 @@ export interface CloudfriendEvent {
   external_id?: string;
   type?: string;
   group_key?: string;
+  /** Triage results, when the classifier ran: user id found in the event, score and route. */
+  user?: string;
+  score?: number;
+  route?: string;
+  /**
+   * Set when the classifier passed this event on to the decider: its score (deciders should
+   * not show it to a model they learn from), how many near-identical events in this batch
+   * share its verdict, and what is known about its kind of event (counts include events the
+   * classifier dropped).
+   */
+  triage?: { score: number; similar: number; context?: TemplateContext | null };
+}
+
+export interface TemplateContext {
+  seen_total: number;
+  last_1m: number;
+  last_10m: number;
+  last_hour: number;
+  usual_per_hour: number;
+  first_seen_min_ago: number;
+  service_events_10m?: number;
+  service_errors_10m?: number;
 }
 
 export type Severity = "low" | "medium" | "high" | "critical";
@@ -24,13 +46,46 @@ export interface FlagDraft {
   reason: string;
   severity: Severity;
   event_ids: string[];
+  /** Id of an open flag these events continue: they are added to it and nobody is notified again. */
+  update?: string;
+}
+
+/**
+ * Whether one event deserves attention, separate from whether to notify about it. A
+ * duplicate symptom of an open incident is `relevant` even though it raises no new flag.
+ * Only explicit judgments become training labels; `uncertain` or a missing judgment never does.
+ */
+export interface Judgment {
+  event_id: string;
+  relevance: "relevant" | "benign" | "uncertain";
+}
+
+/** What a decider returns: flags, optionally a judgment per event, and a record of the call. */
+export interface Decision {
+  flags: FlagDraft[];
+  judgments?: Judgment[];
+  /**
+   * Kept with the labels it produced, so every label can be traced to the exact call.
+   * `cost_usd`: what the call cost, when the provider reports it; counted against the
+   * workspace's daily budget (CLOUDFRIEND_JEV_DAILY_BUDGET_USD).
+   */
+  record?: { model?: string; prompt?: string; response?: string; cost_usd?: number };
 }
 
 /** A stored flag. `id` is stable, so receivers can use it to ignore repeat deliveries. */
 export interface Flag extends FlagDraft {
   id: string;
   created_at: string;
+  /** The decider that raised it, or `classifier` when the classifier escalated on its own. */
   decider: string;
+  /** Where it is in the queue: open, acknowledged, resolved, confirmed or false_positive. */
+  status?: string;
+  /** Events behind the flag, including ones added later by a cached verdict. */
+  event_count?: number;
+  /** User ids found in the flag's events, for linking to other sources. */
+  users?: string[];
+  updated_at?: string;
+  note?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,12 +129,24 @@ export interface SourceAdapter {
 export interface DeciderAdapter {
   /** Return false to stay disabled, e.g. when a required env var is missing. */
   enabled?(env: NodeJS.ProcessEnv): boolean;
-  decide(events: CloudfriendEvent[], ctx: DeciderContext): Promise<FlagDraft[]>;
+  /** Return flag drafts (v0) or a Decision with per-event judgments. */
+  decide(events: CloudfriendEvent[], ctx: DeciderContext): Promise<FlagDraft[] | Decision>;
 }
 
 export interface DeciderContext {
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
+  /** Flags still in the queue, so the decider can say an event continues one instead of raising another. */
+  openFlags?: { id: string; reason: string; severity: Severity }[];
+  /** The workspace the batch belongs to. A batch never mixes workspaces. */
+  workspace?: string;
+}
+
+/** Accept both decider return shapes. */
+export function toDecision(out: FlagDraft[] | Decision): Decision {
+  if (Array.isArray(out)) return { flags: out };
+  if (out && Array.isArray(out.flags)) return out;
+  throw new Error("decide() must return an array of flags or { flags, judgments }");
 }
 
 /** An action does something with each flag. Throw (or return false) to have it retried. */
@@ -87,6 +154,13 @@ export interface ActionAdapter {
   /** Return false to stay disabled, e.g. when its URL isn't configured. */
   enabled?(env: NodeJS.ProcessEnv): boolean;
   run(flag: Flag, ctx: ActionContext): Promise<boolean | void>;
+  /**
+   * Check a destination's settings before they are saved: return the config to store, or throw
+   * with a message a person can act on. Without it, the config is stored as given.
+   */
+  validate?(config: Record<string, unknown>, ctx: { env: NodeJS.ProcessEnv }): Promise<Record<string, unknown>>;
+  /** Send a clearly labelled test message. Throw on failure, with a status-only message. */
+  test?(ctx: Omit<ActionContext, "events">): Promise<void>;
 }
 
 export interface ActionContext {
@@ -94,6 +168,11 @@ export interface ActionContext {
   events: CloudfriendEvent[];
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
+  /**
+   * The destination's settings (destinations.config), e.g. { url, signing_secret }. Absent when
+   * the action runs from environment variables, as in v0.
+   */
+  config?: Record<string, unknown>;
 }
 
 // Identity helpers so adapter files get type checking without importing interfaces by name.
