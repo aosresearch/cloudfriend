@@ -456,6 +456,23 @@ describe("decider budget", () => {
     assert.equal(d.calls.filter((c) => c.workspace === "ws_c").length, 0, "a workspace's own budget overrides the global one");
     assert.equal(await count(cf, "flags WHERE workspace_id = 'ws_c' AND decider = 'classifier'"), 1);
   });
+
+  it("never lowers the spend it counts within a day when it reads the usage again", async () => {
+    const d = recorder((events) => ({ flags: [], judgments: events.map((e) => ({ event_id: e.id, relevance: "benign" as const })), record: { model: "m", cost_usd: 0.6 } }));
+    // leaseRenewMs 1: every pass renews the lease and reads settings and spend again.
+    cf = await makeCloudfriend({ decider: d.adapter, config: { ...TRIAGE, modelPath: tinyModel(), verdictTtlMs: 0, jevDailyBudgetUsd: 1, leaseRenewMs: 1 } });
+    for (const msg of ["inventory sync crashed", "email queue stalled"]) {
+      await cf.post("app", { level: "error", message: msg });
+      await run(cf);
+    }
+    assert.equal(d.calls.length, 2);
+    // A read that predates the second call's commit, as a renewal running alongside it would see.
+    await cf.db.query("UPDATE usage SET jev_spend_usd = 0.6 WHERE workspace_id = $1", [WS]);
+    await cf.post("app", { level: "error", message: "checkout totals mismatch" });
+    await run(cf);
+    await run(cf);
+    assert.equal(d.calls.length, 2, "still over budget");
+  });
 });
 
 describe("roles and the backlog", () => {

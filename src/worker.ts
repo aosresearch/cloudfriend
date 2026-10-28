@@ -400,8 +400,13 @@ export class Worker {
         const o = this.#owned.get(ws);
         if (!o) continue;
         o.settings = s.settings;
-        o.spend = s.spend;
-        o.spendDay = day;
+        // Spend only grows within a day. The read may predate a decision this worker committed (and
+        // added to o.spend) meanwhile: taking it as is would under-count the budget until the next read.
+        if (o.spendDay === day) o.spend = Math.max(o.spend, s.spend);
+        else if (o.spendDay < day) {
+          o.spend = s.spend;
+          o.spendDay = day;
+        } // else: the day ended during the read; #deciderFor already started the new one
       }
       if (!unloadIdle) return;
       const idleMs = this.#o.idleUnloadMs ?? 600_000;
